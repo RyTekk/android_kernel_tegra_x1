@@ -25,6 +25,7 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/highmem.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/file.h>
@@ -54,6 +55,9 @@
 #define user_ptr(p) (p)
 #endif
 
+/* support up to 4K (3840x2150) with double buffering */
+#define DEFAULT_FBMEM_SIZE	(SZ_64M + SZ_8M)
+
 struct tegra_fb_info {
 	struct tegra_dc_win	win;
 	struct tegra_dc_win	blank_win;
@@ -62,6 +66,7 @@ struct tegra_fb_info {
 	bool			valid;
 
 	struct resource		*fb_mem;
+	size_t			fb_size;
 
 	int			xres;
 	int			yres;
@@ -70,6 +75,8 @@ struct tegra_fb_info {
 
 	struct fb_videomode	mode;
 	phys_addr_t		phys_start;
+	int			kuse_count;
+	int			mmap_count;
 
 	char __iomem		*blank_base;	/* Virtual address */
 	phys_addr_t		blank_start;
@@ -77,6 +84,43 @@ struct tegra_fb_info {
 
 /* palette array used by the fbcon */
 static u32 pseudo_palette[16];
+
+int tegra_fb_release_fbmem(struct tegra_fb_info *info)
+{
+	if (info && info->phys_start) {
+		/* do not release the framebuffer if:
+		 * 1) kernel is using (e.g. fbcon)
+		 * 2) user space has mmap
+		 */
+		if (info->kuse_count || info->mmap_count)
+			return -EBUSY;
+
+		dma_free_writecombine(&info->ndev->dev,
+				info->fb_size,
+				info->win.virt_addr,
+				info->phys_start);
+
+		info->phys_start = 0;
+		info->win.virt_addr = NULL;
+	}
+	return 0;
+}
+
+static int tegra_fb_open(struct fb_info *fb_info, int user)
+{
+	struct tegra_fb_info *info = fb_info->par;
+	if (user == 0)
+		info->kuse_count++;
+	return 0;
+}
+
+static int tegra_fb_release(struct fb_info *fb_info, int user)
+{
+	struct tegra_fb_info *info = fb_info->par;
+	if (user == 0)
+		info->kuse_count--;
+	return 0;
+}
 
 static int tegra_fb_check_var(struct fb_var_screeninfo *var,
 			      struct fb_info *info)
@@ -322,9 +366,7 @@ static int tegra_fb_blank(int blank, struct fb_info *info)
 	case FB_BLANK_UNBLANK:
 		dev_info(&tegra_fb->ndev->dev, "unblank\n");
 		tegra_dc_enable(dc);
-#ifdef CONFIG_FRAMEBUFFER_CONSOLE
-		tegra_dc_cursor_resume(dc);
-#endif
+
 		if (!dc->suspended && dc->blanked &&
 		    !tegra_dc_restore(dc)) {
 			struct tegra_dc_win *win = &tegra_fb->win;
@@ -356,7 +398,9 @@ static int tegra_fb_blank(int blank, struct fb_info *info)
 		if (!dc->suspended && dc->enabled)
 			tegra_fb->curr_xoffset = -1;
 		tegra_dc_disable(dc);
+#ifdef CONFIG_FRAMEBUFFER_CONSOLE
 		dc->blanked = true;
+#endif
 		return 0;
 
 	default:
@@ -570,11 +614,19 @@ int tegra_fb_update_modelist(struct tegra_dc *dc, int fblistindex)
 	return index;
 }
 
-static int tegra_fb_get_mode(struct tegra_dc *dc)
+static int tegra_fb_get_mode_refresh(struct tegra_dc *dc)
 {
 	if (!dc->fb->info->mode)
 		return -1;
 	return dc->fb->info->mode->refresh;
+}
+
+struct fb_videomode *tegra_fb_get_mode(struct tegra_dc *dc)
+{
+	if (dc && dc->fb && dc->fb->info && dc->fb->info->mode)
+		return dc->fb->info->mode;
+	else
+		return NULL;
 }
 
 static int tegra_fb_set_mode(struct tegra_dc *dc, int fps)
@@ -609,8 +661,24 @@ static int tegra_fb_set_mode(struct tegra_dc *dc, int fps)
 	return -EIO;
 }
 
+static int tegra_fb_mmap(struct fb_info *fb_info, struct vm_area_struct *vma)
+{
+	struct tegra_fb_info *info = fb_info->par;
+
+	if (info->phys_start) {
+		info->mmap_count++;
+		return dma_mmap_writecombine(&info->ndev->dev, vma,
+				info->win.virt_addr,
+				info->phys_start,
+				info->fb_size);
+	}
+	return -ENOMEM;
+}
+
 static struct fb_ops tegra_fb_ops = {
 	.owner = THIS_MODULE,
+	.fb_open = tegra_fb_open,
+	.fb_release = tegra_fb_release,
 	.fb_check_var = tegra_fb_check_var,
 	.fb_set_par = tegra_fb_set_par,
 	.fb_setcmap = tegra_fb_setcmap,
@@ -623,6 +691,7 @@ static struct fb_ops tegra_fb_ops = {
 #ifdef CONFIG_COMPAT
 	.fb_compat_ioctl = tegra_fb_ioctl,
 #endif
+	.fb_mmap = tegra_fb_mmap,
 };
 
 /* Enabling the pan_display by resetting the cache of offset */
@@ -635,10 +704,12 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 			      struct fb_monspecs *specs,
 			      bool (*mode_filter)(const struct tegra_dc *dc,
 						  struct fb_videomode *mode))
+
 {
 	struct fb_event event;
 	int i;
-	int blank = FB_BLANK_UNBLANK;
+	int blank = FB_BLANK_NORMAL;
+	struct tegra_dc *dc = fb_info->win.dc;
 
 	mutex_lock(&fb_info->info->lock);
 	fb_destroy_modedb(fb_info->info->monspecs.modedb);
@@ -652,14 +723,17 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 	fb_info->info->state = FBINFO_STATE_SUSPENDED;
 
 	if (specs == NULL) {
+		struct tegra_dc_mode mode;
 		memset(&fb_info->info->monspecs, 0x0,
 		       sizeof(fb_info->info->monspecs));
+		memset(&mode, 0x0, sizeof(mode));
 
 		/*
 		 * reset video mode properties to prevent garbage being
 		 * displayed on 'mode' device.
 		 */
 		fb_info->info->mode = (struct fb_videomode*) NULL;
+
 #ifdef CONFIG_FRAMEBUFFER_CONSOLE
 		blank = FB_BLANK_POWERDOWN;
 		console_lock();
@@ -668,7 +742,6 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 		fb_notifier_call_chain(FB_EVENT_BLANK, &event);
 		console_unlock();
 #endif
-
 		/* For L4T - After the next hotplug, framebuffer console will
 		 * use the old variable screeninfo by default, only video-mode
 		 * settings will be overwritten as per monitor connected.
@@ -677,6 +750,7 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 		memset(&fb_info->info->var, 0x0, sizeof(fb_info->info->var));
 #endif /* CONFIG_FRAMEBUFFER_CONSOLE */
 
+		tegra_dc_set_mode(dc, &mode);
 		mutex_unlock(&fb_info->info->lock);
 		return;
 	}
@@ -687,7 +761,7 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 
 	for (i = 0; i < specs->modedb_len; i++) {
 		if (mode_filter) {
-			if (mode_filter(fb_info->win.dc, &specs->modedb[i]))
+			if (mode_filter(dc, &specs->modedb[i]))
 				fb_add_videomode(&specs->modedb[i],
 						 &fb_info->info->modelist);
 		} else {
@@ -696,6 +770,11 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 		}
 	}
 
+	if (dc->out_ops->vrr_update_monspecs)
+		dc->out_ops->vrr_update_monspecs(dc,
+			&fb_info->info->modelist);
+
+	event.info = fb_info->info;
 	/* Restoring to state running. */
 	fb_info->info->state =  FBINFO_STATE_RUNNING;
 #ifdef CONFIG_FRAMEBUFFER_CONSOLE
@@ -704,6 +783,8 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 	fb_videomode_to_var(&fb_info->info->var, &specs->modedb[0]);
 	fb_notifier_call_chain(FB_EVENT_MODE_CHANGE_ALL, &event);
 	fb_notifier_call_chain(FB_EVENT_NEW_MODELIST, &event);
+	fb_notifier_call_chain(FB_EVENT_BLANK, &event);
+	blank = FB_BLANK_UNBLANK;
 	fb_notifier_call_chain(FB_EVENT_BLANK, &event);
 	console_unlock();
 #else
@@ -721,8 +802,17 @@ void tegra_fb_update_fix(struct tegra_fb_info *fb_info,
 
 	mutex_lock(&fb_info->info->lock);
 
-	fix->capabilities = (tegra_edid_get_cd_flag(dc_edid) <<
-			FB_CAP_FOURCC) & FB_CAP_DC_MASK;
+	/* FB_CAP_* and TEGRA_DC_* color depth flags are shifted by 1 */
+	BUILD_BUG_ON((TEGRA_DC_Y420_30 << 1) != FB_CAP_Y420_DC_30);
+	BUILD_BUG_ON((TEGRA_DC_RGB_48 << 1) != FB_CAP_RGB_DC_48);
+	fix->capabilities = (tegra_edid_get_cd_flag(dc_edid) << 1);
+	if (tegra_edid_get_ex_hdr_cap(dc_edid))
+		fix->capabilities |= FB_CAP_HDR;
+	if (tegra_edid_support_yuv422(dc_edid))
+		fix->capabilities |= FB_CAP_Y422;
+	if (tegra_edid_support_yuv444(dc_edid))
+		fix->capabilities |= FB_CAP_Y444;
+	fix->capabilities |= tegra_edid_get_quant_cap(dc_edid);
 
 	fix->max_clk_rate = tegra_edid_get_max_clk_rate(dc_edid);
 
@@ -746,7 +836,7 @@ static ssize_t nvdps_show(struct device *device,
 	struct platform_device *ndev = to_platform_device(device);
 	struct tegra_dc *dc = platform_get_drvdata(ndev);
 
-	refresh_rate = tegra_fb_get_mode(dc);
+	refresh_rate = tegra_fb_get_mode_refresh(dc);
 	return snprintf(buf, PAGE_SIZE, "%d\n", refresh_rate);
 }
 
@@ -862,6 +952,28 @@ struct tegra_dc_win *tegra_fb_get_blank_win(struct tegra_fb_info *tegra_fb)
 	return &tegra_fb->blank_win;
 }
 
+static void tegra_fb_copy_fbmem(void *to, size_t size, struct resource *fb)
+{
+	size_t i;
+	phys_addr_t from = fb->start;
+	size = min_t(size_t, size, resource_size(fb));
+
+	if (!from || size <= 0)
+		return;
+
+	BUG_ON(PAGE_ALIGN((unsigned long)to) != (unsigned long)to);
+	BUG_ON(PAGE_ALIGN(from) != from);
+	BUG_ON(PAGE_ALIGN(size) != size);
+	BUG_ON(!pfn_valid(page_to_pfn(phys_to_page(from))));
+
+	for (i = 0; i < size; i += PAGE_SIZE) {
+		struct page *page = phys_to_page(from + i);
+		void *from_virt = kmap(page);
+		memcpy(to + i, from_virt, PAGE_SIZE);
+		kunmap(page);
+	}
+}
+
 struct tegra_fb_info *tegra_fb_register(struct platform_device *ndev,
 					struct tegra_dc *dc,
 					struct tegra_fb_data *fb_data,
@@ -870,7 +982,7 @@ struct tegra_fb_info *tegra_fb_register(struct platform_device *ndev,
 {
 	struct fb_info *info;
 	struct tegra_fb_info *tegra_fb;
-	void __iomem *fb_base = NULL;
+	void *fb_base = NULL;
 	phys_addr_t fb_size = 0;
 	int ret = 0;
 	int mode_idx;
@@ -898,21 +1010,19 @@ struct tegra_fb_info *tegra_fb_register(struct platform_device *ndev,
 
 	tegra_fb->win.idx = fb_data->win;
 
-	if (fb_mem) {
-		fb_size = resource_size(fb_mem);
-		tegra_fb->phys_start = fb_mem->start;
-
-		/* If the caller provided virtual address, meaning the buffer
-		 * is already mapped, just use that address */
-		fb_base = virt_addr ? virt_addr :
-			ioremap_wc(tegra_fb->phys_start, fb_size);
-		if (!fb_base) {
-			dev_err(&ndev->dev, "fb can't be mapped\n");
-			ret = -EBUSY;
-			goto err_free;
-		}
-		tegra_fb->valid = true;
+	fb_size = fb_data->fbmem_size ? : DEFAULT_FBMEM_SIZE;
+	fb_base = dma_alloc_writecombine(&ndev->dev, fb_size,
+			&tegra_fb->phys_start, GFP_KERNEL);
+	if (!fb_base) {
+		dev_err(&ndev->dev, "failed to allocate framebuffer\n");
+		ret = -EBUSY;
+		goto err_free;
 	}
+
+	/* copy content from the bootloader framebuffer */
+	tegra_fb_copy_fbmem(fb_base, fb_size, fb_mem);
+	tegra_fb->fb_size = fb_size;
+	tegra_fb->valid = true;
 
 	dma_set_attr(DMA_ATTR_WRITE_COMBINE, &attrs);
 	tegra_fb->blank_base = dma_alloc_attrs(&ndev->dev,
@@ -923,7 +1033,7 @@ struct tegra_fb_info *tegra_fb_register(struct platform_device *ndev,
 	if (!tegra_fb->blank_base) {
 		dev_err(&ndev->dev, "failed to allocate blank buffer\n");
 		ret = -EBUSY;
-		goto err_free;
+		goto err_free_fbmem;
 	}
 
 	info->fix.line_length = fb_data->xres * fb_data->bits_per_pixel / 8;
@@ -997,6 +1107,9 @@ struct tegra_fb_info *tegra_fb_register(struct platform_device *ndev,
 		}
 	}
 
+	if (dc->out_ops->vrr_update_monspecs)
+		dc->out_ops->vrr_update_monspecs(dc, &info->modelist);
+
 	if (fb_mem)
 		tegra_fb_set_par(info);
 
@@ -1032,6 +1145,8 @@ err_iounmap_fb:
 		       tegra_fb->blank_start, &attrs);
 	if (fb_base)
 		iounmap(fb_base);
+err_free_fbmem:
+	tegra_fb_release_fbmem(tegra_fb);
 err_free:
 	framebuffer_release(info);
 err:
@@ -1049,8 +1164,8 @@ void tegra_fb_unregister(struct tegra_fb_info *fb_info)
 	dma_free_attrs(dev, BLANK_LINE_SIZE, fb_info->blank_base,
 		       fb_info->blank_start, &attrs);
 
+	tegra_fb_release_fbmem(fb_info);
 	unregister_framebuffer(info);
-
 	iounmap(info->screen_base);
 	framebuffer_release(info);
 }

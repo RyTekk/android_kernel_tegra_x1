@@ -19,10 +19,10 @@
 #include <linux/slab.h>
 #include "vhost.h"
 #include "../host1x/host1x.h"
-#include "../host1x/host1x_cdma.h"
 #include "../nvhost_job.h"
 #include "../dev.h"
 #include "../bus_client.h"
+#include "../nvhost_cdma.h"
 
 static int vhost_pb_sendrecv(struct tegra_vhost_cmd_msg *msg, size_t size_in,
 		size_t size_out)
@@ -99,7 +99,7 @@ static void vhost_cdma_start(struct nvhost_cdma *cdma)
 		return;
 	}
 
-	cdma->last_put = cdma_pb_op().putptr(&cdma->push_buffer);
+	cdma->last_put = nvhost_push_buffer_putptr(&cdma->push_buffer);
 	cdma->running = true;
 }
 
@@ -131,7 +131,7 @@ static void vhost_cdma_kick(struct nvhost_cdma *cdma)
 
 	job = list_entry(cdma->sync_queue.prev, struct nvhost_job, list);
 
-	put = cdma_pb_op().putptr(&cdma->push_buffer);
+	put = nvhost_push_buffer_putptr(&cdma->push_buffer);
 
 	if (put != cdma->last_put) {
 		u32 start = cdma->last_put - cdma->push_buffer.dma_addr;

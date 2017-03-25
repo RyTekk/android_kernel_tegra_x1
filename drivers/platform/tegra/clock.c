@@ -41,7 +41,8 @@
 #include <linux/sched.h>
 
 #include <mach/edp.h>
-#include <mach/tegra_emc.h>
+
+#include <linux/platform/tegra/tegra_emc.h>
 
 #include "board.h"
 #include <linux/platform/tegra/clock.h>
@@ -137,7 +138,7 @@ static struct clk *clk_init_parse_clk_id(struct device_node *table_np,
 	if (ret)
 		return ERR_PTR(ret);
 	if (!val)
-		return 0;
+		return NULL;
 
 	c = get_clock_by_id(val);
 	if (!c)
@@ -1335,9 +1336,12 @@ static int __init tegra_dvfs_rail_start_scaling(void)
 	unsigned long flags, rate;
 	struct clk *c = tegra_get_clock_by_name("cpu");
 	struct clk *dfll_cpu = tegra_get_clock_by_name("dfll_cpu");
+#ifdef CONFIG_PM_SLEEP
 	bool init_dfll_first = tegra_dvfs_is_dfll_bypass() ||
 		tegra_platform_is_fpga();
-
+#else
+    bool init_dfll_first = tegra_platform_is_fpga();
+#endif
 	BUG_ON(!c);
 	clk_lock_save(c, &flags);
 
@@ -1568,6 +1572,24 @@ unsigned long tegra_clk_measure_input_freq(void)
 
 	return osc_freq;
 }
+
+/* Tegra main rate (CLK_M) sysfs node */
+static ssize_t tegra_main_rate_show(struct kobject *kobj,
+				    struct kobj_attribute *attr, char *buf)
+{
+	struct clk *c = tegra_get_clock_by_name("clk_m");
+
+	if (c)
+		return sprintf(buf, "%lu\n", clk_get_rate(c));
+	return sprintf(buf, "N/A\n");
+}
+static struct kobj_attribute tegra_main_rate = __ATTR_RO(tegra_main_rate);
+
+static int __init tegra_main_rate_sysfs_init(void)
+{
+	return sysfs_create_file(kernel_kobj, &tegra_main_rate.attr);
+}
+late_initcall(tegra_main_rate_sysfs_init);
 
 
 #ifdef CONFIG_DEBUG_FS

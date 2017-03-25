@@ -3,7 +3,7 @@
  *
  * Tegra pulse-width-modulation controller driver
  *
- * Copyright (c) 2010, NVIDIA Corporation.
+ * Copyright (c) 2010-2016, NVIDIA CORPORATION, All rights reserved.
  * Based on arch/arm/plat-mxc/pwm.c by Sascha Hauer <s.hauer@pengutronix.de>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -36,10 +36,6 @@
 #define PWM_DUTY_SHIFT	16
 #define PWM_SCALE_WIDTH	13
 #define PWM_SCALE_SHIFT	0
-
-/* ns period */
-#define HZ_10 100000000
-#define HZ_30K 33333
 
 #define NUM_PWM 4
 
@@ -132,12 +128,12 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	 * per (1 << PWM_DUTY_WIDTH) cycles and make sure to round to the
 	 * nearest integer during division.
 	 */
-	c = duty_ns * ((1 << PWM_DUTY_WIDTH) - 1) + period_ns / 2;
+	c = duty_ns * (1 << PWM_DUTY_WIDTH) + period_ns / 2;
 	do_div(c, period_ns);
 
 	val = (u32)c << PWM_DUTY_SHIFT;
 
-	if (pc->pretty_good_algo && (period_ns < HZ_10) && (period_ns > HZ_30K)) {
+	if (pc->pretty_good_algo) {
 		rate = tegra_get_optimal_rate(pc, duty_ns, period_ns);
 		if (rate >= 0)
 			goto timing_done;
@@ -177,11 +173,6 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	 */
 	if (rate >> PWM_SCALE_WIDTH)
 		return -EINVAL;
-	/* Due to the PWM divider is zero-based, we need to minus 1 to get
-	 * desired frequency
-	 */
-	if (rate > 0)
-		rate--;
 
 timing_done:
 	val |= rate << PWM_SCALE_SHIFT;

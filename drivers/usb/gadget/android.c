@@ -36,6 +36,7 @@
 #include "f_nvusb.c"
 #include "f_fs.c"
 #include "f_audio_source.c"
+#include "f_midi.c"
 #include "f_mass_storage.c"
 #include "f_mtp.c"
 #include "f_accessory.c"
@@ -45,14 +46,11 @@
 #include "f_ecm.c"
 #include "f_eem.c"
 #include "f_ncm.c"
+#include "u_ether.c"
 #ifdef CONFIG_TARGET_CORE
 #define UASP_ANDROID_GADGET
 #include "tcm_usb_gadget.c"
 #endif
-#ifdef CONFIG_USB_TEGRA_DIGITIZER
-#include "f_digitizer.c"
-#endif
-#include "u_ether.c"
 
 MODULE_AUTHOR("Mike Lockwood");
 MODULE_DESCRIPTION("Android Composite USB Driver");
@@ -64,6 +62,12 @@ static const char longname[] = "Gadget Android";
 /* Default vendor and product IDs, overridden by userspace */
 #define VENDOR_ID		0x18D1
 #define PRODUCT_ID		0x0001
+
+/* f_midi configuration */
+#define MIDI_INPUT_PORTS    1
+#define MIDI_OUTPUT_PORTS   1
+#define MIDI_BUFFER_SIZE    256
+#define MIDI_QUEUE_LENGTH   32
 
 struct android_usb_function {
 	char *name;
@@ -587,49 +591,6 @@ static struct android_usb_function mtp_function = {
 	.bind_config	= mtp_function_bind_config,
 	.ctrlrequest	= mtp_function_ctrlrequest,
 };
-
-#ifdef CONFIG_USB_TEGRA_DIGITIZER
-#define MAX_TEGRA_DIGITIZER_DEV_NUM		1
-static int digitizer_function_init(struct android_usb_function *f,
-					struct usb_composite_dev *cdev)
-{
-	return tegra_digitizer_setup(cdev->gadget, MAX_TEGRA_DIGITIZER_DEV_NUM);
-}
-
-static void digitizer_function_cleanup(struct android_usb_function *f)
-{
-	tegra_digitizer_cleanup();
-}
-#define TEGRA_DIGITIZER_DEV_IDX		0
-static int digitizer_function_bind_config(struct android_usb_function *f,
-					struct usb_configuration *c)
-{
-	int ret;
-	ret = tegra_digitizer_bind_config(c, &digitizer_report_desc,
-					TEGRA_DIGITIZER_DEV_IDX);
-	if (ret) {
-		pr_info("%s: digitizer_function_bind_config digitizer failed: %d\n",
-					__func__, ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-static void digitizer_function_unbind_config(struct android_usb_function *f,
-					struct usb_configuration *c)
-{
-	tegra_digitizer_unbind_config();
-}
-
-static struct android_usb_function digitizer_function = {
-	.name		= "digitizer",
-	.init		= digitizer_function_init,
-	.cleanup	= digitizer_function_cleanup,
-	.bind_config	= digitizer_function_bind_config,
-	.unbind_config	= digitizer_function_unbind_config,
-};
-#endif
 
 /* PTP function is same as MTP with slightly different interface descriptor */
 static struct android_usb_function ptp_function = {
@@ -1369,6 +1330,60 @@ static struct android_usb_function nvusb_function = {
 	.bind_config	= nvusb_function_bind_config,
 };
 
+static int midi_function_init(struct android_usb_function *f,
+					struct usb_composite_dev *cdev)
+{
+	struct midi_alsa_config *config;
+
+	config = kzalloc(sizeof(struct midi_alsa_config), GFP_KERNEL);
+	f->config = config;
+	if (!config)
+		return -ENOMEM;
+	config->card = -1;
+	config->device = -1;
+	return 0;
+}
+
+static void midi_function_cleanup(struct android_usb_function *f)
+{
+	kfree(f->config);
+}
+
+static int midi_function_bind_config(struct android_usb_function *f,
+						struct usb_configuration *c)
+{
+	struct midi_alsa_config *config = f->config;
+
+	return f_midi_bind_config(c, SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1,
+			MIDI_INPUT_PORTS, MIDI_OUTPUT_PORTS, MIDI_BUFFER_SIZE,
+			MIDI_QUEUE_LENGTH, config);
+}
+
+static ssize_t midi_alsa_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct android_usb_function *f = dev_get_drvdata(dev);
+	struct midi_alsa_config *config = f->config;
+
+	/* print ALSA card and device numbers */
+	return sprintf(buf, "%d %d\n", config->card, config->device);
+}
+
+static DEVICE_ATTR(alsa, S_IRUGO, midi_alsa_show, NULL);
+
+static struct device_attribute *midi_function_attributes[] = {
+	&dev_attr_alsa,
+	NULL
+};
+
+static struct android_usb_function midi_function = {
+	.name		= "midi",
+	.init		= midi_function_init,
+	.cleanup	= midi_function_cleanup,
+	.bind_config	= midi_function_bind_config,
+	.attributes	= midi_function_attributes,
+};
+
 static struct android_usb_function *supported_functions[] = {
 	&ffs_function,
 	&acm_function,
@@ -1385,12 +1400,9 @@ static struct android_usb_function *supported_functions[] = {
 #ifdef CONFIG_TARGET_CORE
 	&uasp_function,
 #endif
-#ifdef CONFIG_USB_TEGRA_DIGITIZER
-	&digitizer_function,
-#endif
+	&midi_function,
 	NULL
 };
-
 
 static int android_init_functions(struct android_usb_function **functions,
 				  struct usb_composite_dev *cdev)

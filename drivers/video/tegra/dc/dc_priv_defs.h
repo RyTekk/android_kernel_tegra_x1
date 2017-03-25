@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Google, Inc.
  * Author: Erik Gilling <konkers@android.com>
  *
- * Copyright (c) 2010-2015, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2010-2016, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -35,7 +35,6 @@
 
 #include <mach/tegra_dc_ext.h>
 #include <linux/platform/tegra/isomgr.h>
-#include <linux/sysedp.h>
 
 #include "dc_reg.h"
 
@@ -55,6 +54,8 @@ static inline u32 ALL_UF_INT(void)
 	defined(CONFIG_ARCH_TEGRA_3x_SOC) || \
 	defined(CONFIG_ARCH_TEGRA_11x_SOC)
 	return WIN_A_UF_INT | WIN_B_UF_INT | WIN_C_UF_INT;
+#elif defined(CONFIG_TEGRA_NVDISPLAY)
+	return NVDISP_UF_INT;
 #else
 	return WIN_A_UF_INT | WIN_B_UF_INT | WIN_C_UF_INT | HC_UF_INT |
 		WIN_D_UF_INT | WIN_T_UF_INT;
@@ -126,10 +127,14 @@ struct tegra_dc_out_ops {
 	int (*ddc_disable)(struct tegra_dc *dc);
 	/* Enable/disable VRR */
 	void (*vrr_enable)(struct tegra_dc *dc, bool enable);
+	/* Mark VRR-compatible modes in fb_info->info->modelist */
+	void (*vrr_update_monspecs)(struct tegra_dc *dc,
+		struct list_head *head);
 	/* return if hpd asserted or deasserted */
 	bool (*hpd_state) (struct tegra_dc *dc);
 	/* Configure controller to receive hotplug events */
 	int (*hotplug_init)(struct tegra_dc *dc);
+	int (*set_hdr)(struct tegra_dc *dc);
 };
 
 struct tegra_dc_shift_clk_div {
@@ -173,6 +178,7 @@ struct tegra_dc {
 	struct tegra_dc_shift_clk_div	shift_clk_div;
 
 	u32				powergate_id;
+	int				sor_instance;
 
 	bool				connected;
 	bool				enabled;
@@ -200,8 +206,15 @@ struct tegra_dc {
 
 	struct tegra_dc_blend		blend;
 	int				n_windows;
-#ifdef CONFIG_TEGRA_DC_CMU
+	struct tegra_dc_hdr		hdr;
+
+#if defined(CONFIG_TEGRA_DC_CMU)
 	struct tegra_dc_cmu		cmu;
+#elif defined(CONFIG_TEGRA_DC_CMU_V2)
+	struct tegra_dc_lut		cmu;
+#endif
+
+#if defined(CONFIG_TEGRA_DC_CMU) || defined(CONFIG_TEGRA_DC_CMU_V2)
 	struct tegra_dc_cmu		cmu_shadow;
 	bool				cmu_dirty;
 	/* Is CMU set by bootloader */
@@ -252,6 +265,7 @@ struct tegra_dc {
 		u64			underflows_d;
 		u64			underflows_h;
 		u64			underflows_t;
+		u64			underflow_frames;
 	} stats;
 
 #ifdef CONFIG_TEGRA_DC_EXTENSIONS
@@ -302,8 +316,10 @@ struct tegra_dc {
 	bool	switchdev_registered;
 
 	struct notifier_block slgc_notifier;
-	struct sysedp_consumer *sysedpc;
 	bool	vedid;
 	u8	*vedid_data;
+	bool	hdr_cache_dirty;
+
+	u32 dbg_fe_count;
 };
 #endif

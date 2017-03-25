@@ -3,7 +3,7 @@
  *  providing keys and microphone audio functionality
  *
  * Copyright (C) 2014 Google, Inc.
- * Copyright (c) 2015, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2015-2016, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -48,6 +48,7 @@ MODULE_LICENSE("GPL v2");
 #define MSBC_AUDIO3_REPORT_ID 0xFB
 
 #define INPUT_REPORT_ID 2
+#define INPUT_EVT_INTR_DATA_ID 10
 
 #define KEYCODE_PRESENT_IN_AUDIO_PACKET_FLAG 0x80
 
@@ -59,13 +60,16 @@ MODULE_LICENSE("GPL v2");
 /* Define these all in one place so they stay in sync. */
 #define USE_RATE_MIN          8000
 #define USE_RATE_MAX          16000
+#define USE_RATE_MAX_PEPPER   8000
 #define USE_RATES_ARRAY      {USE_RATE_MIN}
 #define USE_RATES_MASK       (SNDRV_PCM_RATE_8000|SNDRV_PCM_RATE_16000)
+#define USE_RATES_MASK_PEPPER    SNDRV_PCM_RATE_8000
 
 #define MAX_FRAMES_PER_BUFFER  (8192)
 
 #define USE_CHANNELS_MIN   1
 #define USE_CHANNELS_MAX   2
+#define USE_CHANNELS_MAX_PEPPER   1
 #define USE_PERIODS_MIN    1
 #define USE_PERIODS_MAX    1024
 
@@ -124,6 +128,23 @@ const uint8_t msbc_sequence_table[NUM_SEQUENCES] = {0x08, 0x38, 0xc8, 0xf8};
 #define BYTES_PER_MSBC_FRAME \
 	(MSBC_PACKET1_BYTES + MSBC_PACKET2_BYTES + MSBC_PACKET3_BYTES)
 
+const uint8_t msbc_start_offset_in_packet[BLE_PACKETS_PER_MSBC_FRAME] = {
+	1, /* SBC header starts after 1 byte sequence num portion of H2 */
+	0,
+	0
+};
+const uint8_t msbc_start_offset_in_buffer[BLE_PACKETS_PER_MSBC_FRAME] = {
+	0,
+	MSBC_PACKET1_BYTES,
+	MSBC_PACKET1_BYTES + MSBC_PACKET2_BYTES
+};
+const uint8_t msbc_bytes_in_packet[BLE_PACKETS_PER_MSBC_FRAME] = {
+	/* includes the SBC header but not the sequence num or keycode */
+	MSBC_PACKET1_BYTES,
+	MSBC_PACKET2_BYTES,
+	MSBC_PACKET3_BYTES
+};
+
 struct fifo_packet {
 	uint8_t  type;
 	uint8_t  num_bytes;
@@ -144,13 +165,18 @@ struct fifo_packet {
 #define TIMER_STATE_DURING_DECODE    1
 #define TIMER_STATE_AFTER_DECODE     2
 
-static int packet_counter;
+/* move hid device, sound card into per device data structure */
+struct shdr_device {
+	struct hid_device	*hdev;
+	struct snd_card *shdr_card;
+};
 static int num_remotes;
-struct snd_card *atvr_card;
-static int dev;
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;  /* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;   /* ID for this card */
-static bool enable[SNDRV_CARDS] = {true, false};
+/* enable upto 5 sound cards for multiple remotes,controllers */
+static bool enable[SNDRV_CARDS] = {true, true, true, true, true, false};
+/* remember snd cards already in use */
+static bool cards_in_use[SNDRV_CARDS] = {false};
 /* Linux does not like NULL initialization. */
 static char *model[SNDRV_CARDS]; /* = {[0 ... (SNDRV_CARDS - 1)] = NULL}; */
 static int pcm_devs[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 1};
@@ -279,13 +305,6 @@ static const struct file_operations msbc_fops = {
 
 #endif
 
-/*
- * Static substream is needed so Bluetooth can pass encoded audio
- * to a running stream.
- * This also serves to enable or disable the decoding of audio in the callback.
- */
-static struct snd_pcm_substream *s_substream_for_btle;
-static DEFINE_SPINLOCK(s_substream_lock);
 
 struct simple_atomic_fifo {
 	/* Read and write cursors are modified by different threads. */
@@ -344,11 +363,20 @@ struct snd_atvr {
 	/* pointer to hid device */
 	struct hid_device *hdev;
 	struct mutex hdev_lock;
+
+	int card_index; /* sound card index */
+	/* count of packets received from this device */
+	int packet_counter;
+	spinlock_t s_substream_lock;
+	bool pcm_stopped;
 };
+
+#define TS_HOSTCMD_REPORT_SIZE 33
+#define JAR_HOSTCMD_REPORT_SIZE 19
 
 static int atvr_mic_ctrl(struct hid_device *hdev, bool enable)
 {
-	unsigned char report[] = {
+	unsigned char report[TS_HOSTCMD_REPORT_SIZE] = {
 		0x04, 0x0e, 0x00, 0x01,
 		0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00,
@@ -356,10 +384,13 @@ static int atvr_mic_ctrl(struct hid_device *hdev, bool enable)
 		0x00, 0x00, 0x00,
 		};
 	int ret;
+	int report_size = JAR_HOSTCMD_REPORT_SIZE;
+	if (hdev->product == USB_DEVICE_ID_NVIDIA_THUNDERSTRIKE)
+		report_size = TS_HOSTCMD_REPORT_SIZE;
 
 	report[3] = enable ? 0x01 : 0x00;
 	hid_info(hdev, "%s remote mic\n", enable ? "enable" : "disable");
-	ret =  hdev->hid_output_raw_report(hdev, report, sizeof(report),
+	ret =  hdev->hid_output_raw_report(hdev, report, report_size,
 					HID_OUTPUT_REPORT);
 	if (ret < 0)
 		hid_info(hdev, "failed to send mic ctrl report, err=%d\n", ret);
@@ -613,7 +644,7 @@ static int snd_atvr_decode_adpcm_packet(
 #define BLOCKS_PER_PACKET 15
 #define NUM_BITS 26
 
-static int snd_atvr_decode_16KHz_msbc_packet(
+static int snd_atvr_decode_msbc_packet(
 			struct snd_pcm_substream *substream,
 			const uint8_t *sbc_input,
 			size_t num_bytes
@@ -624,14 +655,65 @@ static int snd_atvr_decode_16KHz_msbc_packet(
 	uint i;
 	uint32_t pos;
 	uint read_index;
+	uint write_index;
 	struct snd_atvr *atvr_snd = snd_pcm_substream_chip(substream);
+	if (num_bytes < BYTES_PER_MSBC_FRAME) {
+		/* assume we have a BLE frame that needs to be reconstructed */
+		if (atvr_snd->packet_in_frame == 0) {
+			if (sbc_input[0] !=
+				msbc_sequence_table[atvr_snd->seq_index]) {
 
-	/* we have a complete mSBC frame, send it to the decoder */
-	num_samples = sbc_decode(BLOCKS_PER_PACKET, NUM_BITS,
-				 sbc_input,
-				 BYTES_PER_MSBC_FRAME,
-				 &atvr_snd->audio_output[0]);
+				snd_atvr_log(
+				"sequence_num err, 0x%02x != 0x%02x\n",
+				sbc_input[0],
+				msbc_sequence_table[atvr_snd->seq_index]);
 
+				return 0;
+			}
+			atvr_snd->seq_index++;
+			if (atvr_snd->seq_index == NUM_SEQUENCES)
+				atvr_snd->seq_index = 0;
+
+			/* subtract the sequence number */
+			num_bytes--;
+		}
+		if (num_bytes !=
+			msbc_bytes_in_packet[atvr_snd->packet_in_frame]) {
+
+			pr_err(
+			  "%s: received %zd audio bytes but expected %d bytes\n",
+			  __func__, num_bytes,
+			  msbc_bytes_in_packet[atvr_snd->packet_in_frame]);
+
+			return 0;
+		}
+		write_index =
+			msbc_start_offset_in_buffer[atvr_snd->packet_in_frame];
+		read_index =
+			msbc_start_offset_in_packet[atvr_snd->packet_in_frame];
+		memcpy(&atvr_snd->msbc_frame_data[write_index],
+			   &sbc_input[read_index],
+			   msbc_bytes_in_packet[atvr_snd->packet_in_frame]);
+		atvr_snd->packet_in_frame++;
+		if (atvr_snd->packet_in_frame < BLE_PACKETS_PER_MSBC_FRAME) {
+			/* we don't have a complete mSBC frame yet,
+			 * just return */
+			return 0;
+		}
+		/* reset for next mSBC frame */
+		atvr_snd->packet_in_frame = 0;
+		/* we have a complete mSBC frame, send it to the decoder */
+		num_samples = sbc_decode(BLOCKS_PER_PACKET, NUM_BITS,
+					 atvr_snd->msbc_frame_data,
+					 BYTES_PER_MSBC_FRAME,
+					 &atvr_snd->audio_output[0]);
+	} else {
+		/* we have a complete mSBC frame, send it to the decoder */
+		num_samples = sbc_decode(BLOCKS_PER_PACKET, NUM_BITS,
+					 sbc_input,
+					 BYTES_PER_MSBC_FRAME,
+					 &atvr_snd->audio_output[0]);
+	}
 	/* Write PCM data to the buffer. */
 	pos = atvr_snd->write_index;
 	read_index = 0;
@@ -673,15 +755,27 @@ static int snd_atvr_decode_16KHz_msbc_packet(
  * @param num_bytes how many bytes in raw_input
  * @return number of samples decoded or negative error.
  */
-static void audio_dec(const uint8_t *raw_input, int type, size_t num_bytes)
+static void audio_dec(struct hid_device *hdev, const uint8_t *raw_input,
+						int type, size_t num_bytes)
 {
 	bool dropped_packet = false;
 	struct snd_pcm_substream *substream;
+	struct shdr_device *shdr_dev = hid_get_drvdata(hdev);
+	struct snd_card *shdr_card;
+	struct snd_atvr *atvr_snd;
 
-	spin_lock(&s_substream_lock);
-	substream = s_substream_for_btle;
-	if (substream != NULL) {
-		struct snd_atvr *atvr_snd = snd_pcm_substream_chip(substream);
+	if (shdr_dev == NULL)
+		return;
+	shdr_card = shdr_dev->shdr_card;
+
+	if (shdr_card == NULL)
+		return;
+
+	atvr_snd = shdr_card->private_data;
+
+	if (atvr_snd != NULL && atvr_snd->pcm_stopped == false) {
+		spin_lock(&atvr_snd->s_substream_lock);
+
 		/* Write data to a FIFO for decoding by the timer task. */
 		uint writable = atomic_fifo_available_to_write(
 			&atvr_snd->fifo_controller);
@@ -697,11 +791,11 @@ static void audio_dec(const uint8_t *raw_input, int type, size_t num_bytes)
 				&atvr_snd->fifo_controller, 1);
 		} else {
 			dropped_packet = true;
-			s_substream_for_btle = NULL; /* Stop decoding. */
+			atvr_snd->pcm_stopped = true;
 		}
+		atvr_snd->packet_counter++;
+		spin_unlock(&atvr_snd->s_substream_lock);
 	}
-	packet_counter++;
-	spin_unlock(&s_substream_lock);
 
 	if (dropped_packet)
 		snd_atvr_log("WARNING, raw audio packet dropped, FIFO full\n");
@@ -785,7 +879,7 @@ static uint snd_atvr_decode_from_fifo(struct snd_pcm_substream *substream)
 						     packet->raw_data,
 						     packet->num_bytes);
 		} else if (packet->type == PACKET_TYPE_MSBC) {
-			snd_atvr_decode_16KHz_msbc_packet(substream,
+			snd_atvr_decode_msbc_packet(substream,
 							 packet->raw_data,
 							 packet->num_bytes);
 		} else {
@@ -846,7 +940,7 @@ static void snd_atvr_timer_callback(unsigned long data)
 			atvr_snd->previous_jiffies = jiffies;
 			break;
 		}
-		if (s_substream_for_btle == NULL) {
+		if (atvr_snd->pcm_stopped) {
 			atvr_snd->timer_state = TIMER_STATE_AFTER_DECODE;
 			/* Decoder died. Overflowed?
 			 * Fall through into next state. */
@@ -959,7 +1053,7 @@ static int snd_atvr_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		raw_adpcm_index = 0;
 		raw_msbc_index = 0;
 #endif
-		packet_counter = 0;
+		atvr_snd->packet_counter = 0;
 		atvr_snd->peak_level = -32768;
 		atvr_snd->previous_jiffies = jiffies;
 		atvr_snd->timer_state = TIMER_STATE_BEFORE_DECODE;
@@ -973,18 +1067,18 @@ static int snd_atvr_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		atvr_snd->packet_in_frame = 0;
 		atvr_snd->seq_index = 0;
 
+		atvr_snd->pcm_stopped = false;
 		snd_atvr_timer_start(substream);
-		 /* Enables callback from BTLE driver. */
-		s_substream_for_btle = substream;
 		smp_wmb(); /* so other thread will see s_substream_for_btle */
 		return 0;
 
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 		snd_atvr_log("%s stopping audio, peak = %d, # packets = %d\n",
-			__func__, atvr_snd->peak_level, packet_counter);
+			__func__, atvr_snd->peak_level,
+			atvr_snd->packet_counter);
 
-		s_substream_for_btle = NULL;
+		atvr_snd->pcm_stopped = true;
 		smp_wmb(); /* so other thread will see s_substream_for_btle */
 		snd_atvr_timer_stop(substream);
 		return 0;
@@ -1021,6 +1115,25 @@ static struct snd_pcm_hardware atvr_pcm_hardware = {
 	.rate_max =		USE_RATE_MAX,
 	.channels_min =		USE_CHANNELS_MIN,
 	.channels_max =		USE_CHANNELS_MAX,
+	.buffer_bytes_max =	MAX_PCM_BUFFER_SIZE,
+	.period_bytes_min =	MIN_PERIOD_SIZE,
+	.period_bytes_max =	MAX_PERIOD_SIZE,
+	.periods_min =		USE_PERIODS_MIN,
+	.periods_max =		USE_PERIODS_MAX,
+	.fifo_size =		0,
+};
+
+static struct snd_pcm_hardware atvr_pcm_hardware_pepper = {
+	.info =			(SNDRV_PCM_INFO_MMAP |
+				 SNDRV_PCM_INFO_INTERLEAVED |
+				 SNDRV_PCM_INFO_RESUME |
+				 SNDRV_PCM_INFO_MMAP_VALID),
+	.formats =		USE_FORMATS,
+	.rates =		USE_RATES_MASK_PEPPER,
+	.rate_min =		USE_RATE_MIN,
+	.rate_max =		USE_RATE_MAX_PEPPER,
+	.channels_min =		USE_CHANNELS_MIN,
+	.channels_max =		USE_CHANNELS_MAX_PEPPER,
 	.buffer_bytes_max =	MAX_PCM_BUFFER_SIZE,
 	.period_bytes_min =	MIN_PERIOD_SIZE,
 	.period_bytes_max =	MAX_PERIOD_SIZE,
@@ -1088,7 +1201,8 @@ static int snd_atvr_pcm_open(struct snd_pcm_substream *substream)
 	 */
 	/* We only use this buffer in the kernel and we do not do
 	 * DMA so vmalloc should be OK. */
-	atvr_snd->pcm_buffer = vmalloc(MAX_PCM_BUFFER_SIZE);
+	if (atvr_snd->pcm_buffer == NULL)
+		atvr_snd->pcm_buffer = vmalloc(MAX_PCM_BUFFER_SIZE);
 	if (atvr_snd->pcm_buffer == NULL) {
 		pr_err("%s:%d - ERROR PCM buffer allocation failed\n",
 			__func__, __LINE__);
@@ -1098,7 +1212,8 @@ static int snd_atvr_pcm_open(struct snd_pcm_substream *substream)
 	/* We only use this buffer in the kernel and we do not do
 	 * DMA so vmalloc should be OK.
 	 */
-	atvr_snd->fifo_packet_buffer = vmalloc(MAX_BUFFER_SIZE);
+	if (atvr_snd->fifo_packet_buffer == NULL)
+		atvr_snd->fifo_packet_buffer = vmalloc(MAX_BUFFER_SIZE);
 	if (atvr_snd->fifo_packet_buffer == NULL) {
 		pr_err("%s:%d - ERROR buffer allocation failed\n",
 			__func__, __LINE__);
@@ -1120,7 +1235,8 @@ static int snd_atvr_pcm_close(struct snd_pcm_substream *substream)
 
 	if (atvr_snd->timer_callback_count > 0)
 		snd_atvr_log("processed %d packets in %d timer callbacks\n",
-			packet_counter, atvr_snd->timer_callback_count);
+			atvr_snd->packet_counter,
+			atvr_snd->timer_callback_count);
 
 	if (atvr_snd->pcm_buffer) {
 		vfree(atvr_snd->pcm_buffer);
@@ -1132,12 +1248,12 @@ static int snd_atvr_pcm_close(struct snd_pcm_substream *substream)
 	 * driver is writing to it.
 	 * The s_substream_for_btle should already be NULL by now.
 	 */
-	spin_lock(&s_substream_lock);
+	spin_lock(&atvr_snd->s_substream_lock);
 	if (atvr_snd->fifo_packet_buffer) {
 		vfree(atvr_snd->fifo_packet_buffer);
 		atvr_snd->fifo_packet_buffer = NULL;
 	}
-	spin_unlock(&s_substream_lock);
+	spin_unlock(&atvr_snd->s_substream_lock);
 
 	mutex_lock(&atvr_snd->hdev_lock);
 	if (atvr_snd->hdev)
@@ -1163,7 +1279,6 @@ static int snd_atvr_pcm_copy(struct snd_pcm_substream *substream,
 			  void __user *dst, snd_pcm_uframes_t count)
 {
 	struct snd_atvr *atvr_snd = snd_pcm_substream_chip(substream);
-	short *output = (short *)dst;
 
 	/* TODO Needs to be modified if we support more than 1 channel. */
 	/*
@@ -1172,21 +1287,21 @@ static int snd_atvr_pcm_copy(struct snd_pcm_substream *substream,
 	 */
 	if ((pos + count) > atvr_snd->frames_per_buffer) {
 		const int16_t *source = &atvr_snd->pcm_buffer[pos];
-		int16_t *destination = output;
+		int16_t __user *destination = dst;
 		size_t num_frames = atvr_snd->frames_per_buffer - pos;
 		size_t num_bytes = num_frames * sizeof(int16_t);
-		memcpy(destination, source, num_bytes);
+		copy_to_user(destination, source, num_bytes);
 
 		source = &atvr_snd->pcm_buffer[0];
 		destination += num_frames;
 		num_frames = count - num_frames;
 		num_bytes = num_frames * sizeof(int16_t);
-		memcpy(destination, source, num_bytes);
+		copy_to_user(destination, source, num_bytes);
 	} else {
 		const int16_t *source = &atvr_snd->pcm_buffer[pos];
-		int16_t *destination = output;
+		int16_t __user *destination = dst;
 		size_t num_bytes = count * sizeof(int16_t);
-		memcpy(destination, source, num_bytes);
+		copy_to_user(destination, source, num_bytes);
 	}
 
 	return 0;
@@ -1236,29 +1351,42 @@ static int snd_card_atvr_pcm(struct snd_atvr *atvr_snd,
 	return 0;
 }
 
-static int atvr_snd_initialize(struct hid_device *hdev)
+static int atvr_snd_initialize(struct hid_device *hdev,
+			struct snd_card **p_shdr_card)
 {
 	struct snd_atvr *atvr_snd;
+	struct snd_card *shdr_card;
 	int err;
 	int i;
+	int dev = 0;
+	struct hid_input *hidinput = list_first_entry(&hdev->inputs,
+			struct hid_input, list);
+	struct input_dev *shdr_input_dev = hidinput->input;
+
+	while (dev < SNDRV_CARDS && cards_in_use[dev])
+		dev++;
 
 	if (dev >= SNDRV_CARDS)
 		return -ENODEV;
 	if (!enable[dev]) {
-		dev++;
 		return -ENOENT;
 	}
+	cards_in_use[dev] = true;
+
 	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
-			      sizeof(struct snd_atvr), &atvr_card);
+			      sizeof(struct snd_atvr), &shdr_card);
 	if (err < 0) {
 		pr_err("%s: snd_card_create() returned err %d\n",
 		       __func__, err);
+		cards_in_use[dev] = false;
 		return err;
 	}
-	atvr_snd = atvr_card->private_data;
-	atvr_snd->card = atvr_card;
+	*p_shdr_card = shdr_card;
+	atvr_snd = shdr_card->private_data;
+	atvr_snd->card = shdr_card;
+	atvr_snd->card_index = dev;
 	mutex_init(&atvr_snd->hdev_lock);
-
+	spin_lock_init(&atvr_snd->s_substream_lock);
 	/* dummy initialization */
 	setup_timer(&atvr_snd->decoding_timer,
 		snd_atvr_timer_callback, 0);
@@ -1276,25 +1404,42 @@ static int atvr_snd_initialize(struct hid_device *hdev)
 		}
 	}
 
+	if (hdev->product == USB_DEVICE_ID_NVIDIA_PEPPER)
+		atvr_snd->pcm_hw = atvr_pcm_hardware_pepper;
+	else
+		atvr_snd->pcm_hw = atvr_pcm_hardware;
 
-	atvr_snd->pcm_hw = atvr_pcm_hardware;
+	strcpy(shdr_card->driver, "SHIELD Remote Audio");
+	strcpy(shdr_card->shortname, "SHDRAudio");
+	sprintf(shdr_card->longname, "SHIELD Remote %i audio", dev + 1);
 
-	strcpy(atvr_card->driver, "SHIELD Remote Audio");
-	strcpy(atvr_card->shortname, "SHDRAudio");
-	sprintf(atvr_card->longname, "SHIELD Remote %i audio", dev + 1);
+	err = snd_card_register(shdr_card);
 
-	err = snd_card_register(atvr_card);
-	if (!err)
-		return 0;
+	if (err)
+		goto __nodev;
+
+	err = sysfs_create_link(&(hdev->dev.kobj), &(shdr_card->card_dev->kobj),
+			"sound");
+
+	if (err < 0)
+		dev_warn(&hdev->dev, "Can't create sound sysfs link\n");
+
+	err = sysfs_create_link(&(hdev->dev.kobj), &(shdr_input_dev->dev.kobj),
+			"input");
+
+	if (err < 0)
+		dev_warn(&hdev->dev, "Can't create input sysfs link\n");
+	return 0;
 
 __nodev:
-	snd_card_free(atvr_card);
-	atvr_card = NULL;
+	snd_card_free(shdr_card);
+	*p_shdr_card = NULL;
+	cards_in_use[dev] = false;
 	return err;
 }
 
 #define JAR_BUTTON_REPORT_ID	0x01
-#define JAR_BUTTON_REPORT_SIZE	0x03
+#define JAR_BUTTON_REPORT_SIZE	3
 
 #define JAR_AUDIO_REPORT_ID	0xFD
 #define JAR_AUDIO_REPORT_SIZE	233
@@ -1304,14 +1449,25 @@ static int atvr_jarvis_break_events(struct hid_device *hdev,
 				    struct hid_report *report,
 				    u8 *data, int size)
 {
-	/* breaks events apart if they are not proper */
+	unsigned int button_report_id = JAR_BUTTON_REPORT_ID;
+	unsigned int button_report_size = JAR_BUTTON_REPORT_SIZE;
+	unsigned int audio_report_id = JAR_AUDIO_REPORT_ID;
+	unsigned int audio_report_size = JAR_AUDIO_REPORT_SIZE;
 
+	/* breaks events apart if they are not proper */
 	pr_debug("%s: packet 0x%02x#%i\n", __func__, data[0], size);
 
-	if (!((report->id == JAR_BUTTON_REPORT_ID &&
-	       size >= JAR_BUTTON_REPORT_SIZE) ||
-	      (report->id == JAR_AUDIO_REPORT_ID &&
-	       size >= JAR_AUDIO_REPORT_SIZE)))
+	/*
+	 * break the ts events also similarly,
+	 * just account for size differences
+	 */
+	if (hdev->product == USB_DEVICE_ID_NVIDIA_THUNDERSTRIKE)
+		button_report_size = TS_HOSTCMD_REPORT_SIZE;
+
+	if (!((report->id == button_report_id &&
+	       size >= button_report_size) ||
+	      (report->id == audio_report_id &&
+	       size >= audio_report_size)))
 		return 0;
 
 	/*
@@ -1320,17 +1476,17 @@ static int atvr_jarvis_break_events(struct hid_device *hdev,
 	 */
 	while (size > 0) {
 		int amount = 0;
-		if ((data[0] == JAR_BUTTON_REPORT_ID) &&
-		    (size >= JAR_BUTTON_REPORT_SIZE)) {
-			amount = JAR_BUTTON_REPORT_SIZE;
+		if ((data[0] == button_report_id) &&
+		    (size >= button_report_size)) {
+			amount = button_report_size;
 			hid_report_raw_event(hdev, 0, data,
-					     sizeof(amount), 0);
-		} else if ((data[0] == JAR_AUDIO_REPORT_ID) &&
-			   (size >= JAR_AUDIO_REPORT_SIZE)) {
+					     amount, 0);
+		} else if ((data[0] == audio_report_id) &&
+			   (size >= audio_report_size)) {
 			u8 *frame = &data[1];
-			amount = JAR_AUDIO_REPORT_SIZE;
+			amount = audio_report_size;
 			while (frame < &data[JAR_AUDIO_REPORT_SIZE]) {
-				audio_dec(&frame[0], PACKET_TYPE_MSBC,
+				audio_dec(hdev, &frame[0], PACKET_TYPE_MSBC,
 					  JAR_AUDIO_FRAME_SIZE);
 				frame = &frame[JAR_AUDIO_FRAME_SIZE];
 			}
@@ -1351,12 +1507,22 @@ static int atvr_jarvis_break_events(struct hid_device *hdev,
 static int atvr_raw_event(struct hid_device *hdev, struct hid_report *report,
 	u8 *data, int size)
 {
+	struct shdr_device *shdr_dev = hid_get_drvdata(hdev);
+	struct snd_card *shdr_card = shdr_dev->shdr_card;
+	struct snd_atvr *atvr_snd;
+	void *debug_info;
+
+	if (shdr_card == NULL)
+		return 0;
+
+	atvr_snd = shdr_card->private_data;
+
 #if (DEBUG_HID_RAW_INPUT == 1)
 	pr_info("%s: report->id = 0x%x, size = %d\n",
 		__func__, report->id, size);
-	if (size < 20) {
-		int i;
-		for (i = 1; i < size; i++)
+	if (size < 22) {
+		u32 i;
+		for (i = 1; i < sizeof(i); i++)
 			pr_info("data[%d] = 0x%02x\n", i, data[i]);
 	}
 #endif
@@ -1370,10 +1536,10 @@ static int atvr_raw_event(struct hid_device *hdev, struct hid_report *report,
 		 * alsa audio decoder driver for ADPCM
 		 */
 #if (DEBUG_AUDIO_RECEPTION == 1)
-		if (packet_counter == 0)
+		if (atvr_snd->packet_counter == 0)
 			snd_atvr_log("first ADPCM packet received\n");
 #endif
-		audio_dec(&data[1], PACKET_TYPE_ADPCM, size - 1);
+		audio_dec(hdev, &data[1], PACKET_TYPE_ADPCM, size - 1);
 		/* we've handled the event */
 		return 1;
 	} else if (report->id == MSBC_AUDIO1_REPORT_ID) {
@@ -1398,19 +1564,31 @@ static int atvr_raw_event(struct hid_device *hdev, struct hid_report *report,
 
 		/* send the audio part to the alsa audio decoder for mSBC */
 #if (DEBUG_AUDIO_RECEPTION == 1)
-		if (packet_counter == 0)
+		if (atvr_snd->packet_counter == 0)
 			snd_atvr_log("first MSBC packet received\n");
 #endif
 		/* strip the one byte report id and two byte keycode field */
-		audio_dec(&data[1 + 2], PACKET_TYPE_MSBC, size - 1 - 2);
+		audio_dec(hdev, &data[1 + 2], PACKET_TYPE_MSBC, size - 1 - 2);
 		/* we've handled the event */
 		return 1;
 	} else if ((report->id == MSBC_AUDIO2_REPORT_ID) ||
 		   (report->id == MSBC_AUDIO3_REPORT_ID)) {
 		/* strip the one byte report id */
-		audio_dec(&data[1], PACKET_TYPE_MSBC, size - 1);
+		audio_dec(hdev, &data[1], PACKET_TYPE_MSBC, size - 1);
 		/* we've handled the event */
 		return 1;
+	} else if (report->id == INPUT_EVT_INTR_DATA_ID) {
+		/*Debug infor sent by device*/
+		debug_info = kmalloc(sizeof(u8) * size + 1, GFP_ATOMIC);
+		if (!debug_info) {
+			pr_err("%s, Kmalloc failed!", __func__);
+			return -ENOMEM;
+		}
+		*((char *)(debug_info + size)) = '\0';
+		memcpy(debug_info, data, size);
+		pr_info("Report ID 10: PID: %d, report %s", hdev->product,
+			(char *)debug_info);
+		kfree(debug_info);
 	}
 	/* let the event through for regular input processing */
 	return 0;
@@ -1420,7 +1598,14 @@ static int atvr_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
 	struct snd_atvr *atvr_snd;
 	int ret;
+	struct shdr_device *shdr_dev;
+	struct snd_card *shdr_card;
 
+	shdr_dev = kzalloc(sizeof(*shdr_dev), GFP_KERNEL);
+	if (shdr_dev == NULL) {
+		hid_err(hdev, "can't alloc descriptor\n");
+		return -ENOMEM;
+	}
 	/* since vendor/product id filter doesn't work yet, because
 	 * Bluedroid is unable to get the vendor/product id, we
 	 * have to filter on name
@@ -1447,19 +1632,20 @@ static int atvr_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	 * only then to avoid race conditions on subsequent connections.
 	 * AudioService.java delays enabling the output
 	 */
-	if (!atvr_card) {
-		ret = atvr_snd_initialize(hdev);
-		if (ret)
-			goto err_stop;
-	}
+
+	ret = atvr_snd_initialize(hdev, &shdr_card);
+	if (ret)
+		goto err_stop;
+
 	/*
 	 * hdev pointer is not guaranteed to be the same thus following
 	 * stuff has to be updated every time.
 	 */
-	hid_set_drvdata(hdev, atvr_card);
-	atvr_snd = atvr_card->private_data;
+	shdr_dev->shdr_card = shdr_card;
+	hid_set_drvdata(hdev, shdr_dev);
+	atvr_snd = shdr_card->private_data;
 	atvr_snd->hdev = hdev;
-	snd_card_set_dev(atvr_card, &hdev->dev);
+	snd_card_set_dev(shdr_card, &hdev->dev);
 
 	switch_set_state(&shdr_mic_switch, true);
 
@@ -1472,33 +1658,50 @@ err_stop:
 	hid_hw_stop(hdev);
 err_start:
 err_parse:
+	kfree(shdr_dev);
 	return ret;
 }
 
 static void atvr_remove(struct hid_device *hdev)
 {
-	struct snd_atvr *atvr_snd;
 	unsigned long flags;
+	struct shdr_device *shdr_dev = hid_get_drvdata(hdev);
+	struct snd_card *shdr_card = shdr_dev->shdr_card;
+	struct snd_atvr *atvr_snd;
 
-	if (atvr_card == NULL)
+	if (shdr_card == NULL)
 		return -EIO;
 
-	atvr_snd = atvr_card->private_data;
+	atvr_snd = shdr_card->private_data;
 	mutex_lock(&atvr_snd->hdev_lock);
 	atvr_snd->hdev = NULL;
 	mutex_unlock(&atvr_snd->hdev_lock);
 
-	switch_set_state(&shdr_mic_switch, false);
 	hid_set_drvdata(hdev, NULL);
 	hid_hw_stop(hdev);
 	pr_info("%s: hdev->name = %s removed, num %d->%d\n",
 		__func__, hdev->name, num_remotes, num_remotes - 1);
 	num_remotes--;
+
+	if (num_remotes == 0)
+		switch_set_state(&shdr_mic_switch, false);
+
+	cards_in_use[atvr_snd->card_index] = false;
+	mutex_destroy(&atvr_snd->hdev_lock);
+	snd_card_free(shdr_card);
+
+	kfree(shdr_dev);
 }
 
 static const struct hid_device_id atvr_devices[] = {
 	{HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_NVIDIA,
 			      USB_DEVICE_ID_NVIDIA_JARVIS)},
+	{HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_NVIDIA,
+			      USB_DEVICE_ID_NVIDIA_PEPPER)},
+	{HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_NVIDIA,
+			      USB_DEVICE_ID_NVIDIA_THUNDERSTRIKE)},
+	{HID_USB_DEVICE(USB_VENDOR_ID_NVIDIA,
+			      USB_DEVICE_ID_NVIDIA_THUNDERSTRIKE)},
 	{ }
 };
 MODULE_DEVICE_TABLE(hid, atvr_devices);
@@ -1569,13 +1772,6 @@ static void atvr_exit(void)
 	misc_deregister(&adpcm_dev_node);
 	misc_deregister(&pcm_dev_node);
 #endif
-
-	if (atvr_card) {
-		struct snd_atvr *atvr_snd = atvr_card->private_data;
-		mutex_destroy(&atvr_snd->hdev_lock);
-		snd_card_free(atvr_card);
-		atvr_card = NULL;
-	}
 
 	hid_unregister_driver(&atvr_driver);
 }

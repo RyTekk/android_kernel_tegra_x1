@@ -30,12 +30,6 @@ config SOC_CAMERA_IMX230
 	help
 	  This driver supports IMX230 cameras from Sony
 
-config SOC_CAMERA_OV23850
-        tristate "OV23850 camera sensor support"
-	depends on SOC_CAMERA && I2C
-	help
-	  This driver supports OV23850 cameras from Omnivision
-
 config SOC_CAMERA_MT9M001
 	tristate "mt9m001 support"
 	depends on SOC_CAMERA && I2C
@@ -139,9 +133,3 @@ config SOC_CAMERA_TW9910
 	depends on SOC_CAMERA && I2C
 	help
 	  This is a tw9910 video driver
-
-config SOC_CAMERA_TC358840
-	tristate "tc358840xbg support"
-	depends on SOC_CAMERA && I2C
-	help
-	  This is a tc358840xbg video driver

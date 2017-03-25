@@ -411,7 +411,7 @@ static void cpufreq_interactive_timer(unsigned long data)
 	spin_lock_irqsave(&pcpu->target_freq_lock, flags);
 	do_div(cputime_speedadj, delta_time);
 	loadadjfreq = (unsigned int)cputime_speedadj * 100;
-	cpu_load = loadadjfreq / pcpu->target_freq;
+	cpu_load = loadadjfreq / pcpu->policy->cur;
 	tunables->boosted = tunables->boost_val || now < tunables->boostpulse_endtime;
 
 	new_freq = choose_freq(pcpu, loadadjfreq);
@@ -1312,7 +1312,10 @@ static int cpufreq_governor_interactive(struct cpufreq_policy *policy,
 				pcpu->floor_validate_time;
 			pcpu->max_freq = policy->max;
 			down_write(&pcpu->enable_sem);
-			cpufreq_interactive_timer_start(tunables, j);
+			if (pcpu->governor_enabled != 1)
+				cpufreq_interactive_timer_start(tunables, j);
+			else
+				WARN(1, "GOV_START is called without GOV_STOP\n");
 			pcpu->governor_enabled = 1;
 			up_write(&pcpu->enable_sem);
 		}

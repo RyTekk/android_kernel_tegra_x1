@@ -37,12 +37,20 @@
 #include <linux/delay.h>
 #include <linux/debugfs.h>
 #include <linux/tegra-powergate.h>
-
+#include <linux/pm_domain.h>
+#include <linux/tegra_pm_domains.h>
 
 #include "tegra210_xbar_alt.h"
 #include "tegra210_i2s_alt.h"
 
 #define DRV_NAME "tegra210-i2s"
+
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+static struct of_device_id tegra_ape_pd[] = {
+	{ .compatible = "nvidia,tegra210-ape-pd", },
+	{},
+};
+#endif
 
 static const struct reg_default tegra210_i2s_reg_defaults[] = {
 	{ TEGRA210_I2S_AXBAR_RX_INT_MASK, 0x00000003},
@@ -406,7 +414,8 @@ static int tegra210_i2s_get_format(struct snd_kcontrol *kcontrol,
 	/* get the format control flag */
 	if (strstr(kcontrol->id.name, "input"))
 		ucontrol->value.integer.value[0] = i2s->format_in;
-
+	else if (strstr(kcontrol->id.name, "codec"))
+		ucontrol->value.integer.value[0] = i2s->codec_bit_format;
 	return 0;
 }
 
@@ -419,6 +428,8 @@ static int tegra210_i2s_put_format(struct snd_kcontrol *kcontrol,
 	/* set the format control flag */
 	if (strstr(kcontrol->id.name, "input"))
 		i2s->format_in = ucontrol->value.integer.value[0];
+	else if (strstr(kcontrol->id.name, "codec"))
+		i2s->codec_bit_format = ucontrol->value.integer.value[0];
 
 	return 0;
 }
@@ -433,6 +444,12 @@ static const int tegra210_i2s_fmt_values[] = {
 	0,
 	TEGRA210_AUDIOCIF_BITS_16,
 	TEGRA210_AUDIOCIF_BITS_32,
+};
+
+static const int tegra210_i2s_sample_size[] = {
+	0,
+	16,
+	32,
 };
 
 static const struct soc_enum tegra210_i2s_format_enum =
@@ -485,6 +502,12 @@ static int tegra210_i2s_hw_params(struct snd_pcm_substream *substream,
 	default:
 		dev_err(dev, "Wrong format!\n");
 		return -EINVAL;
+	}
+
+	if (i2s->codec_bit_format) {
+		val = tegra210_i2s_fmt_values[i2s->codec_bit_format];
+		sample_size = tegra210_i2s_sample_size[i2s->codec_bit_format];
+		cif_conf.client_bits = tegra210_i2s_fmt_values[i2s->codec_bit_format];
 	}
 
 	regmap_update_bits(i2s->regmap, TEGRA210_I2S_CTRL, mask, val);
@@ -701,6 +724,8 @@ static const struct snd_kcontrol_new tegra210_i2s_controls[] = {
 		tegra210_i2s_loopback_get, tegra210_i2s_loopback_put),
 	SOC_ENUM_EXT("input bit format", tegra210_i2s_format_enum,
 		tegra210_i2s_get_format, tegra210_i2s_put_format),
+	SOC_ENUM_EXT("codec bit format", tegra210_i2s_format_enum,
+		tegra210_i2s_get_format, tegra210_i2s_put_format),
 };
 
 static const struct snd_soc_dapm_widget tegra210_i2s_widgets[] = {
@@ -861,6 +886,15 @@ static int tegra210_i2s_platform_probe(struct platform_device *pdev)
 	void __iomem *regs;
 	int ret = 0, count = 0, num_supplies;
 	const char *supply, *prod_name;
+	int partition_id;
+
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_ape_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_APE;
+#endif
 
 	match = of_match_device(tegra210_i2s_of_match, &pdev->dev);
 	if (!match) {
@@ -943,7 +977,7 @@ static int tegra210_i2s_platform_probe(struct platform_device *pdev)
 	}
 
 	i2s->slgc_notifier.notifier_call = _tegra210_i2s_slcg_notifier;
-	slcg_register_notifier(TEGRA_POWERGATE_APE,
+	slcg_register_notifier(partition_id,
 		&i2s->slgc_notifier);
 
 	regcache_cache_only(i2s->regmap, true);

@@ -1,7 +1,7 @@
 /*
  * imx230.c - imx230 sensor driver
  *
- * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -26,9 +26,8 @@
 #include <linux/of_device.h>
 #include <linux/of_gpio.h>
 
-#include <mach/io_dpd.h>
-
 #include <media/v4l2-chip-ident.h>
+#include <media/tegra_v4l2_camera.h>
 #include <media/camera_common.h>
 #include <media/imx230.h>
 
@@ -36,49 +35,52 @@
 
 #define IMX230_MAX_COARSE_DIFF		10
 
+/* gain values are common among sensor modes */
 #define IMX230_GAIN_SHIFT		8
 #define IMX230_MIN_GAIN		(1 << IMX230_GAIN_SHIFT)
 #define IMX230_MAX_GAIN		(16 << IMX230_GAIN_SHIFT)
+#define IMX230_DEFAULT_GAIN	IMX230_MIN_GAIN
+
+/* common FL/CT values among sensor modes */
 #define IMX230_MIN_FRAME_LENGTH	(0x0)
 #define IMX230_MAX_FRAME_LENGTH	(0xffff)
 #define IMX230_MIN_EXPOSURE_COARSE	(0x0001)
 #define IMX230_MAX_EXPOSURE_COARSE	\
 	(IMX230_MAX_FRAME_LENGTH-IMX230_MAX_COARSE_DIFF)
 
-#define IMX230_DEFAULT_GAIN		IMX230_MIN_GAIN
-#define IMX230_DEFAULT_FRAME_LENGTH	(0x0CDA)
+/* Definitions for full sensor mode that matches full mode's sequence */
+#define IMX230_MIN_FRAME_LENGTH_5344x4016	(0x1022)
+#define IMX230_DEFAULT_WIDTH_5344x4016	5344
+#define IMX230_DEFAULT_HEIGHT_5344x4016	4016
+
+/* Use full sensor mode settings as default values */
+#define IMX230_DEFAULT_MODE	IMX230_MODE_5344x4016
+#define IMX230_DEFAULT_WIDTH	IMX230_DEFAULT_WIDTH_5344x4016
+#define IMX230_DEFAULT_HEIGHT	IMX230_DEFAULT_HEIGHT_5344x4016
+#define IMX230_DEFAULT_FRAME_LENGTH	IMX230_MIN_FRAME_LENGTH_5344x4016
 #define IMX230_DEFAULT_EXPOSURE_COARSE	\
 	(IMX230_DEFAULT_FRAME_LENGTH-IMX230_MAX_COARSE_DIFF)
 
-#define IMX230_DEFAULT_MODE	IMX230_MODE_5344x3200
-#define IMX230_DEFAULT_WIDTH	5344
-#define IMX230_DEFAULT_HEIGHT	3200
+/* Some other common default values */
 #define IMX230_DEFAULT_DATAFMT	V4L2_MBUS_FMT_SRGGB10_1X10
 #define IMX230_DEFAULT_CLK_FREQ	24000000
 
-static struct tegra_io_dpd csia_io = {
-	.name			= "CSIA",
-	.io_dpd_reg_index	= 0,
-	.io_dpd_bit		= 0,
-};
-
-static struct tegra_io_dpd csib_io = {
-	.name			= "CSIB",
-	.io_dpd_reg_index	= 0,
-	.io_dpd_bit		= 1,
-};
+/* R0x0344-R0x034B */
+#define IMX230_NUM_CROP_REGS	8
 
 struct imx230 {
 	struct camera_common_power_rail	power;
 	int				num_ctrls;
 	struct v4l2_ctrl_handler	ctrl_handler;
-#ifdef IMX230_EEPROM_PRESENT
+#if IMX230_EEPROM_PRESENT
 	struct camera_common_eeprom_data eeprom[IMX230_EEPROM_NUM_BLOCKS];
 	u8				eeprom_buf[IMX230_EEPROM_SIZE];
 #endif /* if IMX230_EEPROM_PRESENT */
 	struct i2c_client		*i2c_client;
 	struct v4l2_subdev		*subdev;
 
+	s32				group_hold_prev;
+	bool				group_hold_en;
 	struct regmap			*regmap;
 	struct camera_common_data	*s_data;
 	struct camera_common_pdata	*pdata;
@@ -167,7 +169,7 @@ static struct v4l2_ctrl_config ctrl_config_list[] = {
 		.def = 0,
 		.qmenu_int = switch_ctrl_qmenu,
 	},
-#ifdef IMX230_EEPROM_PRESENT
+#if IMX230_EEPROM_PRESENT
 	{
 		.ops = &imx230_ctrl_ops,
 		.id = V4L2_CID_EEPROM_DATA,
@@ -246,6 +248,37 @@ static inline void imx230_get_gain_short_reg(imx230_reg *regs,
 	(regs + 1)->val = (gain) & 0xff;
 }
 
+static void imx230_get_crop_regs(imx230_reg *regs,
+				struct v4l2_rect *rect)
+{
+	u32 x_start, y_start;
+	u32 x_end, y_end;
+	x_start = rect->left;
+	y_start = rect->top;
+	x_end = x_start + rect->width - 1;
+	y_end = y_start + rect->height - 1;
+
+	regs->addr = IMX230_CROP_X_START_ADDR_MSB;
+	regs->val = (x_start >> 8) & 0xff;
+	(regs + 1)->addr = IMX230_CROP_X_START_ADDR_LSB;
+	(regs + 1)->val = (x_start) & 0xff;
+
+	(regs + 2)->addr = IMX230_CROP_Y_START_ADDR_MSB;
+	(regs + 2)->val = (y_start >> 8) & 0xff;
+	(regs + 3)->addr = IMX230_CROP_Y_START_ADDR_LSB;
+	(regs + 3)->val = (y_start) & 0xff;
+
+	(regs + 4)->addr = IMX230_CROP_X_END_ADDR_MSB;
+	(regs + 4)->val = (x_end >> 8) & 0xff;
+	(regs + 5)->addr = IMX230_CROP_X_END_ADDR_LSB;
+	(regs + 5)->val = (x_end) & 0xff;
+
+	(regs + 6)->addr = IMX230_CROP_Y_END_ADDR_MSB;
+	(regs + 6)->val = (y_end >> 8) & 0xff;
+	(regs + 7)->addr = IMX230_CROP_Y_END_ADDR_LSB;
+	(regs + 7)->val = (y_end) & 0xff;
+}
+
 static int test_mode;
 module_param(test_mode, int, 0644);
 
@@ -286,15 +319,10 @@ static int imx230_power_on(struct camera_common_data *s_data)
 	struct camera_common_power_rail *pw = &priv->power;
 
 	dev_dbg(&priv->i2c_client->dev, "%s: power on\n", __func__);
-	/* disable CSIA/B IOs DPD mode to turn on camera for ardbeg */
-	tegra_io_dpd_disable(&csia_io);
-	tegra_io_dpd_disable(&csib_io);
 
 	if (priv->pdata->power_on) {
 		err = priv->pdata->power_on(pw);
 		if (err) {
-			tegra_io_dpd_enable(&csia_io);
-			tegra_io_dpd_enable(&csib_io);
 			pr_err("%s failed.\n", __func__);
 		} else {
 			pw->state = SWITCH_ON;
@@ -305,6 +333,10 @@ static int imx230_power_on(struct camera_common_data *s_data)
 	if (pw->reset_gpio)
 		gpio_set_value(pw->reset_gpio, 0);
 	usleep_range(10, 20);
+
+	/* It's used to switch on 2V5_CAM_H and 1V1_CAM_H */
+	if (pw->pwdn_gpio)
+		gpio_set_value(pw->pwdn_gpio, 1);
 
 	if (pw->avdd)
 		err = regulator_enable(pw->avdd);
@@ -320,7 +352,7 @@ static int imx230_power_on(struct camera_common_data *s_data)
 	if (pw->reset_gpio)
 		gpio_set_value(pw->reset_gpio, 1);
 
-	usleep_range(300, 310);
+	usleep_range(1000, 1010);
 
 	pw->state = SWITCH_ON;
 	return 0;
@@ -329,8 +361,6 @@ imx230_iovdd_fail:
 	regulator_disable(pw->avdd);
 
 imx230_avdd_fail:
-	tegra_io_dpd_enable(&csia_io);
-	tegra_io_dpd_enable(&csib_io);
 
 	pr_err("%s failed.\n", __func__);
 	return -ENODEV;
@@ -359,15 +389,15 @@ static int imx230_power_off(struct camera_common_data *s_data)
 		gpio_set_value(pw->reset_gpio, 0);
 	usleep_range(1, 2);
 
+	if (pw->pwdn_gpio)
+		gpio_set_value(pw->pwdn_gpio, 0);
+
 	if (pw->iovdd)
 		regulator_disable(pw->iovdd);
 	if (pw->avdd)
 		regulator_disable(pw->avdd);
 
 power_off_done:
-	/* put CSIA/B IOs into DPD mode to save additional power for ardbeg */
-	tegra_io_dpd_enable(&csia_io);
-	tegra_io_dpd_enable(&csib_io);
 
 	pw->state = SWITCH_OFF;
 	return 0;
@@ -414,8 +444,10 @@ static int imx230_power_get(struct imx230 *priv)
 	err |= camera_common_regulator_get(priv->i2c_client,
 			&pw->iovdd, pdata->regulators.iovdd);
 
-	if (!err)
+	if (!err) {
 		pw->reset_gpio = pdata->reset_gpio;
+		pw->pwdn_gpio = pdata->pwdn_gpio;
+	}
 
 	pw->state = SWITCH_OFF;
 	return err;
@@ -425,6 +457,8 @@ static int imx230_set_gain(struct imx230 *priv, s32 val);
 static int imx230_set_frame_length(struct imx230 *priv, s32 val);
 static int imx230_set_coarse_time(struct imx230 *priv, s32 val);
 static int imx230_set_coarse_time_short(struct imx230 *priv, s32 val);
+static int imx230_set_crop_data(struct imx230 *priv, struct v4l2_rect *rect);
+static int imx230_get_crop_data(struct imx230 *priv, struct v4l2_rect *rect);
 
 static int imx230_s_stream(struct v4l2_subdev *sd, int enable)
 {
@@ -492,13 +526,78 @@ exit:
 	return err;
 }
 
+static int imx230_s_crop(struct v4l2_subdev *sd, const struct v4l2_crop *crop)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	struct camera_common_data *s_data = to_camera_common_data(client);
+	struct imx230 *priv = (struct imx230 *)s_data->priv;
+	struct v4l2_rect *rect = &crop->c;
+	int err;
+
+	u32 width, height;
+	u32 bottom, right;
+
+	width = s_data->fmt_width;
+	height = s_data->fmt_height;
+
+	if (crop->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		return -EINVAL;
+
+	if ((width != rect->width) || (height != rect->height)) {
+		dev_err(&client->dev,
+			"%s: CROP Resolution Mismatch: %dx%d\n",
+			__func__, rect->width, rect->height);
+		return -EINVAL;
+	}
+	if (rect->top < 0 || rect->left < 0) {
+		dev_err(&client->dev,
+			"%s: CROP Bound Error: left:%d, top:%d\n",
+			__func__, rect->left, rect->top);
+		return -EINVAL;
+	}
+	right = rect->left + width - 1;
+	bottom = rect->top + height - 1;
+
+	/* Crop window is within the full mode's active */
+	if ((right > IMX230_DEFAULT_WIDTH_5344x4016) ||
+		(bottom > IMX230_DEFAULT_HEIGHT_5344x4016)) {
+		dev_err(&client->dev,
+			"%s: CROP Bound Error: right:%d, bottom:%d)\n",
+			__func__, right, bottom);
+		return -EINVAL;
+	}
+	err = imx230_set_crop_data(priv, rect);
+
+	return err;
+}
+
+static int imx230_g_crop(struct v4l2_subdev *sd, struct v4l2_crop *crop)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	struct camera_common_data *s_data = to_camera_common_data(client);
+	struct imx230 *priv = (struct imx230 *)s_data->priv;
+	struct v4l2_rect *rect = &crop->c;
+	int err;
+
+	if (crop->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		return -EINVAL;
+
+	err = imx230_get_crop_data(priv, rect);
+
+	return err;
+}
+
 static struct v4l2_subdev_video_ops imx230_subdev_video_ops = {
 	.s_stream	= imx230_s_stream,
+	.s_crop		= imx230_s_crop,
+	.g_crop		= imx230_g_crop,
 	.s_mbus_fmt	= camera_common_s_fmt,
 	.g_mbus_fmt	= camera_common_g_fmt,
 	.try_mbus_fmt	= camera_common_try_fmt,
 	.enum_mbus_fmt	= camera_common_enum_fmt,
 	.g_mbus_config	= camera_common_g_mbus_config,
+	.enum_framesizes	= camera_common_enum_framesizes,
+	.enum_frameintervals	= camera_common_enum_frameintervals,
 };
 
 static struct v4l2_subdev_core_ops imx230_subdev_core_ops = {
@@ -523,24 +622,23 @@ static struct camera_common_sensor_ops imx230_common_ops = {
 	.read_reg = imx230_read_reg,
 };
 
-static int imx230_set_group_hold(struct imx230 *priv, s32 val)
+static int imx230_set_group_hold(struct imx230 *priv)
 {
 	int err;
-	int gh_en = switch_ctrl_qmenu[val];
+	int gh_prev = switch_ctrl_qmenu[priv->group_hold_prev];
 
-	dev_dbg(&priv->i2c_client->dev,
-		 "%s: val: %d\n", __func__, gh_en);
-
-	if (gh_en == SWITCH_ON) {
+	if (priv->group_hold_en == true && gh_prev == SWITCH_OFF) {
 		err = imx230_write_reg(priv->s_data,
-				       IMX230_GROUP_HOLD_ADDR, 0x1);
+					   IMX230_GROUP_HOLD_ADDR, 0x1);
 		if (err)
 			goto fail;
-	} else if (gh_en == SWITCH_OFF) {
+		priv->group_hold_prev = 1;
+	} else if (priv->group_hold_en == false && gh_prev == SWITCH_ON) {
 		err = imx230_write_reg(priv->s_data,
-				       IMX230_GROUP_HOLD_ADDR, 0x0);
+					   IMX230_GROUP_HOLD_ADDR, 0x0);
 		if (err)
 			goto fail;
+		priv->group_hold_prev = 0;
 	}
 
 	return 0;
@@ -586,6 +684,7 @@ static int imx230_set_gain(struct imx230 *priv, s32 val)
 
 	imx230_get_gain_reg(reg_list, gain);
 	imx230_get_gain_short_reg(reg_list_short, gain);
+	imx230_set_group_hold(priv);
 
 	/* writing long gain */
 	for (i = 0; i < 2; i++) {
@@ -623,6 +722,7 @@ static int imx230_set_frame_length(struct imx230 *priv, s32 val)
 		 "%s: val: %d\n", __func__, frame_length);
 
 	imx230_get_frame_length_regs(reg_list, frame_length);
+	imx230_set_group_hold(priv);
 
 	for (i = 0; i < 2; i++) {
 		err = imx230_write_reg(priv->s_data, reg_list[i].addr,
@@ -652,6 +752,7 @@ static int imx230_set_coarse_time(struct imx230 *priv, s32 val)
 		 "%s: val: %d\n", __func__, coarse_time);
 
 	imx230_get_coarse_time_regs(reg_list, coarse_time);
+	imx230_set_group_hold(priv);
 
 	for (i = 0; i < 2; i++) {
 		err = imx230_write_reg(priv->s_data, reg_list[i].addr,
@@ -697,6 +798,7 @@ static int imx230_set_coarse_time_short(struct imx230 *priv, s32 val)
 		 "%s: val: %d\n", __func__, coarse_time_short);
 
 	imx230_get_coarse_time_short_regs(reg_list, coarse_time_short);
+	imx230_set_group_hold(priv);
 
 	for (i = 0; i < 2; i++) {
 		err  = imx230_write_reg(priv->s_data, reg_list[i].addr,
@@ -713,16 +815,84 @@ fail:
 	return err;
 }
 
-#ifdef IMX230_EEPROM_PRESENT
+static int imx230_set_crop_data(struct imx230 *priv, struct v4l2_rect *rect)
+{
+	imx230_reg reg_list_crop[IMX230_NUM_CROP_REGS];
+	int err;
+	int i = 0;
+
+	dev_dbg(&priv->i2c_client->dev,
+		 "%s:  crop->left:%d, crop->top:%d, crop->res: %dx%d\n",
+		 __func__, rect->left, rect->top, rect->width, rect->height);
+
+	imx230_get_crop_regs(reg_list_crop, rect);
+	imx230_set_group_hold(priv);
+
+	err = imx230_write_reg(priv->s_data, IMX230_MASK_CORRUPT_FRAME_ADDR,
+		IMX230_MASK_CORRUPT_FRAME_TRANSMIT);
+	if (err)
+		dev_err(&priv->i2c_client->dev,
+			"%s: SENSOR_CROP: MASK_CORR_FRAME error\n", __func__);
+
+	for (i = 0; i < IMX230_NUM_CROP_REGS; i++) {
+		err = imx230_write_reg(priv->s_data, reg_list_crop[i].addr,
+			 reg_list_crop[i].val);
+		if (err) {
+			dev_dbg(&priv->i2c_client->dev,
+				"%s: SENSOR_CROP control error\n", __func__);
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+static int imx230_get_crop_data(struct imx230 *priv, struct v4l2_rect *rect)
+{
+	imx230_reg reg_list_crop[IMX230_NUM_CROP_REGS];
+	int i, err;
+	int a, b;
+	int right, bottom;
+
+	for (i = 0; i < IMX230_NUM_CROP_REGS; i++) {
+		reg_list_crop[i].addr = (IMX230_CROP_X_START_ADDR_MSB + i);
+		err = imx230_read_reg(priv->s_data, reg_list_crop[i].addr,
+			&reg_list_crop[i].val);
+		if (err) {
+			dev_dbg(&priv->i2c_client->dev,
+				"%s: SENSOR_CROP control error\n", __func__);
+			return err;
+		}
+	}
+
+	a = reg_list_crop[0].val & 0x00ff;
+	b = reg_list_crop[1].val & 0x00ff;
+	rect->left = (a << 8) | b;
+
+	a = reg_list_crop[2].val & 0x00ff;
+	b = reg_list_crop[3].val & 0x00ff;
+	rect->top = (a << 8) | b;
+
+	a = reg_list_crop[4].val & 0x00ff;
+	b = reg_list_crop[5].val & 0x00ff;
+	right = (a << 8) | b;
+	rect->width = right - rect->left + 1;
+
+	a = reg_list_crop[6].val & 0x00ff;
+	b = reg_list_crop[7].val & 0x00ff;
+	bottom = (a << 8) | b;
+	rect->height = bottom - rect->top + 1;
+
+	return 0;
+}
+
+#if IMX230_EEPROM_PRESENT
 static int imx230_eeprom_device_release(struct imx230 *priv)
 {
-	int i;
-
-	for (i = 0; i < IMX230_EEPROM_NUM_BLOCKS; i++) {
-		if (priv->eeprom[i].i2c_client != NULL) {
-			i2c_unregister_device(priv->eeprom[i].i2c_client);
-			priv->eeprom[i].i2c_client = NULL;
-		}
+	/* Unregister eeprom device */
+	if (priv->eeprom[0].i2c_client != NULL) {
+		i2c_unregister_device(priv->eeprom[0].i2c_client);
+		priv->eeprom[0].i2c_client = NULL;
 	}
 
 	return 0;
@@ -732,28 +902,49 @@ static int imx230_eeprom_device_init(struct imx230 *priv)
 {
 	char *dev_name = "eeprom_imx230";
 	static struct regmap_config eeprom_regmap_config = {
-		.reg_bits = 8,
+		.reg_bits = 16,
 		.val_bits = 8,
 	};
 	int i;
 	int err;
+	struct i2c_client *client;
 
 	for (i = 0; i < IMX230_EEPROM_NUM_BLOCKS; i++) {
 		priv->eeprom[i].adap = i2c_get_adapter(
 				priv->i2c_client->adapter->nr);
+
 		memset(&priv->eeprom[i].brd, 0, sizeof(priv->eeprom[i].brd));
+
 		strncpy(priv->eeprom[i].brd.type, dev_name,
 				sizeof(priv->eeprom[i].brd.type));
-		priv->eeprom[i].brd.addr = IMX230_EEPROM_ADDRESS + i;
-		priv->eeprom[i].i2c_client = i2c_new_device(
-				priv->eeprom[i].adap, &priv->eeprom[i].brd);
+		priv->eeprom[i].brd.addr = IMX230_EEPROM_ADDRESS;
 
-		priv->eeprom[i].regmap = devm_regmap_init_i2c(
-			priv->eeprom[i].i2c_client, &eeprom_regmap_config);
-		if (IS_ERR(priv->eeprom[i].regmap)) {
-			err = PTR_ERR(priv->eeprom[i].regmap);
-			imx230_eeprom_device_release(priv);
-			return err;
+		/* Create new eeprom device and regmap for first block.
+		 * Other blocks point to same thing */
+		if (i == 0) {
+			client = i2c_new_device(priv->eeprom[i].adap,
+					&priv->eeprom[i].brd);
+			if (client) {
+				priv->eeprom[i].i2c_client = client;
+				priv->eeprom[i].regmap = devm_regmap_init_i2c(
+					priv->eeprom[i].i2c_client,
+					&eeprom_regmap_config);
+				if (IS_ERR(priv->eeprom[i].regmap)) {
+					dev_err(&priv->i2c_client->dev,
+						"eeprom regmap failed\n");
+					err = PTR_ERR(priv->eeprom[i].regmap);
+					imx230_eeprom_device_release(priv);
+					return err;
+				}
+			} else {
+				dev_err(&priv->i2c_client->dev,
+					"can't add eeprom i2c device 0x%x\n",
+					IMX230_EEPROM_ADDRESS);
+				return err;
+			}
+		} else {
+			priv->eeprom[i].i2c_client = priv->eeprom[0].i2c_client;
+			priv->eeprom[i].regmap = priv->eeprom[0].regmap;
 		}
 	}
 
@@ -766,16 +957,27 @@ static int imx230_read_eeprom(struct imx230 *priv,
 	int err, i;
 
 	for (i = 0; i < IMX230_EEPROM_NUM_BLOCKS; i++) {
-		err = regmap_bulk_read(priv->eeprom[i].regmap, 0,
+		err = regmap_bulk_read(priv->eeprom[i].regmap,
+			(i * IMX230_EEPROM_BLOCK_SIZE),
 			&priv->eeprom_buf[i * IMX230_EEPROM_BLOCK_SIZE],
 			IMX230_EEPROM_BLOCK_SIZE);
 		if (err)
 			return err;
 	}
 
-	for (i = 0; i < IMX230_EEPROM_SIZE; i++)
+	for (i = 0; i < IMX230_EEPROM_SIZE; i++) {
 		sprintf(&ctrl->string[i*2], "%02x",
 			priv->eeprom_buf[i]);
+
+		/* Print the ASCII string in first block */
+		if (i == 0) {
+			dev_dbg(&priv->i2c_client->dev, "eeprom:%c%c%c%c%c%c\n",
+				priv->eeprom_buf[0], priv->eeprom_buf[1],
+				priv->eeprom_buf[2], priv->eeprom_buf[3],
+				priv->eeprom_buf[4], priv->eeprom_buf[5]);
+		}
+	}
+
 	return 0;
 }
 
@@ -801,7 +1003,7 @@ static int imx230_write_eeprom(struct imx230 *priv,
 
 		priv->eeprom_buf[i] = (u8)data;
 		err = regmap_write(priv->eeprom[i >> 8].regmap,
-				   i & 0xFF, (u8)data);
+				   (i & 0x3FFF), (u8)data);
 		if (err)
 			return err;
 		msleep(20);
@@ -939,7 +1141,7 @@ static int imx230_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 		return 0;
 
 	switch (ctrl->id) {
-#ifdef IMX230_EEPROM_PRESENT
+#if IMX230_EEPROM_PRESENT
 	case V4L2_CID_EEPROM_DATA:
 		err = imx230_read_eeprom(priv, ctrl);
 		if (err)
@@ -977,9 +1179,14 @@ static int imx230_s_ctrl(struct v4l2_ctrl *ctrl)
 		err = imx230_set_coarse_time_short(priv, ctrl->val);
 		break;
 	case V4L2_CID_GROUP_HOLD:
-		err = imx230_set_group_hold(priv, ctrl->val);
+		if (switch_ctrl_qmenu[ctrl->val] == SWITCH_ON) {
+			priv->group_hold_en = true;
+		} else {
+			priv->group_hold_en = false;
+			err = imx230_set_group_hold(priv);
+		}
 		break;
-#ifdef IMX230_EEPROM_PRESENT
+#if IMX230_EEPROM_PRESENT
 	case V4L2_CID_EEPROM_DATA:
 		pr_debug("%s: eeprom %d\n", __func__, ctrl->id);
 		if (!ctrl->string[0])
@@ -1096,7 +1303,12 @@ static struct camera_common_pdata *imx230_parse_dt(struct i2c_client *client)
 	sts = of_property_read_string(np, "mclk", &board_priv_pdata->mclk_name);
 	if (sts)
 		dev_err(&client->dev, "mclk not found %d\n", sts);
-	board_priv_pdata->reset_gpio = of_get_named_gpio(np, "reset-gpios", 0);
+	sts = of_get_named_gpio(np, "reset-gpios", 0);
+	if (sts >= 0)
+		board_priv_pdata->reset_gpio = sts;
+	sts = of_get_named_gpio(np, "pwdn-gpios", 0);
+	if (sts >= 0)
+		board_priv_pdata->pwdn_gpio = sts;
 
 	sts = of_property_read_string(np, "avdd-reg",
 			&board_priv_pdata->regulators.avdd);
@@ -1115,6 +1327,8 @@ static int imx230_probe(struct i2c_client *client,
 {
 	struct camera_common_data *common_data;
 	struct imx230 *priv;
+	struct soc_camera_subdev_desc *ssdd = soc_camera_i2c_to_desc(client);
+	struct tegra_camera_platform_data *imx230_camera_data;
 	int err;
 
 	pr_err("[IMX230]: probing v4l2 sensor.\n");
@@ -1142,13 +1356,20 @@ static int imx230_probe(struct i2c_client *client,
 		return -ENODEV;
 	}
 
+	ssdd = soc_camera_i2c_to_desc(client);
+	imx230_camera_data = (struct tegra_camera_platform_data *)
+			     ssdd->drv_priv;
+	if (!imx230_camera_data) {
+		dev_err(&client->dev, "unable to find platform data\n");
+		return -EFAULT;
+	}
+
 	client->dev.of_node = of_find_node_by_name(NULL, "imx230");
 
 	if (client->dev.of_node)
 		priv->pdata = imx230_parse_dt(client);
 	else
-		priv->pdata = (struct camera_common_pdata *)
-				client->dev.platform_data;
+		priv->pdata = ssdd->dev_priv;
 
 	if (!priv->pdata) {
 		dev_err(&client->dev, "unable to get platform data\n");
@@ -1159,16 +1380,21 @@ static int imx230_probe(struct i2c_client *client,
 	common_data->ctrl_handler	= &priv->ctrl_handler;
 	common_data->i2c_client		= client;
 	common_data->frmfmt		= &imx230_frmfmt[0];
+	common_data->color_fmts		= imx230_color_fmts;
 	common_data->colorfmt		= camera_common_find_datafmt(
 					  IMX230_DEFAULT_DATAFMT);
+	common_data->ctrls		= priv->ctrls;
 	common_data->power		= &priv->power;
 	common_data->priv		= (void *)priv;
 	common_data->ident		= V4L2_IDENT_IMX230;
 	common_data->numfmts		= ARRAY_SIZE(imx230_frmfmt);
+	common_data->num_color_fmts	= ARRAY_SIZE(imx230_color_fmts);
 	common_data->def_mode		= IMX230_DEFAULT_MODE;
 	common_data->def_width		= IMX230_DEFAULT_WIDTH;
 	common_data->def_height		= IMX230_DEFAULT_HEIGHT;
 	common_data->def_clk_freq	= IMX230_DEFAULT_CLK_FREQ;
+	common_data->csi_port		= (int)imx230_camera_data->port;
+	common_data->numlanes		= imx230_camera_data->lanes;
 
 	priv->i2c_client		= client;
 	priv->s_data			= common_data;
@@ -1186,7 +1412,7 @@ static int imx230_probe(struct i2c_client *client,
 	if (err)
 		return err;
 
-#ifdef IMX230_EEPROM_PRESENT
+#if IMX230_EEPROM_PRESENT
 	/* eeprom interface */
 	err = imx230_eeprom_device_init(priv);
 	if (err)

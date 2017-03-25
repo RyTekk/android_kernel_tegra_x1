@@ -3,7 +3,7 @@
  *
  * GK20A PMU (aka. gPMU outside gk20a context)
  *
- * Copyright (c) 2011-2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -49,8 +49,8 @@
 /* Mapping between AP_CTRLs and Idle counters */
 #define PMU_AP_IDLE_MASK_GRAPHICS	(PMU_AP_IDLE_MASK_HIST_IDX_1)
 
-#define APP_VERSION			19123622
-#define APP_VERSION_GM20B_4 19008461
+#define APP_VERSION_T186_0	19494277
+#define APP_VERSION_GM20B_4 20432445
 #define APP_VERSION_GM20B_3 18935575
 #define APP_VERSION_GM20B_2 18694072
 #define APP_VERSION_GM20B_1 18547257
@@ -304,6 +304,20 @@ enum {
 	GK20A_PMU_DMAIDX_END		= 7
 };
 
+struct falc_u64 {
+	u32 lo;
+	u32 hi;
+};
+
+struct falc_dma_addr {
+	u32 dma_base;
+	/*dma_base1 is 9-bit MSB for FB Base
+	 *address for the transfer in FB after
+	 *address using 49b FB address*/
+	u16 dma_base1;
+	u8 dma_offset;
+};
+
 struct pmu_mem_v0 {
 	u32 dma_base;
 	u8  dma_offset;
@@ -313,6 +327,12 @@ struct pmu_mem_v0 {
 struct pmu_mem_v1 {
 	u32 dma_base;
 	u8  dma_offset;
+	u8  dma_idx;
+	u16 fb_size;
+};
+
+struct pmu_mem_v2 {
+	struct falc_dma_addr dma_addr;
 	u8  dma_idx;
 	u16 fb_size;
 };
@@ -362,6 +382,20 @@ struct pmu_cmdline_args_v3 {
 					registers*/
 	struct pmu_mem_v1 gc6_ctx;		/* dmem offset of gc6 context */
 };
+
+struct pmu_cmdline_args_v4 {
+	u32 reserved;
+	u32 cpu_freq_hz;		/* Frequency of the clock driving PMU */
+	u32 falc_trace_size;		/* falctrace buffer size (bytes) */
+	struct falc_dma_addr dma_addr;	/* 256-byte block address */
+	u32 falc_trace_dma_idx;		/* dmaIdx for DMA operations */
+	u8 secure_mode;
+	u8 raise_priv_sec;     /*Raise priv level required for desired
+					registers*/
+	struct pmu_mem_v2 gc6_ctx;		/* dmem offset of gc6 context */
+	u8 pad;
+};
+
 
 #define GK20A_PMU_TRACE_BUFSIZE     0x4000   /* 4K */
 #define GK20A_PMU_DMEM_BLKSIZE2		8
@@ -437,7 +471,7 @@ struct pmu_ucode_desc {
 #define PMU_UNIT_ID_IS_VALID(id)		\
 		(((id) < PMU_UNIT_END) || ((id) >= PMU_UNIT_TEST_START))
 
-#define PMU_DMEM_ALLOC_ALIGNMENT	(32)
+#define PMU_DMEM_ALLOC_ALIGNMENT	(4)
 #define PMU_DMEM_ALIGNMENT		(4)
 
 #define PMU_CMD_FLAGS_PMU_MASK		(0xF0)
@@ -471,6 +505,13 @@ struct pmu_allocation_v1 {
 	struct {
 		struct pmu_dmem dmem;
 		struct pmu_mem_v1 fb;
+	} alloc;
+};
+
+struct pmu_allocation_v2 {
+	struct {
+		struct pmu_dmem dmem;
+		struct pmu_mem_v2 fb;
 	} alloc;
 };
 
@@ -623,7 +664,7 @@ struct pmu_pg_cmd_elpg_cmd {
 	u16 cmd;
 };
 
-struct pmu_pg_cmd_eng_buf_load {
+struct pmu_pg_cmd_eng_buf_load_v0 {
 	u8 cmd_type;
 	u8 engine_id;
 	u8 buf_idx;
@@ -632,6 +673,18 @@ struct pmu_pg_cmd_eng_buf_load {
 	u32 dma_base;
 	u8 dma_offset;
 	u8 dma_idx;
+};
+
+struct pmu_pg_cmd_eng_buf_load_v1 {
+	u8 cmd_type;
+	u8 engine_id;
+	u8 buf_idx;
+	u8 pad;
+	struct flcn_mem_desc {
+		struct falc_u64 dma_addr;
+		u16 dma_size;
+		u8 dma_idx;
+	} dma_desc;
 };
 
 enum {
@@ -649,7 +702,8 @@ struct pmu_pg_cmd {
 	union {
 		u8 cmd_type;
 		struct pmu_pg_cmd_elpg_cmd elpg_cmd;
-		struct pmu_pg_cmd_eng_buf_load eng_buf_load;
+		struct pmu_pg_cmd_eng_buf_load_v0 eng_buf_load_v0;
+		struct pmu_pg_cmd_eng_buf_load_v1 eng_buf_load_v1;
 		struct pmu_pg_cmd_stat stat;
 		/* TBD: other pg commands */
 		union pmu_ap_cmd ap_cmd;
@@ -661,6 +715,8 @@ struct pmu_pg_cmd {
 enum {
 	PMU_ACR_CMD_ID_INIT_WPR_REGION = 0x0          ,
 	PMU_ACR_CMD_ID_BOOTSTRAP_FALCON,
+	PMU_ACR_CMD_ID_RESERVED,
+	PMU_ACR_CMD_ID_BOOTSTRAP_MULTIPLE_FALCONS,
 };
 
 /*
@@ -682,14 +738,27 @@ struct pmu_acr_cmd_bootstrap_falcon {
 	u32 falconid;
 };
 
+/*
+ * falcon ID to bootstrap
+ */
+struct pmu_acr_cmd_bootstrap_multiple_falcons {
+	u8 cmd_type;
+	u32 flags;
+	u32 falconidmask;
+	u32 usevamask;
+	struct falc_u64 wprvirtualbase;
+};
+
 #define PMU_ACR_CMD_BOOTSTRAP_FALCON_FLAGS_RESET_NO  1
 #define PMU_ACR_CMD_BOOTSTRAP_FALCON_FLAGS_RESET_YES 0
+
 
 struct pmu_acr_cmd {
 	union {
 		u8 cmd_type;
 		struct pmu_acr_cmd_bootstrap_falcon bootstrap_falcon;
 		struct pmu_acr_cmd_init_wpr_details init_wpr;
+		struct pmu_acr_cmd_bootstrap_multiple_falcons boot_falcons;
 	};
 };
 
@@ -1130,6 +1199,7 @@ struct pmu_gk20a {
 	/* TBD: remove this if ZBC seq is fixed */
 	struct mem_desc seq_buf;
 	struct mem_desc trace_buf;
+	struct mem_desc wpr_buf;
 	bool buf_loaded;
 
 	struct pmu_sha1_gid gid_info;
@@ -1189,6 +1259,7 @@ struct pmu_gk20a {
 		struct pmu_cmdline_args_v1 args_v1;
 		struct pmu_cmdline_args_v2 args_v2;
 		struct pmu_cmdline_args_v3 args_v3;
+		struct pmu_cmdline_args_v4 args_v4;
 	};
 	unsigned long perfmon_events_cnt;
 	bool perfmon_sampling_enabled;
@@ -1246,4 +1317,6 @@ int gk20a_aelpg_init_and_enable(struct gk20a *g, u8 ctrl_id);
 void pmu_enable_irq(struct pmu_gk20a *pmu, bool enable);
 int pmu_wait_message_cond(struct pmu_gk20a *pmu, u32 timeout,
 				 u32 *var, u32 val);
+void pmu_handle_fecs_boot_acr_msg(struct gk20a *g, struct pmu_msg *msg,
+				void *param, u32 handle, u32 status);
 #endif /*__PMU_GK20A_H__*/

@@ -6,8 +6,7 @@
 GCOV_PROFILE := y
 
 subdir-ccflags-y += -Werror
-subdir-ccflags-y += -I$(srctree)/drivers/platform/tegra/include \
-		    -I$(srctree)/arch/arm/mach-tegra
+subdir-ccflags-y += -I$(srctree)/arch/arm/mach-tegra
 
 obj-$(CONFIG_USB_SUPPORT)               += tegra_usb_pmc.o
 obj-$(CONFIG_TEGRA_USB_SHARED_PAD)      += tegra_usb_pad_ctrl.o
@@ -53,7 +52,7 @@ endif
 
 ifeq ($(CONFIG_TEGRA_CLK_FRAMEWORK),y)
 obj-y += dvfs.o
-obj-$(CONFIG_TEGRA_CLK_FRAMEWORK) += clock.o
+obj-$(CONFIG_TEGRA_CLK_FRAMEWORK) += clock.o tegra-non-dt-clock-reset.o
 obj-$(CONFIG_ARCH_TEGRA_12x_SOC) += tegra12_clocks.o
 obj-$(CONFIG_DEBUG_FS) += clocks_stats.o
 ifeq ($(CONFIG_ARCH_TEGRA_13x_SOC),y)
@@ -124,7 +123,9 @@ obj-$(CONFIG_COMMON_CLK) += common_clock.o
 
 
 obj-$(CONFIG_TEGRA3_PM) += pm-t3.o
+ifeq ($(CONFIG_PM_SLEEP),y)
 obj-$(CONFIG_ARCH_TEGRA_21x_SOC) += wakeups-t21x.o
+endif
 
 
 obj-$(CONFIG_TEGRA_KFUSE) += kfuse.o
@@ -165,10 +166,6 @@ obj-$(CONFIG_TEGRA_HMP_CLUSTER_CONTROL)      += cluster-control.o
 
 obj-$(CONFIG_TEGRA_USE_NCT)             += nct.o nct_sysfs.o
 
-else # --- CONFIG_ARM64 --- #
-
-obj-y += dummy.o # generate a built-in.o
-
 endif
 
 obj-$(CONFIG_TEGRA_IVC)			+= tegra-ivc.o
@@ -177,8 +174,8 @@ obj-$(CONFIG_TEGRA_GPU_EDP)             += gpu-edp.o
 obj-y					+= asim.o
 obj-y					+= mselect.o
 
-obj-$(CONFIG_TEGRA_WDT_RECOVERY)        += wdt-recovery.o
-
 obj-y					+= tegra_prod.o
 
 obj-y					+= reboot.o
+
+obj-$(CONFIG_TEGRA_PANEL_CY8C) += panel-cy8c.o

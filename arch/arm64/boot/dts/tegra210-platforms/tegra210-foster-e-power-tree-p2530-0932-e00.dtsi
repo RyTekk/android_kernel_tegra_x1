@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -39,6 +39,8 @@
 				};
 
 				sd2 {
+					maxim,fps-source = <FPS_SRC_1>;
+					maxim,suspend-fps-source = <FPS_SRC_NONE>;
 					regulator-enable-ramp-delay = <176>;
 					regulator-disable-ramp-delay = <32000>;
 					regulator-ramp-delay = <27500>;
@@ -85,6 +87,7 @@
 					regulator-disable-ramp-delay = <610>;
 					regulator-ramp-delay = <100000>;
 					regulator-ramp-delay-scale = <200>;
+					regulator-disable-active-discharge;
 				};
 
 				ldo5 {
@@ -102,6 +105,8 @@
 				};
 
 				ldo7 {
+					maxim,fps-source = <FPS_SRC_1>;
+					maxim,suspend-fps-source = <FPS_SRC_NONE>;
 					regulator-enable-ramp-delay = <24>;
 					regulator-disable-ramp-delay = <2768>;
 					regulator-ramp-delay = <100000>;
@@ -346,12 +351,18 @@
 		iopower-dp-supply = <&max77620_sd3>;
 	};
 
-    psci {
-         compatible = "arm,psci";
-         method = "smc";
-         cpu_off = <0x84000002>;
-         cpu_on = <0xc4000003>;
-         cpu_suspend = <0xc4000001>;
-   };
-
+	pmc@7000e400 {
+		bootrom-commands {
+			commands@4-003c {
+				nvidia,command-names = "pmic-rails";
+				reg = <0x3c>;
+				nvidia,enable-8bit-register;
+				nvidia,enable-8bit-data;
+				nvidia,controller-type-i2c;
+				nvidia,controller-id = <4>;
+				nvidia,enable-controller-reset;
+				nvidia,write-commands = <0x00000016 0x00000020>;
+			};
+		};
+	};
 };

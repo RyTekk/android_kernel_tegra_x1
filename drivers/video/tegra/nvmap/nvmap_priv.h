@@ -3,7 +3,7 @@
  *
  * GPU memory management driver for Tegra
  *
- * Copyright (c) 2009-2015, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2009-2016, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -70,6 +70,7 @@ extern u32 nvmap_max_handle_count;
 
 /* If set force zeroed memory to userspace. */
 extern bool zero_memory;
+extern struct vm_operations_struct nvmap_vma_ops;
 
 #ifdef CONFIG_ARM64
 #define PG_PROT_KERNEL PAGE_KERNEL
@@ -90,7 +91,9 @@ extern void __flush_dcache_page(struct address_space *, struct page *);
 struct nvmap_vma_list {
 	struct list_head list;
 	struct vm_area_struct *vma;
+	unsigned long save_vm_flags;
 	pid_t pid;
+	atomic_t ref;
 };
 
 struct nvmap_carveout_node {
@@ -106,6 +109,7 @@ struct nvmap_carveout_node {
 struct nvmap_pgalloc {
 	struct page **pages;
 	bool contig;			/* contiguous system memory */
+	atomic_t reserved;
 	atomic_t ndirty;	/* count number of dirty pages */
 };
 
@@ -229,6 +233,7 @@ struct nvmap_client {
 	u32				handle_count;
 	u32				next_fd;
 	int warned;
+	int tag_warned;
 };
 
 struct nvmap_vma_priv {
@@ -252,6 +257,7 @@ struct nvmap_device {
 	struct list_head lru_handles;
 	spinlock_t	lru_lock;
 	struct dentry *handles_by_pid;
+	u32 dynamic_dma_map_mask;
 };
 
 enum nvmap_stats_t {
@@ -372,9 +378,6 @@ struct nvmap_handle_ref *nvmap_create_handle(struct nvmap_client *client,
 struct nvmap_handle_ref *nvmap_duplicate_handle(struct nvmap_client *client,
 					struct nvmap_handle *h, bool skip_val);
 
-struct nvmap_handle *nvmap_validate_get_by_ivmid(struct nvmap_client *client,
-						 unsigned int ivm_id);
-
 struct nvmap_handle_ref *nvmap_create_handle_from_fd(
 			struct nvmap_client *client, int fd);
 
@@ -429,9 +432,13 @@ void inner_clean_cache_all(void);
 void nvmap_clean_cache(struct page **pages, int numpages);
 void nvmap_clean_cache_page(struct page *page);
 void nvmap_flush_cache(struct page **pages, int numpages);
+bool nvmap_can_fast_cache_maint(struct nvmap_handle *h, unsigned long start,
+			  unsigned long end, unsigned int op);
 
 int nvmap_do_cache_maint_list(struct nvmap_handle **handles, u32 *offsets,
 			      u32 *sizes, int op, int nr);
+int __nvmap_cache_maint(struct nvmap_client *client,
+			       struct nvmap_cache_op *op);
 
 /* Internal API to support dmabuf */
 struct dma_buf *__nvmap_dmabuf_export(struct nvmap_client *client,
@@ -496,74 +503,55 @@ static inline bool nvmap_page_mkclean(struct page **page)
 	return true;
 }
 
-static inline bool nvmap_page_reserved(struct page *page)
-{
-	return !!((unsigned long)page & 2UL);
-}
-
-static inline bool nvmap_page_mkreserved(struct page **page)
-{
-	if (nvmap_page_reserved(*page))
-		return false;
-	*page = (struct page *)((unsigned long)*page | 2UL);
-	return true;
-}
-
-static inline bool nvmap_page_mkunreserved(struct page **page)
-{
-	if (!nvmap_page_reserved(*page))
-		return false;
-	*page = (struct page *)((unsigned long)*page & ~2UL);
-	return true;
-}
-
 /*
  * FIXME: assume user space requests for reserve operations
  * are page aligned
  */
 static inline int nvmap_handle_mk(struct nvmap_handle *h,
 				  u32 offset, u32 size,
-				  bool (*fn)(struct page **))
+				  bool (*fn)(struct page **),
+				  bool locked)
 {
 	int i, nchanged = 0;
 	int start_page = PAGE_ALIGN(offset) >> PAGE_SHIFT;
 	int end_page = (offset + size) >> PAGE_SHIFT;
 
-	mutex_lock(&h->lock);
+	if (!locked)
+		mutex_lock(&h->lock);
 	if (h->heap_pgalloc) {
 		for (i = start_page; i < end_page; i++)
 			nchanged += fn(&h->pgalloc.pages[i]) ? 1 : 0;
 	}
-	mutex_unlock(&h->lock);
+	if (!locked)
+		mutex_unlock(&h->lock);
 	return nchanged;
 }
 
 static inline void nvmap_handle_mkclean(struct nvmap_handle *h,
 					u32 offset, u32 size)
 {
-	int nchanged = nvmap_handle_mk(h, offset, size, nvmap_page_mkclean);
+	int nchanged;
+
+	if (h->heap_pgalloc && !atomic_read(&h->pgalloc.ndirty))
+		return;
+
+	nchanged = nvmap_handle_mk(h, offset, size, nvmap_page_mkclean, false);
 	if (h->heap_pgalloc)
 		atomic_sub(nchanged, &h->pgalloc.ndirty);
 }
 
-static inline void nvmap_handle_mkdirty(struct nvmap_handle *h,
+static inline void _nvmap_handle_mkdirty(struct nvmap_handle *h,
 					u32 offset, u32 size)
 {
-	int nchanged = nvmap_handle_mk(h, offset, size, nvmap_page_mkdirty);
+	int nchanged;
+
+	if (h->heap_pgalloc &&
+		(atomic_read(&h->pgalloc.ndirty) == (h->size >> PAGE_SHIFT)))
+		return;
+
+	nchanged = nvmap_handle_mk(h, offset, size, nvmap_page_mkdirty, true);
 	if (h->heap_pgalloc)
-		atomic_sub(nchanged, &h->pgalloc.ndirty);
-}
-
-static inline void nvmap_handle_mkunreserved(struct nvmap_handle *h,
-					     u32 offset, u32 size)
-{
-	nvmap_handle_mk(h, offset, size, nvmap_page_mkunreserved);
-}
-
-static inline void nvmap_handle_mkreserved(struct nvmap_handle *h,
-					   u32 offset, u32 size)
-{
-	nvmap_handle_mk(h, offset, size, nvmap_page_mkreserved);
+		atomic_add(nchanged, &h->pgalloc.ndirty);
 }
 
 static inline struct page **nvmap_pages(struct page **pg_pages, u32 nr_pages)
@@ -653,7 +641,5 @@ static inline bool nvmap_handle_track_dirty(struct nvmap_handle *h)
 	return h->userflags & (NVMAP_HANDLE_CACHE_SYNC |
 			       NVMAP_HANDLE_CACHE_SYNC_AT_RESERVE);
 }
-
-void nvmap_dmabuf_release_stashed_maps(struct dma_buf *dmabuf);
 
 #endif /* __VIDEO_TEGRA_NVMAP_NVMAP_H */

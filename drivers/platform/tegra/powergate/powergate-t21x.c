@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -19,6 +19,7 @@
 #include <linux/tegra-soc.h>
 #include <linux/platform/tegra/dvfs.h>
 #include <linux/tegra_soctherm.h>
+#include <trace/events/power.h>
 
 #include "powergate-priv.h"
 #include "powergate-ops-t1xx.h"
@@ -196,9 +197,9 @@ static struct powergate_partition_info tegra210_pg_partition_info[] = {
 		.clk_info = {
 			[0] = { .clk_name = "afi", .clk_type = CLK_AND_RST },
 			[1] = { .clk_name = "pcie", .clk_type = CLK_AND_RST },
-			[2] = { .clk_name = "cml0", .clk_type = CLK_ONLY },
-			[3] = { .clk_name = "pciex", .clk_type = RST_ONLY },
+			[2] = { .clk_name = "pciex", .clk_type = RST_ONLY },
 		},
+		.skip_reset = true,
 	},
 #endif
 #ifdef CONFIG_ARCH_TEGRA_HAS_SATA
@@ -207,10 +208,9 @@ static struct powergate_partition_info tegra210_pg_partition_info[] = {
 		.disable_after_boot = true,
 		.clk_info = {
 			[0] = { .clk_name = "sata_oob", .clk_type = CLK_AND_RST },
-			[1] = { .clk_name = "cml1", .clk_type = CLK_ONLY },
-			[2] = { .clk_name = "sata_cold", .clk_type = RST_ONLY },
-			[3] = { .clk_name = "sata_aux", .clk_type = CLK_ONLY },
-			[4] = { .clk_name = "sata", .clk_type = CLK_AND_RST },
+			[1] = { .clk_name = "sata_cold", .clk_type = RST_ONLY },
+			[2] = { .clk_name = "sata_aux", .clk_type = CLK_ONLY },
+			[3] = { .clk_name = "sata", .clk_type = CLK_AND_RST },
 		},
 		.slcg_info = {
 			[0] = { .clk_name = "mc_capa" },
@@ -450,6 +450,21 @@ static struct dvfs_rail *gpu_rail;
 
 #define HOTRESET_READ_COUNTS		5
 
+static bool tegra210_pg_is_hotreset_asserted(int mc_client_bit)
+{
+	int reg_idx, reg_bit;
+	u32 rst_control_reg;
+
+	if (mc_client_bit == MC_CLIENT_LAST)
+		return false;
+
+	reg_idx = mc_client_bit / 32;
+	reg_bit = mc_client_bit % 32;
+	rst_control_reg = tegra210_mc_reg[reg_idx].control_reg;
+
+	return mc_read(rst_control_reg) & (1 << reg_bit);
+}
+
 static bool tegra210_pg_hotreset_check(u32 status_reg, u32 *status)
 {
 	int i;
@@ -546,12 +561,18 @@ static int tegra210_pg_mc_flush_done(int id)
 	return 0;
 }
 
+static const char *tegra210_pg_get_name(int id)
+{
+	return tegra210_pg_partition_info[id].name;
+}
+
 static int tegra210_pg_powergate(int id)
 {
 	struct powergate_partition_info *partition =
 				&tegra210_pg_partition_info[id];
 	int ret = 0;
 
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 1, 0);
 	mutex_lock(&partition->pg_mutex);
 
 	if (--partition->refcount > 0)
@@ -567,6 +588,7 @@ static int tegra210_pg_powergate(int id)
 
 exit_unlock:
 	mutex_unlock(&partition->pg_mutex);
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 0, ret);
 	return ret;
 }
 
@@ -576,6 +598,7 @@ static int tegra210_pg_unpowergate(int id)
 				&tegra210_pg_partition_info[id];
 	int ret = 0;
 
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 1, 0);
 	mutex_lock(&partition->pg_mutex);
 
 	if (partition->refcount++ > 0)
@@ -591,6 +614,7 @@ static int tegra210_pg_unpowergate(int id)
 
 exit_unlock:
 	mutex_unlock(&partition->pg_mutex);
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 0, ret);
 	return ret;
 }
 
@@ -600,6 +624,7 @@ static int tegra210_pg_gpu_powergate(int id)
 	struct powergate_partition_info *partition =
 				&tegra210_pg_partition_info[id];
 
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 1, 0);
 	mutex_lock(&partition->pg_mutex);
 
 	if (--partition->refcount > 0)
@@ -644,6 +669,7 @@ static int tegra210_pg_gpu_powergate(int id)
 
 exit_unlock:
 	mutex_unlock(&partition->pg_mutex);
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 0, ret);
 	return ret;
 }
 
@@ -654,6 +680,7 @@ static int tegra210_pg_gpu_unpowergate(int id)
 	struct powergate_partition_info *partition =
 				&tegra210_pg_partition_info[id];
 
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 1, 0);
 	mutex_lock(&partition->pg_mutex);
 
 	if (partition->refcount++ > 0)
@@ -722,6 +749,7 @@ static int tegra210_pg_gpu_unpowergate(int id)
 
 exit_unlock:
 	mutex_unlock(&partition->pg_mutex);
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 0, ret);
 	return ret;
 
 err_clk_on:
@@ -729,6 +757,7 @@ err_clk_on:
 err_power:
 	mutex_unlock(&partition->pg_mutex);
 
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 0, ret);
 	return ret;
 }
 
@@ -828,23 +857,60 @@ static int tegra210_pg_unpowergate_partition(int id)
 
 static int tegra210_pg_powergate_clk_off(int id)
 {
+	struct powergate_partition_info *partition =
+				&tegra210_pg_partition_info[id];
+	int ret = 0;
+
 	BUG_ON(TEGRA_IS_GPU_POWERGATE_ID(id));
 
-	return tegra1xx_powergate_partition_with_clk_off(id,
-			&tegra210_pg_partition_info[id]);
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 1, 0);
+	mutex_lock(&partition->pg_mutex);
+
+	if (--partition->refcount > 0)
+		goto exit_unlock;
+
+	if ((partition->refcount < 0) || !tegra_powergate_is_powered(id)) {
+		WARN(1, "Partition %s already powergated, refcount and status mismatch\n",
+		     partition->name);
+		goto exit_unlock;
+	}
+
+	ret = tegra1xx_powergate_partition_with_clk_off(id, partition);
+
+exit_unlock:
+	mutex_unlock(&partition->pg_mutex);
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 0, ret);
+
+	return ret;
 }
 
 static int tegra210_pg_unpowergate_clk_on(int id)
 {
+	struct powergate_partition_info *partition =
+				&tegra210_pg_partition_info[id];
+	int ret = 0;
+
 	BUG_ON(TEGRA_IS_GPU_POWERGATE_ID(id));
 
-	return tegra1xx_unpowergate_partition_with_clk_on(id,
-			&tegra210_pg_partition_info[id]);
-}
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 1, 0);
+	mutex_lock(&partition->pg_mutex);
 
-static const char *tegra210_pg_get_name(int id)
-{
-	return tegra210_pg_partition_info[id].name;
+	if (partition->refcount++ > 0)
+		goto exit_unlock;
+
+	if (tegra_powergate_is_powered(id)) {
+		WARN(1, "Partition %s is already unpowergated, refcount and status mismatch\n",
+		     partition->name);
+		goto exit_unlock;
+	}
+
+	ret = tegra1xx_unpowergate_partition_with_clk_on(id, partition);
+
+exit_unlock:
+	mutex_unlock(&partition->pg_mutex);
+	trace_powergate(__func__, tegra210_pg_get_name(id), id, 0, ret);
+
+	return ret;
 }
 
 static spinlock_t *tegra210_pg_get_lock(void)
@@ -855,8 +921,10 @@ static spinlock_t *tegra210_pg_get_lock(void)
 static bool tegra210_pg_skip(int id)
 {
 	switch (id) {
-		default:
-			return false;
+	case TEGRA_POWERGATE_GPU:
+		return true;
+	default:
+		return false;
 	}
 }
 
@@ -893,9 +961,12 @@ static int tegra210_pg_init_refcount(void)
 		(tegra_powergate_is_powered(TEGRA_POWERGATE_DISB) ? 1 : 0) +
 		(tegra_powergate_is_powered(TEGRA_POWERGATE_VE) ? 1 : 0);
 
-	tegra_powergate_partition(TEGRA_POWERGATE_XUSBA);
-	tegra_powergate_partition(TEGRA_POWERGATE_XUSBB);
-	tegra_powergate_partition(TEGRA_POWERGATE_XUSBC);
+	if (tegra_powergate_is_powered(TEGRA_POWERGATE_XUSBA))
+		tegra_powergate_partition(TEGRA_POWERGATE_XUSBA);
+	if (tegra_powergate_is_powered(TEGRA_POWERGATE_XUSBB))
+		tegra_powergate_partition(TEGRA_POWERGATE_XUSBB);
+	if (tegra_powergate_is_powered(TEGRA_POWERGATE_XUSBC))
+		tegra_powergate_partition(TEGRA_POWERGATE_XUSBC);
 
 	return 0;
 }
@@ -922,6 +993,8 @@ static struct powergate_ops tegra210_pg_ops = {
 	.powergate_is_powered = tegra210_pg_is_powered,
 
 	.powergate_init_refcount = tegra210_pg_init_refcount,
+
+	.powergate_is_hotreset_asserted = tegra210_pg_is_hotreset_asserted,
 };
 
 struct powergate_ops *tegra210_powergate_init_chip_support(void)
@@ -964,7 +1037,7 @@ static int __init tegra210_disable_boot_partitions(void)
 		if (tegra210_pg_partition_info[i].disable_after_boot &&
 			(i != TEGRA_POWERGATE_GPU)) {
 			pr_info("    %s\n", tegra210_pg_partition_info[i].name);
-			tegra_powergate_partition(i);
+			tegra_powergate_partition_with_clk_off(i);
 		}
 
 	return 0;

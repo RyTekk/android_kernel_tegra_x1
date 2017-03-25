@@ -335,7 +335,6 @@ static int smmu_iommu_map_hv(struct iommu_domain *domain, unsigned long iova,
 	return err;
 }
 
-
 static int smmu_iommu_map_sg_hv(struct iommu_domain *domain,
 					unsigned long iova,
 					struct scatterlist *sgl, int npages,
@@ -354,7 +353,6 @@ static int smmu_iommu_map_sg_hv(struct iommu_domain *domain,
 	 * Native driver has all the logic to map sg so
 	 * directly using the function.
 	 */
-
 	err = __smmu_iommu_map_sg_native(domain, iova, sgl, npages, prot);
 	if (err)
 		return err;

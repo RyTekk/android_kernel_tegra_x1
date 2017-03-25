@@ -102,18 +102,26 @@ static const u32 core_process_speedos[][CORE_PROCESS_CORNERS_NUM] = {
 
 static void rev_sku_to_speedo_ids(int rev, int sku, int speedo_rev)
 {
+	bool joint_xpu_rail = false;
 	bool always_on = false;
 	bool shield_sku = false;
 	bool vcm31_sku = false;
+	bool darcy_sku = false;
 	bool a02 = rev == TEGRA_REVISION_A02;
 
 #ifdef CONFIG_OF
+	joint_xpu_rail = of_property_read_bool(of_chosen,
+					  "nvidia,tegra-joint_xpu_rail");
 	always_on = of_property_read_bool(of_chosen,
 					  "nvidia,tegra-always-on-personality");
 	shield_sku = of_property_read_bool(of_chosen,
 					   "nvidia,tegra-shield-sku");
 	vcm31_sku = of_property_read_bool(of_chosen,
 					       "nvidia,t210-vcm31-sku");
+	darcy_sku = of_property_read_bool(of_chosen,
+						"nvidia,tegra-darcy-sku");
+	if (darcy_sku)
+		sku = 0x87;
 #endif
 	switch (sku) {
 	case 0x00: /* Engg sku */
@@ -166,7 +174,7 @@ static void rev_sku_to_speedo_ids(int rev, int sku, int speedo_rev)
 		/* fall thru for a01 part and Darcy*/
 	case 0x87:
 		if (a02) {
-			cpu_speedo_id = 6;
+			cpu_speedo_id = joint_xpu_rail ? 6 : 2;
 			soc_speedo_id = 0;
 			gpu_speedo_id = 1;
 			threshold_index = 0;
@@ -175,17 +183,21 @@ static void rev_sku_to_speedo_ids(int rev, int sku, int speedo_rev)
 		}
 		/* fall thru for a01 part */
 	case 0x8F:
-		if (a02) {
-			cpu_speedo_id = 1;
+		if (a02 && always_on) {
+			cpu_speedo_id = joint_xpu_rail ? 10 : 9;
 			soc_speedo_id = 0;
 			gpu_speedo_id = 2;
 			threshold_index = 0;
 			core_min_mv = 800;
 			break;
 		}
-		/* fall thru for a01 part */
+		/* fall thru for a01 part or not always on */
 	default:
-		pr_warn("Tegra21: Unknown SKU %d\n", sku);
+		pr_warn("Tegra21: Unknown SKU/mode:\n");
+		pr_warn("sku = 0x%X a02 = %d shield_sku = %d vcm31_sku = %d\n",
+			sku, a02, shield_sku, vcm31_sku);
+		pr_warn("joint_xpu_rail = %d always_on = %d\n",
+			joint_xpu_rail, always_on);
 		cpu_speedo_id = 0;
 		soc_speedo_id = 0;
 		gpu_speedo_id = 0;

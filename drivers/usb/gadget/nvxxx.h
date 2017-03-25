@@ -1,7 +1,7 @@
 /*
 * nvxxx.h - Nvidia device mode implementation
 *
-* Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
 *
 * This program is free software; you can redistribute it and/or modify it
 * under the terms and conditions of the GNU General Public License,
@@ -23,6 +23,16 @@
 
 #define NON_STD_CHARGER_DET_TIME_MS 1000
 #define USB_ANDROID_SUSPEND_CURRENT_MA 2
+
+/* VENDOR ID */
+#define XUDC_VENDOR_ID		0x10de
+
+/* DEVICE ID */
+#define XUDC_DEVICE_ID_T210	0x0fad
+#define XUDC_DEVICE_ID_T186	0x10e2
+
+#define XUDC_IS_T210(t)	(t->device_id == XUDC_DEVICE_ID_T210)
+#define XUDC_IS_T186(t)	(t->device_id == XUDC_DEVICE_ID_T186)
 
 /*
  * Register definitions
@@ -100,6 +110,9 @@
 #define PORTSC_PLC	(1 << 22)
 #define PORTSC_CEC	(1 << 23)
 #define PORTSC_WPR	(1 << 30)
+
+#define PORTSC_CHANGE_MASK (PORTSC_CSC | PORTSC_WRC | PORTSC_PRC | \
+			    PORTSC_PLC | PORTSC_CEC)
 
 #define PORTSC_PLS_MASK	(0xf << 5)
 #define XDEV_U0		(0x0 << 5)
@@ -214,6 +227,12 @@
 		(((val) & (field ## _MASK)) >> (field ## _SHIFT))
 
 #define USB_REQ_SET_ISOCH_DEALY     49
+
+#if defined(CONFIG_ARCH_TEGRA_21x_SOC)
+#define NV_DISABLE_RCV_DET
+#define NV_REQ_LEN_THRESHOLD 16
+#define QUEUE_BABBLE_TRANSFER
+#endif
 
 #define PRIME_NOT_RCVD_WAR
 	/*--------------------------------------------*/
@@ -514,6 +533,14 @@ struct nv_udc_request {
 	struct transfer_trb_s *last_trb;
 	bool all_trbs_queued;
 	bool short_pkt;
+	bool need_zlp;	/* only used by ctrl ep */
+#ifdef NV_DISABLE_RCV_DET
+	unsigned actual_len;
+	unsigned first_trb_len;
+	u8 chain_bit;
+	bool trigger_babble;
+	bool babble;
+#endif
 };
 
 struct nv_setup_packet {
@@ -554,6 +581,9 @@ struct nv_udc_ep {
 	const struct usb_ss_ep_comp_descriptor *comp_desc;
 	bool tran_ring_full;
 	struct nv_udc_s *nvudc;
+#ifdef NV_DISABLE_RCV_DET
+	u32 pending_babble;
+#endif
 };
 
 struct sel_value_s {
@@ -606,6 +636,8 @@ struct nv_udc_s {
 	bool binded;
 	bool pullup;
 	bool is_elpg;
+	bool is_suspended;
+	bool extcon_event_processing;
 	bool elpg_is_processing;
 	u32 act_bulk_ep;
 	u32 num_enabled_eps;
@@ -690,6 +722,13 @@ struct nv_udc_s {
 	bool restore_cpufreq_scheduled;
 #endif
 	u16 device_id;
+
+#ifdef NV_DISABLE_RCV_DET
+	u32 babble_count;
+	struct list_head babble_req_list;
+	struct work_struct reschedule_babble_work;
+	bool babble_off;
+#endif
 };
 
 void free_data_struct(struct nv_udc_s *nvudc);
@@ -917,5 +956,3 @@ extern int debug_level;
 
 #define XUSB_VBUS				(0xc60)
 
-#define XUSB_DEVICE_ID_T210			0x0FAD
-#define XUSB_IS_T210(t)	(t->device_id == XUSB_DEVICE_ID_T210)

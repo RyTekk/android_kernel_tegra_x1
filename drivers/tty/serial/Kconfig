@@ -273,7 +273,7 @@ config SERIAL_SIRFSOC_CONSOLE
 
 config SERIAL_TEGRA
 	tristate "NVIDIA Tegra20/30 SoC serial controller"
-	depends on ARCH_TEGRA && TEGRA20_APB_DMA
+	depends on ARCH_TEGRA && TEGRA20_APB_DMA || PLATFORM_TEGRA && TEGRA186_GPC_DMA
 	select SERIAL_CORE
 	help
 	  Support for the on-chip UARTs on the NVIDIA Tegra series SOCs
@@ -1492,6 +1492,14 @@ config TEGRA_HV_COMM
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called tegra_hv_comm.
+
+config CONTROL_CONSOLE_WRITE
+	bool "Control Console Write"
+	depends on SERIAL_8250_CONSOLE
+	default n
+	help
+	  This will provide a sysfs interface to control console write
+	  dynamically.
 
 endmenu
 

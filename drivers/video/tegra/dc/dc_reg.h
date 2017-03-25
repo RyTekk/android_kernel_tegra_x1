@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Google, Inc.
  * Author: Erik Gilling <konkers@android.com>
  *
- * Copyright (c) 2010-2014, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2010-2015, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -77,9 +77,6 @@
 #define  WIN_A_UF_INT		(1 << 8)
 #define  WIN_B_UF_INT		(1 << 9)
 #define  WIN_C_UF_INT		(1 << 10)
-#define  HC_UF_INT		(1 << 23) /* Cursor or WinH */
-#define  WIN_D_UF_INT		(1 << 24)
-#define  WIN_T_UF_INT		(1 << 25)
 #define  MSF_INT		(1 << 12)
 #define  SSF_INT		(1 << 13)
 #define  WIN_A_OF_INT		(1 << 14)
@@ -88,6 +85,13 @@
 #define  GPIO_0_INT		(1 << 18)
 #define  GPIO_1_INT		(1 << 19)
 #define  GPIO_2_INT		(1 << 20)
+#ifdef CONFIG_TEGRA_NVDISPLAY
+#define  SMARTDIM_INT		(1 << 24)
+#endif
+#define  NVDISP_UF_INT		(1 << 23)
+#define  HC_UF_INT		(1 << 23) /* Cursor or WinH */
+#define  WIN_D_UF_INT		(1 << 24)
+#define  WIN_T_UF_INT		(1 << 25)
 
 #define DC_CMD_SIGNAL_RAISE1			0x03c
 #define DC_CMD_SIGNAL_RAISE2			0x03d

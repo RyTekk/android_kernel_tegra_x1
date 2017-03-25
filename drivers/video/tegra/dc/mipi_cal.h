@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/dc/mipi_cal.h
  *
- * Copyright (c) 2012-2014, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2012-2016, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -17,6 +17,7 @@
 #ifndef __DRIVERS_VIDEO_TEGRA_DC_MIPI_CAL_H__
 #define __DRIVERS_VIDEO_TEGRA_DC_MIPI_CAL_H__
 
+#ifndef COMMON_MIPICAL_SUPPORTED
 #include "mipi_cal_regs.h"
 
 struct tegra_mipi_cal {
@@ -34,16 +35,16 @@ static inline void tegra_mipi_cal_clk_enable(struct tegra_mipi_cal *mipi_cal)
 {
 	BUG_ON(IS_ERR_OR_NULL(mipi_cal));
 	if (mipi_cal->fixed_clk)
-		clk_prepare_enable(mipi_cal->fixed_clk);
-	clk_prepare_enable(mipi_cal->clk);
+		tegra_disp_clk_prepare_enable(mipi_cal->fixed_clk);
+	tegra_disp_clk_prepare_enable(mipi_cal->clk);
 }
 
 static inline void tegra_mipi_cal_clk_disable(struct tegra_mipi_cal *mipi_cal)
 {
 	BUG_ON(IS_ERR_OR_NULL(mipi_cal));
-	clk_disable_unprepare(mipi_cal->clk);
+	tegra_disp_clk_disable_unprepare(mipi_cal->clk);
 	if (mipi_cal->fixed_clk)
-		clk_disable_unprepare(mipi_cal->fixed_clk);
+		tegra_disp_clk_disable_unprepare(mipi_cal->fixed_clk);
 }
 
 /* reg is word offset */
@@ -111,5 +112,6 @@ void tegra_mipi_cal_destroy(struct tegra_dc *dc)
 {
 	/* dummy */
 }
+#endif
 #endif
 #endif

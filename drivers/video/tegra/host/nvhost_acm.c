@@ -37,9 +37,10 @@
 #include <linux/tegra_pm_domains.h>
 #include <linux/nvhost_ioctl.h>
 
-#include <tegra/mc.h>
+#include <linux/platform/tegra/mc.h>
 
 #include "nvhost_acm.h"
+#include "nvhost_vm.h"
 #include "nvhost_scale.h"
 #include "nvhost_channel.h"
 #include "dev.h"
@@ -190,6 +191,12 @@ void nvhost_module_reset(struct platform_device *dev, bool reboot)
 		__func__, dev_name(&dev->dev),
 		pdata->powergate_id);
 
+	/* Ensure that the device state is sane (i.e. device specifics
+	 * IRQs get disabled */
+	if (reboot)
+		if (pdata->prepare_poweroff)
+			pdata->prepare_poweroff(dev);
+
 	mutex_lock(&pdata->lock);
 	do_module_reset_locked(dev);
 	mutex_unlock(&pdata->lock);
@@ -252,6 +259,13 @@ int nvhost_module_busy(struct platform_device *dev)
 	}
 #else
 	if (!pdata->booted && pdata->finalize_poweron) {
+		ret = nvhost_vm_init_device(dev);
+		if (ret < 0) {
+			nvhost_err(&dev->dev, "failed to init vm, err %d",
+				   ret);
+			return ret;
+		}
+
 		ret = pdata->finalize_poweron(dev);
 		if (ret < 0) {
 			nvhost_err(&dev->dev, "failed to power on, err %d",
@@ -623,25 +637,6 @@ static ssize_t clockgate_delay_show(struct kobject *kobj,
 	return ret;
 }
 
-int nvhost_module_set_devfreq_rate(struct platform_device *dev, int index,
-		unsigned long rate)
-{
-	struct nvhost_device_data *pdata = platform_get_drvdata(dev);
-	int ret;
-
-	rate = clk_round_rate(pdata->clk[index], rate);
-	pdata->clocks[index].devfreq_rate = rate;
-
-	trace_nvhost_module_set_devfreq_rate(dev->name,
-			pdata->clocks[index].name, rate);
-
-	mutex_lock(&client_list_lock);
-	ret = nvhost_module_update_rate(dev, index);
-	mutex_unlock(&client_list_lock);
-
-	return ret;
-}
-
 int nvhost_clk_get(struct platform_device *dev, char *name, struct clk **clk)
 {
 	int i;
@@ -662,6 +657,10 @@ int nvhost_module_init(struct platform_device *dev)
 	struct kobj_attribute *attr = NULL;
 	struct nvhost_device_data *pdata = platform_get_drvdata(dev);
 	int partition_id = -1;
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	struct device_node *dn;
+	struct generic_pm_domain *gpd;
+#endif
 
 	/* initialize clocks to known state (=enabled) */
 	pdata->num_clks = 0;
@@ -680,7 +679,15 @@ int nvhost_module_init(struct platform_device *dev)
 		snprintf(devname, MAX_DEVID_LENGTH,
 			 (dev->id <= 0) ? "tegra_%s" : "tegra_%s.%d",
 			 dev->name, dev->id);
-		c = clk_get_sys(devname, pdata->clocks[i].name);
+
+		/* Get device managed clock if CCF is available, otherwise
+		 * assume tegra specific clock framework */
+
+		if (IS_ENABLED(CONFIG_COMMON_CLK))
+			c = devm_clk_get(&dev->dev, pdata->clocks[i].name);
+		else
+			c = clk_get_sys(devname, pdata->clocks[i].name);
+
 		if (IS_ERR(c)) {
 			dev_err(&dev->dev, "clk_get_sys failed for i=%d %s:%s",
 				i, devname, pdata->clocks[i].name);
@@ -714,7 +721,17 @@ int nvhost_module_init(struct platform_device *dev)
 		IS_ENABLED(CONFIG_PM_GENERIC_DOMAINS) &&
 		pdata->can_powergate;
 
+
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	gpd = dev_to_genpd(&dev->dev);
+	if (!gpd)
+		return -EINVAL;
+
+	dn = gpd->of_node;
+	of_property_read_u32(dn, "partition-id", &partition_id);
+#else
 	partition_id = pdata->powergate_id;
+#endif
 
 	/* needed to WAR MBIST issue */
 	if (pdata->poweron_toggle_slcg) {
@@ -856,8 +873,9 @@ void nvhost_module_deinit(struct platform_device *dev)
 		do_powergate_locked(pdata->powergate_id);
 	}
 
-	for (i = 0; i < pdata->num_clks; i++)
-		clk_put(pdata->clk[i]);
+	if (!IS_ENABLED(CONFIG_COMMON_CLK))
+		for (i = 0; i < pdata->num_clks; i++)
+			clk_put(pdata->clk[i]);
 
 	if (pdata->power_kobj) {
 		for (i = 0; i < NVHOST_POWER_SYSFS_ATTRIB_MAX; i++) {
@@ -960,7 +978,7 @@ int nvhost_module_add_domain(struct generic_pm_domain *domain,
 		pm_genpd_set_poweroff_delay(domain,
 				pdata->powergate_delay);
 
-	if (of_property_read_bool(dn, "wakeup_capable"))
+	if (of_property_read_bool(dn, "wakeup-capable"))
 		wakeup_capable = true;
 
 	device_set_wakeup_capable(&pdev->dev, wakeup_capable);
@@ -1131,9 +1149,17 @@ static int nvhost_module_power_on(struct generic_pm_domain *domain)
 {
 	struct nvhost_device_data *pdata;
 	int partition_id = -1;
-	pdata = container_of(domain, struct nvhost_device_data, pd);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	struct device_node *dn;
+#endif
 
+	pdata = container_of(domain, struct nvhost_device_data, pd);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	dn = domain->of_node;
+	of_property_read_u32(dn, "partition-id", &partition_id);
+#else
 	partition_id = pdata->powergate_id;
+#endif
 
 	mutex_lock(&pdata->lock);
 	if (pdata->can_powergate) {
@@ -1151,9 +1177,17 @@ static int nvhost_module_power_off(struct generic_pm_domain *domain)
 {
 	struct nvhost_device_data *pdata;
 	int partition_id = -1;
-	pdata = container_of(domain, struct nvhost_device_data, pd);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	struct device_node *dn;
+#endif
 
+	pdata = container_of(domain, struct nvhost_device_data, pd);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	dn = domain->of_node;
+	of_property_read_u32(dn, "partition-id", &partition_id);
+#else
 	partition_id = pdata->powergate_id;
+#endif
 
 	mutex_lock(&pdata->lock);
 	if (pdata->can_powergate) {
@@ -1216,6 +1250,11 @@ static int nvhost_module_finalize_poweron(struct device *dev)
 					nvhost_module_load_regs(pdev, true);
 			}
 		}
+
+		/* initialize device vm */
+		ret = nvhost_vm_init_device(pdev);
+		if (ret)
+			continue;
 
 		if (pdata->finalize_poweron)
 			ret = pdata->finalize_poweron(to_platform_device(dev));

@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Google, Inc.
  * Author: Erik Gilling <konkers@android.com>
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -30,6 +30,28 @@
 #define TEGRA_DC_Y420_MASK	(TEGRA_DC_Y420_30 | \
 				TEGRA_DC_Y420_36 | TEGRA_DC_Y420_48)
 
+#define TEGRA_DC_Y422_30	8	/* YCbCr 4:2:2 deep color 30bpp */
+#define TEGRA_DC_Y422_36	16	/* YCbCr 4:2:2 deep color 36bpp */
+#define TEGRA_DC_Y422_48	32	/* YCbCr 4:2:2 deep color 48bpp */
+#define TEGRA_DC_Y422_MASK	(TEGRA_DC_Y422_30 | \
+				TEGRA_DC_Y422_36 | TEGRA_DC_Y422_48)
+
+#define TEGRA_DC_Y444_30	64	/* YCbCr 4:4:4 deep color 30bpp */
+#define TEGRA_DC_Y444_36	128	/* YCbCr 4:4:4 deep color 36bpp */
+#define TEGRA_DC_Y444_48	256	/* YCbCr 4:4:4 deep color 48bpp */
+#define TEGRA_DC_Y444_MASK	(TEGRA_DC_Y444_30 | \
+				TEGRA_DC_Y444_36 | TEGRA_DC_Y444_48)
+
+#define TEGRA_DC_RGB_30	512		/* RGB 4:4:4 deep color 30bpp */
+#define TEGRA_DC_RGB_36	1024	/* RGB 4:4:4 deep color 36bpp */
+#define TEGRA_DC_RGB_48	2048	/* RGB 4:4:4 deep color 48bpp */
+#define TEGRA_DC_RGB_MASK	(TEGRA_DC_RGB_30 | \
+				TEGRA_DC_RGB_36 | TEGRA_DC_RGB_48)
+
+#define TEGRA_DC_MASK	(TEGRA_DC_Y420_MASK | \
+				TEGRA_DC_Y422_MASK | TEGRA_DC_Y444_MASK | \
+				TEGRA_DC_RGB_MASK)
+
 #define TEGRA_EDID_MAX_RETRY 5
 #define TEGRA_EDID_MIN_RETRY_DELAY_US 200
 #define TEGRA_EDID_MAX_RETRY_DELAY_US (TEGRA_EDID_MIN_RETRY_DELAY_US + 200)
@@ -54,7 +76,8 @@ enum {
 	CEA_DATA_BLOCK_EXT_VESA_VTBE = 3, /* VESA video timing block ext */
 	CEA_DATA_BLOCK_EXT_HDMI_VDB = 4, /* rsvd for HDMI video data block */
 	CEA_DATA_BLOCK_EXT_CDB = 5, /* colorimetry data block */
-	/* 6-12 rsvd for other video related blocks */
+	CEA_DATA_BLOCK_EXT_HDR = 6, /* HDR data block */
+	/* 7-12 rsvd for other video related blocks */
 	CEA_DATA_BLOCK_EXT_VFPDB = 13, /* video format preference data block */
 	CEA_DATA_BLOCK_EXT_Y420VDB = 14, /* YCbCr 4:2:0 video data block */
 	CEA_DATA_BLOCK_EXT_Y420CMDB = 15, /* YCbCr 4:2:0 cap map data block */
@@ -75,6 +98,11 @@ enum {
 
 struct tegra_edid_pvt;
 
+#define EDID_BASE_HEADER_SIZE 8
+static const unsigned char edid_base_header[EDID_BASE_HEADER_SIZE] = {
+	0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00
+};
+
 typedef int (*i2c_transfer_func_t)(struct tegra_dc *dc, struct i2c_msg *msgs,
 	int num);
 
@@ -87,12 +115,32 @@ enum {
 	EDID_SRC_DT,
 };
 
+/* Flag panel edid checksum is corrupted.
+ * SW fixes checksum before passing on the
+ * edid block to parser. For now just represent checksum
+ * corruption on any of the edid blocks.
+ */
+#define EDID_ERRORS_CHECKSUM_CORRUPTED	0x01
+
+/* Flag edid read failed after all retries. */
+#define EDID_ERRORS_READ_FAILED		0x02
+
+/* Flag fallback edid is in use. */
+#define EDID_ERRORS_USING_FALLBACK	0x04
+
+#define TEGRA_EDID_QUIRK_NONE      (0)
+/* TV doesn't support YUV420, but declares support */
+#define TEGRA_EDID_QUIRK_NO_YUV (1 << 0)
+
 struct tegra_edid {
 	struct tegra_edid_pvt	*data;
 
 	struct mutex		lock;
 	struct tegra_dc_i2c_ops i2c_ops;
 	struct tegra_dc		*dc;
+
+	/* Bitmap to flag EDID reading / parsing error conditions. */
+	u8 errors;
 };
 
 /*
@@ -122,13 +170,19 @@ void tegra_edid_destroy(struct tegra_edid *edid);
 int tegra_edid_get_monspecs(struct tegra_edid *edid,
 				struct fb_monspecs *specs);
 u16 tegra_edid_get_cd_flag(struct tegra_edid *edid);
+u16 tegra_edid_get_ex_hdr_cap(struct tegra_edid *edid);
+u16 tegra_edid_get_quant_cap(struct tegra_edid *edid);
 u16 tegra_edid_get_max_clk_rate(struct tegra_edid *edid);
 bool tegra_edid_is_scdc_present(struct tegra_edid *edid);
 bool tegra_edid_is_420db_present(struct tegra_edid *edid);
 bool tegra_edid_is_hfvsdb_present(struct tegra_edid *edid);
+bool tegra_edid_support_yuv422(struct tegra_edid *edid);
+bool tegra_edid_support_yuv444(struct tegra_edid *edid);
 u16 tegra_edid_get_ex_colorimetry(struct tegra_edid *edid);
 int tegra_edid_get_eld(struct tegra_edid *edid, struct tegra_edid_hdmi_eld *elddata);
-
+u32 tegra_edid_get_quirks(struct tegra_edid *edid);
+u32 tegra_edid_lookup_quirks(const char *manufacturer, u32 model,
+	const char *monitor_name);
 struct tegra_dc_edid *tegra_edid_get_data(struct tegra_edid *edid);
 void tegra_edid_put_data(struct tegra_dc_edid *data);
 int tegra_dc_edid_blob(struct tegra_dc *dc, struct i2c_msg *msgs, int num);

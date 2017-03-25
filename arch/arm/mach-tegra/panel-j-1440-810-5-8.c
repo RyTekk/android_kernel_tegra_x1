@@ -588,17 +588,9 @@ static struct tegra_dsi_out dsi_j_1440_810_5_8_pdata = {
 static int dsi_j_1440_810_5_8_disable(struct device *dev)
 {
 	/* Delay b/w DSI data/clk disable and panel reset */
-#ifdef CONFIG_ARCH_TEGRA_21x_SOC
-	udelay(4000);
-#else
 	usleep_range(3000, 5000);
-#endif
 	gpio_direction_output(en_panel_rst, 0);
-#ifdef CONFIG_ARCH_TEGRA_21x_SOC
-	udelay(4000);
-#else
 	usleep_range(3000, 5000);
-#endif
 
 	if (vdd_lcd_bl)
 		regulator_disable(vdd_lcd_bl);

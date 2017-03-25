@@ -69,7 +69,6 @@ config ARM64
 	help
 	  ARM 64-bit (AArch64) Linux support.
 
-trysource ../kernel-t18x/arch/arm64/Kconfig
 
 config ARCH_TEGRA_18x_SOC
 	bool "Tegra 18x family SOC Kconfig placeholder"
@@ -107,6 +106,10 @@ config NO_IOPORT
 
 config STACKTRACE_SUPPORT
 	def_bool y
+
+config ILLEGAL_POINTER_VALUE
+	hex
+	default 0xdead000000000000
 
 config LOCKDEP_SUPPORT
 	def_bool y
@@ -396,7 +399,7 @@ config NR_CPUS
 
 config HOTPLUG_CPU
 	bool "Support for hot-pluggable CPUs"
-	depends on SMP && HOTPLUG
+	depends on SMP
 	help
 	  Say Y here to experiment with turning CPUs off and on.  CPUs
 	  can be controlled through /sys/devices/system/cpu.
@@ -473,7 +476,7 @@ config ARCH_NR_GPIO
 	  If unsure, leave the default value.
 
 config HZ
-	int
+	int "Timer frequency"
 	default 100
 
 config ARCH_HAS_HOLES_MEMORYMODEL

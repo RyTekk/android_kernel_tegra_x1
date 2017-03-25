@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Google, Inc.
  * Author: Erik Gilling <konkers@android.com>
  *
- * Copyright (c) 2010-2015, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2010-2016, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -308,7 +308,10 @@ const struct tegra_hdmi_audio_config tegra_hdmi_audio_32k[] = {
 	{25200000,	4096,	25200,	24000},
 	{27000000,	4096,	27000,	24000},
 	{74250000,	4096,	74250,	24000},
+	{138504000,	4096,	138504,	24000},
 	{148500000,	4096,	148500,	24000},
+	{154012000,	4096,	154012,	24000},
+	{193274000,	4096,	193274,	24000},
 	{241500000,	4096,	241500,	24000},
 	{297000000,	3072,	222750,	24000},
 	{0,		0,	0},
@@ -318,7 +321,10 @@ const struct tegra_hdmi_audio_config tegra_hdmi_audio_44_1k[] = {
 	{25200000,	5880,	26250,	25000},
 	{27000000,	5880,	28125,	25000},
 	{74250000,	4704,	61875,	20000},
+	{138504000,	4704,	138504,	20000},
 	{148500000,	4704,	123750,	20000},
+	{154012000,	4704,	154012,	20000},
+	{193274000,	4704,	193274,	20000},
 	{241500000,	4704,	201250,	20000},
 	{297000000,	4704,	247500,	20000},
 	{0,		0,	0},
@@ -328,7 +334,10 @@ const struct tegra_hdmi_audio_config tegra_hdmi_audio_48k[] = {
 	{25200000,	6144,	25200,	24000},
 	{27000000,	6144,	27000,	24000},
 	{74250000,	6144,	74250,	24000},
+	{138504000,	6144,	138504,	24000},
 	{148500000,	6144,	148500,	24000},
+	{154012000,	6144,	154012,	24000},
+	{193274000,	6144,	193274,	24000},
 	{241500000,	5632,	221375,	22000},
 	{297000000,	5120,	247500,	24000},
 	{0,		0,	0},
@@ -338,7 +347,10 @@ const struct tegra_hdmi_audio_config tegra_hdmi_audio_88_2k[] = {
 	{25200000,	11760,	26250,	25000},
 	{27000000,	11760,	28125,	25000},
 	{74250000,	9408,	61875,	20000},
+	{138504000,	9408,	138504,	20000},
 	{148500000,	9408,	123750, 20000},
+	{154012000,	9408,	154012,	20000},
+	{193274000,	9408,	193274,	20000},
 	{241500000,	9408,	201250,	20000},
 	{297000000,	9408,	247500, 20000},
 	{0,		0,	0},
@@ -348,7 +360,10 @@ const struct tegra_hdmi_audio_config tegra_hdmi_audio_96k[] = {
 	{25200000,	12288,	25200,	24000},
 	{27000000,	12288,	27000,	24000},
 	{74250000,	12288,	74250,	24000},
+	{138504000,	12288,	138504,	24000},
 	{148500000,	12288,	148500,	24000},
+	{154012000,	12288,	154012,	24000},
+	{193274000,	12288,	193274,	24000},
 	{241500000,	11264,	221375,	22000},
 	{297000000,	10240,	247500,	24000},
 	{0,		0,	0},
@@ -358,7 +373,10 @@ const struct tegra_hdmi_audio_config tegra_hdmi_audio_176_4k[] = {
 	{25200000,	23520,	26250,	25000},
 	{27000000,	23520,	28125,	25000},
 	{74250000,	18816,	61875,	20000},
+	{138504000,	18816,	138504,	20000},
 	{148500000,	18816,	123750,	20000},
+	{154012000,	18816,	154012,	20000},
+	{193274000,	18816,	193274,	20000},
 	{241500000,	18816,	201250,	20000},
 	{297000000,	18816,	247500,	20000},
 	{0,		0,	0},
@@ -368,7 +386,10 @@ const struct tegra_hdmi_audio_config tegra_hdmi_audio_192k[] = {
 	{25200000,	24576,	25200,	24000},
 	{27000000,	24576,	27000,	24000},
 	{74250000,	24576,	74250,	24000},
+	{138504000,	24576,	138504,	24000},
 	{148500000,	24576,	148500,	24000},
+	{154012000,	24576,	154012,	24000},
+	{193274000,	24576,	193274,	24000},
 	{241500000,	22528,	221375,	22000},
 	{297000000,	20480,	247500,	24000},
 	{0,		0,	0},
@@ -416,6 +437,72 @@ static const struct tegra_hdmi_audio_config
 	return NULL;
 }
 
+struct tegra_hdmi_audio_config tegra_hdmi_audio_config_default[] = {
+	{148500000,	24576,	148500,	24000},
+	{0,		0,	0,	0},
+};
+
+static const struct tegra_hdmi_audio_config
+*tegra_hdmi_get_audio_config_default(unsigned audio_freq, unsigned pix_clock)
+{
+	struct tegra_hdmi_audio_config *table;
+	unsigned cts, N, fs, aval;
+
+	table = tegra_hdmi_audio_config_default;
+
+	/* N values are copied from spec for corresponding freq band */
+	switch (audio_freq) {
+	case AUDIO_FREQ_32K:
+		N = 4096;
+		fs = 32000;
+		aval = 24000;
+		break;
+	case AUDIO_FREQ_44_1K:
+		N = 6272;
+		fs = 44100;
+		aval = 20000;
+		break;
+	case AUDIO_FREQ_48K:
+		N = 6144;
+		fs = 48000;
+		aval = 24000;
+		break;
+	case AUDIO_FREQ_88_2K:
+		N = 12544;
+		fs = 88200;
+		aval = 20000;
+		break;
+	case AUDIO_FREQ_96K:
+		N = 12288;
+		fs = 96000;
+		aval = 24000;
+		break;
+	case AUDIO_FREQ_176_4K:
+		N = 25088;
+		fs = 176400;
+		aval = 20000;
+		break;
+	case AUDIO_FREQ_192K:
+		N = 24576;
+		fs = 192000;
+		aval = 24000;
+		break;
+	default:
+		/* we have non-matching freq band. Try to return default
+		   value instead of null table */
+		return table;
+	}
+
+	/* (Average CTS value) = (fTMDS_clock * N ) / (128 * fS) */
+	cts = ((pix_clock) / (128 * fs)) * N;
+
+	table->pix_clock = pix_clock;
+	table->cts = cts;
+	table->n = N;
+	table->aval = aval;
+
+	return table;
+}
 
 unsigned long tegra_hdmi_readl(struct tegra_dc_hdmi_data *hdmi,
 					     unsigned long reg)
@@ -799,13 +886,6 @@ static bool tegra_dc_hdmi_valid_pixclock(const struct tegra_dc *dc,
 	}
 }
 
-static bool tegra_dc_check_constraint(const struct fb_videomode *mode)
-{
-	return mode->hsync_len >= 1 && mode->vsync_len >= 1 &&
-		mode->lower_margin + mode->vsync_len + mode->upper_margin > 1 &&
-		mode->xres >= 16 && mode->yres >= 16;
-}
-
 /* adjusts pixclock to fit audio table */
 static bool tegra_dc_hdmi_adjust_pixclock(const struct tegra_dc *dc,
 					struct fb_videomode *mode)
@@ -873,10 +953,11 @@ bool tegra_dc_hdmi_mode_filter(const struct tegra_dc *dc,
 	if (mode->lower_margin == 1) {
 		mode->lower_margin++;
 		mode->upper_margin--;
+		mode->vmode |= FB_VMODE_ADJUSTED;
 	}
 
 	/* even after fix-ups the mode still isn't supported */
-	if (!tegra_dc_check_constraint(mode))
+	if (!check_fb_videomode_timings(dc, mode))
 		return false;
 
 	mode->flag |= FB_MODE_IS_DETAILED;
@@ -1190,6 +1271,7 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 #else
 	hdmi->nvhdcp = NULL;
 #endif
+	hdmi->connected_cache = dc->connected;
 	hdmi_state_machine_init(hdmi);
 
 	hdmi->dc = dc;
@@ -1280,7 +1362,6 @@ static int tegra_dc_hdmi_init(struct tegra_dc *dc)
 		if (tegra_dc_hpd(dc) && (!dc->initialized)) {
 			if (!tegra_edid_get_monspecs(hdmi->edid, &specs))
 				tegra_dc_set_fb_mode(dc, specs.modedb, false);
-			kfree(specs.modedb);
 		} else
 			tegra_dc_set_fb_mode(dc, &tegra_dc_vga_mode, false);
 	}
@@ -1557,7 +1638,10 @@ static int tegra_dc_hdmi_setup_audio(struct tegra_dc *dc, unsigned audio_freq,
 		dev_err(&dc->ndev->dev,
 			"hdmi: can't set audio to %d at %d pix_clock",
 			audio_freq, dc->mode.pclk);
-		return -EINVAL;
+		dev_err(&dc->ndev->dev,
+			"hdmi: falling back default configuration");
+		config = tegra_hdmi_get_audio_config_default(audio_freq,
+			dc->mode.pclk);
 	}
 
 	tegra_hdmi_writel(hdmi, 0, HDMI_NV_PDISP_HDMI_ACR_CTRL);
@@ -1750,7 +1834,7 @@ static int tegra_dc_find_cea_vic(const struct tegra_dc_mode *mode)
 
 	tegra_dc_to_fb_videomode(&m, mode);
 
-	m.vmode &= ~FB_VMODE_STEREO_MASK; /* stereo modes have the same VICs */
+	m.vmode &= FB_VMODE_INTERLACED; /* remove all flags but interlaced */
 
 	for (i = 1; i < CEA_861_D_MODEDB_SIZE; i++) {
 		const struct fb_videomode *curr = &cea_modes[i];
@@ -1779,6 +1863,7 @@ static int tegra_dc_find_hdmi_vic(const struct tegra_dc_mode *mode)
 	unsigned i;
 
 	tegra_dc_to_fb_videomode(&m, mode);
+	m.vmode &= FB_VMODE_INTERLACED;
 
 	for (i = 1; i < HDMI_EXT_MODEDB_SIZE; i++) {
 		const struct fb_videomode *curr = &hdmi_ext_modes[i];
@@ -2333,7 +2418,7 @@ static unsigned long  tegra12x_hdmi_determine_parent(
 	for (n = 4; (ref / 2 * n) <= pmax; n++) {
 		if ((ref / 2 * n) < pmin)  /* too low */
 			continue;
-		m = (ref * n) / (pclk / 1000);
+		m = DIV_ROUND_UP((ref * n), (pclk / 1000));
 		if (3 == (((m - 1) / 1000) + 1))  /* omit M==3 aft rnd-up */
 			continue;
 		f = m % 1000;  /* fractional parts */

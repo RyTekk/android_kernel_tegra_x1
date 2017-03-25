@@ -169,12 +169,10 @@
 		status = "disabled";
 
 		pci@1,0 {
-			nvidia,disable-clock-request;
 			status = "disabled";
 		};
 
 		pci@2,0 {
-			nvidia,disable-clock-request;
 			status = "disabled";
 		};
 	};
@@ -320,7 +318,6 @@
 
 	otg@7d000000 {
 		nvidia,id-detection-type = <2>;
-		nvidia,enable-host-peripheral-transitions;
 		status = "okay";
 	};
 

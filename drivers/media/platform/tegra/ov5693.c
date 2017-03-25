@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -2742,14 +2742,9 @@ static void ov5693_gpio_init(struct ov5693_info *info)
 			 info->pdata->num, ov5693_gpio[i].label);
 		err = gpio_request_one(info->gpio[type].gpio, flags, label);
 		if (err) {
-			if (type == OV5693_GPIO_TYPE_PWRDN)
-				dev_err(&info->i2c_client->dev,
-					"%s ERR %s %u\n", __func__, label,
-					info->gpio[type].gpio);
-			else
-				dev_dbg(&info->i2c_client->dev,
-					"%s WARNING %s %u\n", __func__, label,
-					info->gpio[type].gpio);
+			dev_err(&info->i2c_client->dev,
+				"%s ERR %s %u\n", __func__, label,
+				info->gpio[type].gpio);
 		} else {
 			info->gpio[type].own = true;
 			dev_dbg(&info->i2c_client->dev,
@@ -2805,11 +2800,11 @@ static int ov5693_platform_power_on(struct ov5693_power_rail *pw)
 	if (err)
 		goto ov5693_iovdd_fail;
 
-	usleep_range(1, 2);
 	ov5693_gpio_pwrdn(info, 1);
+	usleep_range(2000, 2010);
 	ov5693_gpio_reset(info, 1);
 
-	usleep_range(1000, 1110);
+	usleep_range(1350, 1360);
 
 	return 0;
 
@@ -2836,7 +2831,7 @@ static int ov5693_platform_power_off(struct ov5693_power_rail *pw)
 	usleep_range(21, 25);
 	ov5693_gpio_pwrdn(info, 0);
 	ov5693_gpio_reset(info, 0);
-	usleep_range(1, 2);
+	usleep_range(2000, 2010);
 
 	if (pw->dovdd)
 		regulator_disable(pw->dovdd);
@@ -2966,6 +2961,7 @@ static void ov5693_regulator_get(struct ov5693_info *info,
 		dev_err(&info->i2c_client->dev, "%s %s ERR: %p\n",
 			__func__, vreg_name, reg);
 		err = PTR_ERR(reg);
+		reg = NULL;
 	} else {
 		dev_dbg(&info->i2c_client->dev, "%s: %s\n",
 			__func__, vreg_name);
@@ -3260,6 +3256,21 @@ static int
 ov5693_write_eeprom(struct ov5693_info *info, u16 addr, u8 val)
 {
 	return regmap_write(info->eeprom[addr >> 8].regmap, addr & 0xFF, val);
+}
+
+static int
+ov5693_hw_detect(struct ov5693_info *info)
+{
+	if (ov5693_power_on(info, false))
+		return -1;
+
+	if (ov5693_get_fuse_id(info))
+		return -1;
+
+	if (ov5693_power_off(info))
+		return -1;
+
+	return 0;
 }
 
 static long ov5693_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -3561,8 +3572,6 @@ static struct ov5693_platform_data *ov5693_parse_dt(struct i2c_client *client)
 	struct device_node *np = client->dev.of_node;
 	struct ov5693_platform_data *pdata;
 	struct nvc_gpio_pdata *gpio_pdata = NULL;
-	const char *sname;
-	int ret;
 	int num;
 
 	dev_dbg(&client->dev, "%s: %s\n", __func__, np->full_name);
@@ -3587,29 +3596,10 @@ static struct ov5693_platform_data *ov5693_parse_dt(struct i2c_client *client)
 	pdata->static_info = (void *)(pdata->cap + 1);
 	gpio_pdata = (void *)(pdata->static_info + 1);
 
-	num = 0;
-	do {
-		ret = of_property_read_string_index(
-			np, "regulators", num, &sname);
-		if (ret < 0)
-			break;
-		switch (num) {
-		case 0:
-			pdata->regulators.avdd = sname;
-			pdata->regulators.dvdd = NULL;
-			pdata->regulators.dovdd = NULL;
-			break;
-		case 1:
-			pdata->regulators.dovdd = sname;
-			break;
-		case 2:
-			pdata->regulators.dvdd = sname;
-			break;
-		default:
-			break;
-		}
-		num++;
-	} while (num < 3);
+	/* regulator info */
+	of_property_read_string(np, "avdd", &pdata->regulators.avdd);
+	of_property_read_string(np, "dvdd", &pdata->regulators.dvdd);
+	of_property_read_string(np, "dovdd", &pdata->regulators.dovdd);
 
 	/* extra regulators info */
 	pdata->use_vcm_vdd = of_property_read_bool(np, "use-vcm-vdd");
@@ -3639,7 +3629,7 @@ static struct ov5693_platform_data *ov5693_parse_dt(struct i2c_client *client)
 	pdata->use_cam_gpio = of_property_read_bool(np, "cam,use-cam-gpio");
 
 	/* MCLK clock info */
-	of_property_read_string(np, "clocks", &pdata->mclk_name);
+	of_property_read_string(np, "mclk", &pdata->mclk_name);
 
 	/* get cap info */
 	nvc_imager_parse_caps(np, pdata->cap, pdata->static_info);
@@ -3659,7 +3649,6 @@ static int ov5693_probe(
 		.reg_bits = 16,
 		.val_bits = 8,
 	};
-
 
 	dev_dbg(&client->dev, "%s\n", __func__);
 	info = devm_kzalloc(&client->dev, sizeof(*info), GFP_KERNEL);
@@ -3746,6 +3735,9 @@ static int ov5693_probe(
 	if (info->pdata->num)
 		snprintf(info->devname, sizeof(info->devname), "%s.%u",
 			 info->devname, info->pdata->num);
+
+	if (ov5693_hw_detect(info))
+		return -ENODEV;
 
 	info->miscdev.name = info->devname;
 	info->miscdev.fops = &ov5693_fileops;

@@ -41,6 +41,13 @@
 	compatible = "nvidia,p1859", "nvidia,tegra124";
 	nvidia,dtsfilename = __FILE__;
 
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "p1859";
+		};
+	};
+
 	tegra_hv_wdt {
 		compatible = "nvidia,tegra-hv-wdt";
 		status = "okay";
@@ -72,7 +79,7 @@
 			gpu_as: gpu {
 				iova-start = <0x0 0x80100000>;
 				iova-size = <0x0 0x7BEFFFFF>;
-				alignment = <0xFFFFF>;
+				alignment = <0x20000>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
@@ -80,7 +87,6 @@
 			host1x_as: host1x {
 				iova-start = <0x0 0x80000000>;
 				iova-size = <0x0 0x77EFFFFF>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
@@ -88,7 +94,6 @@
 			nvavp_as: nvavp {
 				iova-start = <0x0 0x80000000>;
 				iova-size = <0x0 0x67FFFFFF>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
@@ -187,12 +192,12 @@
 		msenc {
 			compatible = "nvidia,tegra124-vhost-msenc";
 		};
-		
-		nvavp {
+
+		tsec {
 			status = "disabled";
 		};
 
-		tsec {
+		nvavp {
 			status = "disabled";
 		};
 	};
@@ -211,6 +216,18 @@
 		ivc-queue4 = <&tegra_hv 7>;
 	};
 
+	sdhci@700b0200 {
+		status = "disabled";
+	};
+
+	sdhci@700b0600 {
+		status = "disabled";
+	};
+
+	tegra-carveouts {
+		iommus = <&smmu TEGRA_SWGROUP_HC>;
+	};
+
 	avp-virt {
 		status = "okay";
 		compatible = "nvidia,tegra124-avp-virt";
@@ -220,9 +237,10 @@
 		ivc_queue = <&tegra_hv 21>;
 	};
 
-	tegra_carveouts {
-		compatible = "nvidia,carveouts";
-		iommus = <&smmu TEGRA_SWGROUP_HC>;
+	tegra_hv_storage {
+		compatible = "nvidia,tegra-hv-storage";
 		status = "okay";
+		instance = <0>;
+		ivc = <&tegra_hv 22>;
 	};
 };

@@ -28,13 +28,13 @@
 #include <linux/pagemap.h>
 #include <linux/syscalls.h>
 #include <asm/smp_plat.h>
-#include <linux/of.h>
 
 #include "ote_protocol.h"
 
 bool verbose_smc;
 core_param(verbose_smc, verbose_smc, bool, 0644);
 
+#define VR_AUTH_UUID	{0x0179ED96, 0x45A81ADB, 0x089DC68D, 0xBB520279}
 #define SET_RESULT(req, r, ro)	{ req->result = r; req->result_origin = ro; }
 
 static int te_pin_user_pages(void *buffer, size_t size,
@@ -324,10 +324,7 @@ static long tlk_generic_smc_on_cpu0(void *args)
 	       retval == TE_ERROR_PREEMPT_BY_FS) {
 		if (retval == TE_ERROR_PREEMPT_BY_FS)
 			callback_status = tlk_ss_op();
-		if (of_machine_is_compatible("nvidia,foster-e"))
-			retval = _tlk_generic_smc(TE_SMC_RESTART_LEGACY, callback_status, 0);
-		else
-			retval = _tlk_generic_smc(TE_SMC_RESTART, callback_status, 0);
+		retval = _tlk_generic_smc(TE_SMC_RESTART, callback_status, 0);
 	}
 
 	/* Print TLK logs if any */
@@ -427,10 +424,7 @@ void te_restore_keyslots(void)
 	/* Share the same lock used when request is send from user side */
 	mutex_lock(&smc_lock);
 
-	if (of_machine_is_compatible("nvidia,foster-e"))
-		retval = send_smc(TE_SMC_TA_EVENT_LEGACY, TA_EVENT_RESTORE_KEYS, 0);
-	else
-		retval = send_smc(TE_SMC_TA_EVENT, TA_EVENT_RESTORE_KEYS, 0);
+	retval = send_smc(TE_SMC_TA_EVENT, TA_EVENT_RESTORE_KEYS, 0);
 
 	mutex_unlock(&smc_lock);
 
@@ -487,10 +481,7 @@ void te_open_session(struct te_opensession *cmd,
 	INIT_LIST_HEAD(&session->inactive_persist_shmem_list);
 	INIT_LIST_HEAD(&session->persist_shmem_list);
 
-	if (of_machine_is_compatible("nvidia,foster-e"))
-		request->type = TE_SMC_OPEN_SESSION_LEGACY;
-	else
-		request->type = TE_SMC_OPEN_SESSION;
+	request->type = TE_SMC_OPEN_SESSION;
 
 	ret = te_prep_mem_buffers(request, session);
 	if (ret != OTE_SUCCESS) {
@@ -544,11 +535,7 @@ void te_close_session(struct te_closesession *cmd,
 	struct te_session *session;
 
 	request->session_id = cmd->session_id;
-
-	if (of_machine_is_compatible("nvidia,foster-e"))
-		request->type = TE_SMC_CLOSE_SESSION_LEGACY;
-	else
-		request->type = TE_SMC_CLOSE_SESSION;
+	request->type = TE_SMC_CLOSE_SESSION;
 
 	do_smc(request, context->dev);
 	if (request->result)
@@ -587,11 +574,7 @@ void te_launch_operation(struct te_launchop *cmd,
 
 	request->session_id = cmd->session_id;
 	request->command_id = cmd->operation.command;
-
-	if (of_machine_is_compatible("nvidia,foster-e"))
-		request->type = TE_SMC_LAUNCH_OPERATION_LEGACY;
-	else
-		request->type = TE_SMC_LAUNCH_OPERATION;
+	request->type = TE_SMC_LAUNCH_OPERATION;
 
 	ret = te_prep_mem_buffers(request, session);
 	if (ret != OTE_SUCCESS) {
@@ -613,3 +596,82 @@ void te_launch_operation(struct te_launchop *cmd,
 
 	te_release_mem_buffers(&session->temp_shmem_list);
 }
+
+void te_authenticate_vrr(u8 *buf_ptr, u32 buflen)
+{
+	u32 i, no_of_params = 1;
+	struct te_request *request;
+	struct te_oper_param user_param;
+	struct te_oper_param *param_array;
+	struct te_oper_param *params = NULL;
+	struct te_cmd_req_desc *cmd_desc = NULL;
+	u32 session_id, vrr_auth_uuid[4] = VR_AUTH_UUID;
+
+	mutex_lock(&smc_lock);
+
+	/* Open & submit the work to SMC */
+	cmd_desc = NULL;
+	params = NULL;
+	no_of_params =  1;
+
+	cmd_desc = te_get_free_cmd_desc(&tlk_dev);
+	params = te_get_free_params(&tlk_dev, no_of_params);
+
+	if (!cmd_desc || !params) {
+		pr_err("failed to get cmd_desc/params\n");
+		goto error;
+	}
+
+	/* Request and parameter are prepared for VRR authenticaiton */
+	request = cmd_desc->req_addr;
+	memset(request, 0, sizeof(struct te_request));
+	request->params = (uintptr_t)params;
+	request->params_size = no_of_params;
+	request->type = TE_SMC_OPEN_SESSION;
+
+	user_param.index = 0;
+	user_param.u.Mem.len = buflen;
+	user_param.type = TE_PARAM_TYPE_MEM_RW;
+	user_param.u.Mem.type = TE_MEM_TYPE_NS_KERNEL;
+	user_param.u.Mem.base = (uint64_t)(uintptr_t)buf_ptr;
+	memcpy(request->dest_uuid, vrr_auth_uuid, sizeof(vrr_auth_uuid));
+
+	param_array = (struct te_oper_param *)(uintptr_t)request->params;
+
+	for (i = 0; i < no_of_params; i++)
+		memcpy(param_array + i, &user_param, sizeof(struct te_oper_param));
+
+	do_smc(request, &tlk_dev);
+	session_id = request->session_id;
+
+	if (request->result) {
+		pr_err("%s: error opening session: 0x%08x\n",
+			__func__, request->result);
+		goto error;
+	}
+
+	/* Close the session */
+	request = cmd_desc->req_addr;
+	memset(request, 0, sizeof(struct te_request));
+
+	request->type = TE_SMC_CLOSE_SESSION;
+	request->session_id = session_id;
+	memcpy(request->dest_uuid, vrr_auth_uuid, sizeof(vrr_auth_uuid));
+
+	do_smc(request, &tlk_dev);
+
+	if (request->result) {
+		pr_err("%s: error closing session: 0x%08x\n",
+			__func__, request->result);
+	}
+
+error:
+	if (cmd_desc)
+		te_put_used_cmd_desc(&tlk_dev, cmd_desc);
+
+	if (params)
+		te_put_free_params(&tlk_dev, params, no_of_params);
+
+	mutex_unlock(&smc_lock);
+}
+EXPORT_SYMBOL(te_authenticate_vrr);

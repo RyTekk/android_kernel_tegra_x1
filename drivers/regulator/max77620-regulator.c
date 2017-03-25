@@ -1,7 +1,7 @@
 /*
  * Maxim MAX77620 Regulator driver
  *
- * Copyright (C) 2014 NVIDIA CORPORATION. All rights reserved.
+ * Copyright (C) 2014-2015 NVIDIA CORPORATION. All rights reserved.
  *
  * Author: Mallikarjun Kasoju <mkasoju@nvidia.com>
  * 	   Laxman Dewangan <ldewangan@nvidia.com>
@@ -67,6 +67,9 @@ struct max77620_regulator_pdata {
 	int shutdown_fps_src;
 	int fps_pd_period;
 	int fps_pu_period;
+	int suspend_fps_src;
+	int suspend_fps_pd_period;
+	int suspend_fps_pu_period;
 	int sleep_mode;
 	int current_mode;
 	int normal_mode;
@@ -133,24 +136,31 @@ static int max77620_regulator_set_fps_src(struct max77620_regulator *reg,
 }
 
 static int max77620_regulator_set_fps_slots(struct max77620_regulator *reg,
-			int id)
+			int id, bool is_suspend)
 {
 	struct max77620_regulator_pdata *rpdata = &reg->reg_pdata[id];
 	struct max77620_regulator_info *rinfo = reg->rinfo[id];
 	struct device *parent = reg->max77620_chip->dev;
 	unsigned int val = 0;
 	unsigned int mask = 0;
+	int pu = rpdata->fps_pu_period;
+	int pd = rpdata->fps_pd_period;
 	int ret = 0;
 
+	if (is_suspend) {
+		pu = rpdata->suspend_fps_pu_period;
+		pd = rpdata->suspend_fps_pd_period;
+	}
+
 	/* FPS power up period setting */
-	if (rpdata->fps_pu_period >= 0) {
-		val |= (rpdata->fps_pu_period << MAX77620_FPS_PU_PERIOD_SHIFT);
+	if (pu >= 0) {
+		val |= (pu << MAX77620_FPS_PU_PERIOD_SHIFT);
 		mask |= MAX77620_FPS_PU_PERIOD_MASK;
 	}
 
 	/* FPS power down period setting */
-	if (rpdata->fps_pd_period >= 0) {
-		val |= (rpdata->fps_pd_period << MAX77620_FPS_PD_PERIOD_SHIFT);
+	if (pd >= 0) {
+		val |= (pd << MAX77620_FPS_PD_PERIOD_SHIFT);
 		mask |= MAX77620_FPS_PD_PERIOD_MASK;
 	}
 
@@ -633,10 +643,32 @@ static int max77620_regulator_preinit(struct max77620_regulator *reg, int id)
 		return ret;
 	}
 
-	ret = max77620_regulator_set_fps_slots(reg, id);
+	ret = max77620_regulator_set_fps_slots(reg, id, false);
 	if (ret < 0) {
 		dev_err(reg->dev, "preinit: Failed to set FPS Slots\n");
 		return ret;
+	}
+
+	if (ridata->constraints.enable_active_discharge ||
+		ridata->constraints.disable_active_discharge) {
+		if (rinfo->type == MAX77620_REGULATOR_TYPE_SD) {
+			mask = MAX77620_SD_CFG1_ADE_MASK;
+			val = MAX77620_SD_CFG1_ADE_DISABLE;
+			if (ridata->constraints.enable_active_discharge)
+				val = MAX77620_SD_CFG1_ADE_ENABLE;
+		} else {
+			mask = MAX77620_LDO_CFG2_ADE_MASK;
+			val = MAX77620_LDO_CFG2_ADE_DISABLE;
+			if (ridata->constraints.enable_active_discharge)
+				val = MAX77620_LDO_CFG2_ADE_ENABLE;
+		}
+		ret = max77620_reg_update(parent, MAX77620_PWR_SLAVE,
+				rinfo->cfg_addr, mask, val);
+		if (ret < 0) {
+			dev_err(reg->dev, "Reg 0x%02x update failed: %d\n",
+				rinfo->cfg_addr, ret);
+			return ret;
+		}
 	}
 
 	if (rinfo->type == MAX77620_REGULATOR_TYPE_SD) {
@@ -778,7 +810,6 @@ static int max77620_get_regulator_dt_data(struct platform_device *pdev,
 		if (!ret)
 			reg_pdata->shutdown_fps_src = prop;
 
-
 		ret = of_property_read_u32(reg_node,
 					"maxim,fps-power-up-period", &prop);
 		if (!ret)
@@ -792,6 +823,24 @@ static int max77620_get_regulator_dt_data(struct platform_device *pdev,
 			reg_pdata->fps_pd_period = prop;
 		else
 			reg_pdata->fps_pd_period = -1;
+
+		reg_pdata->suspend_fps_src = -1;
+		reg_pdata->suspend_fps_pu_period = -1;
+		reg_pdata->suspend_fps_pd_period = -1;
+		ret = of_property_read_u32(reg_node,
+				"maxim,suspend-fps-source", &prop);
+		if (!ret)
+			reg_pdata->suspend_fps_src = prop;
+
+		ret = of_property_read_u32(reg_node,
+				"maxim,suspend-fps-power-up-slot", &prop);
+		if (!ret)
+			reg_pdata->suspend_fps_pu_period = prop;
+
+		ret = of_property_read_u32(reg_node,
+					"maxim,suspend-fps-power-down-slot", &prop);
+		if (!ret)
+			reg_pdata->suspend_fps_pd_period = prop;
 	}
 	return 0;
 }
@@ -896,6 +945,9 @@ static int max77620_regulator_suspend(struct device *dev)
 	for (id = 0; id < MAX77620_NUM_REGS; ++id) {
 		reg_pdata = &pmic->reg_pdata[id];
 		rinfo = pmic->rinfo[id];
+		if (!reg_pdata || !rinfo)
+			continue;
+
 		if (reg_pdata->disable_remote_sense_on_suspend &&
 				(rinfo->remote_sense_addr != 0xFF)) {
 			ret = max77620_reg_update(parent, MAX77620_PWR_SLAVE,
@@ -916,6 +968,11 @@ static int max77620_regulator_suspend(struct device *dev)
 					"Regulator %d sleep mode failed: %d\n",
 					id, ret);
 		}
+
+		max77620_regulator_set_fps_slots(pmic, id, true);
+		if (reg_pdata->suspend_fps_src >= 0)
+			max77620_regulator_set_fps_src(pmic,
+				reg_pdata->suspend_fps_src, id);
 	}
 	return 0;
 }
@@ -932,6 +989,8 @@ static int max77620_regulator_resume(struct device *dev)
 	for (id = 0; id < MAX77620_NUM_REGS; ++id) {
 		reg_pdata = &pmic->reg_pdata[id];
 		rinfo = pmic->rinfo[id];
+		if (!reg_pdata || !rinfo)
+			continue;
 
 		if (reg_pdata->disable_remote_sense_on_suspend &&
 				(rinfo->remote_sense_addr != 0xFF)) {
@@ -953,6 +1012,11 @@ static int max77620_regulator_resume(struct device *dev)
 					"Regulator %d normal mode failed: %d\n",
 					id, ret);
 		}
+
+		max77620_regulator_set_fps_slots(pmic, id, false);
+		if (reg_pdata->fps_src >= 0)
+			max77620_regulator_set_fps_src(pmic,
+				reg_pdata->fps_src, id);
 	}
 	return 0;
 }

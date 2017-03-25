@@ -1,9 +1,9 @@
 /*
- * drivers/video/tegra/host/gr3d/scale3d.h
+ * drivers/video/tegra/host/gr3d/scale_emc.h
  *
  * Tegra Graphics Host 3D Clock Scaling
  *
- * Copyright (c) 2010-2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2010-2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -34,7 +34,9 @@ struct clk;
 
 struct nvhost_device_profile {
 	struct platform_device		*pdev;
-	struct host1x_actmon		*actmon;
+
+	struct host1x_actmon		**actmon;
+
 	struct clk			*clk;
 
 	bool				busy;
@@ -45,6 +47,7 @@ struct nvhost_device_profile {
 
 	void				*private_data;
 	struct notifier_block		qos_notify_block;
+	int				num_actmons;
 };
 
 /* Initialization and de-initialization for module */
@@ -62,4 +65,7 @@ int nvhost_scale_hw_init(struct platform_device *);
 void nvhost_scale_hw_deinit(struct platform_device *);
 
 int nvhost_get_actmon_irq(struct nvhost_device_profile *profile);
+
+void nvhost_actmon_debug_init(struct host1x_actmon *actmon,
+				     struct dentry *de);
 #endif

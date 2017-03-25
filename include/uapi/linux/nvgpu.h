@@ -104,8 +104,10 @@ struct nvgpu_gpu_zbc_query_table_args {
 #define NVGPU_GPU_FLAGS_SUPPORT_SYNC_FENCE_FDS		(1 << 3)
 /* NVGPU_IOCTL_CHANNEL_CYCLE_STATS is available */
 #define NVGPU_GPU_FLAGS_SUPPORT_CYCLE_STATS		(1 << 4)
-/* MAP_BUFFER_EX with unmapped PTE */
-#define NVGPU_GPU_FLAGS_SUPPORT_UNMAPPED_PTE		(1 << 5)
+/* NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT is available */
+#define NVGPU_GPU_FLAGS_SUPPORT_CYCLE_STATS_SNAPSHOT	(1 << 6)
+/* User-space managed address spaces support */
+#define NVGPU_GPU_FLAGS_SUPPORT_USERSPACE_MANAGED_AS	(1 << 7)
 
 struct nvgpu_gpu_characteristics {
 	__u32 arch;
@@ -166,7 +168,16 @@ struct nvgpu_gpu_characteristics {
 
 	__u8 chipname[8];
 
+	__u64 gr_compbit_store_base_hw;
+	__u32 gr_gobs_per_comptagline_per_slice;
+	__u32 num_ltc;
+	__u32 lts_per_ltc;
+	__u32 cbc_cache_line_size;
+	__u32 cbc_comptags_per_line;
 
+	/* MAP_BUFFER_BATCH: the upper limit for num_unmaps and
+	 * num_maps */
+	__u32 map_buffer_batch_limit;
 
 	/* Notes:
 	   - This struct can be safely appended with new fields. However, always
@@ -228,7 +239,22 @@ struct nvgpu_gpu_mark_compressible_write_args {
 struct nvgpu_alloc_as_args {
 	__u32 big_page_size;
 	__s32 as_fd;
-	__u64 reserved;			/* must be zero */
+
+/*
+ * The GPU address space will be managed by the userspace. This has
+ * the following changes in functionality:
+ *   1. All non-fixed-offset user mappings are rejected (i.e.,
+ *      fixed-offset only)
+ *   2. Address space does not need to be allocated for fixed-offset
+ *      mappings, except to mark sparse address space areas.
+ *   3. Maps and unmaps are immediate. In particular, mapping ref
+ *      increments at kickoffs and decrements at job completion are
+ *      bypassed.
+ */
+#define NVGPU_GPU_IOCTL_ALLOC_AS_FLAGS_USERSPACE_MANAGED (1 << 0)
+	__u32 flags;
+
+	__u32 reserved;			/* must be zero */
 };
 
 struct nvgpu_gpu_open_tsg_args {
@@ -536,20 +562,8 @@ struct nvgpu_dbg_gpu_pc_sampling_args {
 #define NVGPU_DBG_GPU_IOCTL_PC_SAMPLING \
 	_IOW(NVGPU_DBG_GPU_IOCTL_MAGIC,  9, struct nvgpu_dbg_gpu_pc_sampling_args)
 
-/* Enable/Disable timeouts */
-#define NVGPU_DBG_GPU_IOCTL_TIMEOUT_ENABLE                                   1
-#define NVGPU_DBG_GPU_IOCTL_TIMEOUT_DISABLE                                  0
-
-struct nvgpu_dbg_gpu_timeout_args {
-	__u32 enable;
-	__u32 padding;
-};
-
-#define NVGPU_DBG_GPU_IOCTL_TIMEOUT \
-	_IOW(NVGPU_DBG_GPU_IOCTL_MAGIC, 10, struct nvgpu_dbg_gpu_timeout_args)
-
 #define NVGPU_DBG_GPU_IOCTL_LAST		\
-	_IOC_NR(NVGPU_DBG_GPU_IOCTL_TIMEOUT)
+	_IOC_NR(NVGPU_DBG_GPU_IOCTL_PC_SAMPLING)
 #define NVGPU_DBG_GPU_IOCTL_MAX_ARG_SIZE		\
 	sizeof(struct nvgpu_dbg_gpu_perfbuf_map_args)
 
@@ -739,6 +753,21 @@ struct nvgpu_channel_events_ctrl_args {
 #define NVGPU_IOCTL_CHANNEL_EVENTS_CTRL_CMD_ENABLE  1
 #define NVGPU_IOCTL_CHANNEL_EVENTS_CTRL_CMD_CLEAR   2
 
+/* cycle stats snapshot buffer support for mode E */
+struct nvgpu_cycle_stats_snapshot_args {
+	__u32 cmd;		/* in: command to handle     */
+	__u32 dmabuf_fd;	/* in: dma buffer handler    */
+	__u32 extra;		/* in/out: extra payload e.g.*/
+				/*    counter/start perfmon  */
+	__u32 pad0[1];
+};
+
+/* valid commands to control cycle stats shared buffer */
+#define NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT_CMD_FLUSH   0
+#define NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT_CMD_ATTACH  1
+#define NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT_CMD_DETACH  2
+
+
 #define NVGPU_IOCTL_CHANNEL_SET_NVMAP_FD	\
 	_IOW(NVGPU_IOCTL_MAGIC, 5, struct nvgpu_set_nvmap_fd_args)
 #define NVGPU_IOCTL_CHANNEL_SET_TIMEOUT	\
@@ -777,9 +806,11 @@ struct nvgpu_channel_events_ctrl_args {
 	_IO(NVGPU_IOCTL_MAGIC,  116)
 #define NVGPU_IOCTL_CHANNEL_EVENTS_CTRL	\
 	_IOW(NVGPU_IOCTL_MAGIC,  117, struct nvgpu_channel_events_ctrl_args)
+#define NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT	\
+	_IOWR(NVGPU_IOCTL_MAGIC, 118, struct nvgpu_cycle_stats_snapshot_args)
 
 #define NVGPU_IOCTL_CHANNEL_LAST	\
-	_IOC_NR(NVGPU_IOCTL_CHANNEL_EVENTS_CTRL)
+	_IOC_NR(NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT)
 #define NVGPU_IOCTL_CHANNEL_MAX_ARG_SIZE sizeof(struct nvgpu_submit_gpfifo_args)
 
 /*
@@ -873,6 +904,8 @@ struct nvgpu_as_map_buffer_args {
 	__u32 flags;		/* in/out */
 #define NVGPU_AS_MAP_BUFFER_FLAGS_FIXED_OFFSET	    (1 << 0)
 #define NVGPU_AS_MAP_BUFFER_FLAGS_CACHEABLE	    (1 << 2)
+#define NVGPU_AS_MAP_BUFFER_FLAGS_UNMAPPED_PTE	    (1 << 5)
+#define NVGPU_AS_MAP_BUFFER_FLAGS_MAPPABLE_COMPBITS (1 << 6)
 	__u32 reserved;		/* in */
 	__u32 dmabuf_fd;	/* in */
 	__u32 page_size;	/* inout, 0:= best fit to buffer */
@@ -909,6 +942,91 @@ struct nvgpu_as_map_buffer_ex_args {
 };
 
 /*
+ * Get info about buffer compbits. Requires that buffer is mapped with
+ * NVGPU_AS_MAP_BUFFER_FLAGS_MAPPABLE_COMPBITS.
+ *
+ * The compbits for a mappable buffer are organized in a mappable
+ * window to the compbits store. In case the window contains comptags
+ * for more than one buffer, the buffer comptag line index may differ
+ * from the window comptag line index.
+ */
+struct nvgpu_as_get_buffer_compbits_info_args {
+
+	/* in: address of an existing buffer mapping */
+	__u64 mapping_gva;
+
+	/* out: size of compbits mapping window (bytes) */
+	__u64 compbits_win_size;
+
+	/* out: comptag line index of the window start */
+	__u32 compbits_win_ctagline;
+
+	/* out: comptag line index of the buffer mapping */
+	__u32 mapping_ctagline;
+
+/* Buffer uses compbits */
+#define NVGPU_AS_GET_BUFFER_COMPBITS_INFO_FLAGS_HAS_COMPBITS    (1 << 0)
+
+/* Buffer compbits are mappable */
+#define NVGPU_AS_GET_BUFFER_COMPBITS_INFO_FLAGS_MAPPABLE        (1 << 1)
+
+/* Buffer IOVA addresses are discontiguous */
+#define NVGPU_AS_GET_BUFFER_COMPBITS_INFO_FLAGS_DISCONTIG_IOVA  (1 << 2)
+
+	/* out */
+	__u32 flags;
+
+	__u32 reserved1;
+};
+
+/*
+ * Map compbits of a mapped buffer to the GPU address space. The
+ * compbits mapping is automatically unmapped when the buffer is
+ * unmapped.
+ *
+ * The compbits mapping always uses small pages, it is read-only, and
+ * is GPU cacheable. The mapping is a window to the compbits
+ * store. The window may not be exactly the size of the cache lines
+ * for the buffer mapping.
+ */
+struct nvgpu_as_map_buffer_compbits_args {
+
+	/* in: address of an existing buffer mapping */
+	__u64 mapping_gva;
+
+	/* in: gva to the mapped compbits store window when
+	 * FIXED_OFFSET is set. Otherwise, ignored and should be be 0.
+	 *
+	 * For FIXED_OFFSET mapping:
+	 * - If compbits are already mapped compbits_win_gva
+	 *   must match with the previously mapped gva.
+	 * - The user must have allocated enough GVA space for the
+	 *   mapping window (see compbits_win_size in
+	 *   nvgpu_as_get_buffer_compbits_info_args)
+	 *
+	 * out: gva to the mapped compbits store window */
+	__u64 compbits_win_gva;
+
+	/* in: reserved, must be 0
+	   out: physical or IOMMU address for mapping */
+	union {
+		/* contiguous iova addresses */
+		__u64 mapping_iova;
+
+		/* buffer to receive discontiguous iova addresses (reserved) */
+		__u64 mapping_iova_buf_addr;
+	};
+
+	/* in: Buffer size (in bytes) for discontiguous iova
+	 * addresses. Reserved, must be 0. */
+	__u64 mapping_iova_buf_size;
+
+#define NVGPU_AS_MAP_BUFFER_COMPBITS_FLAGS_FIXED_OFFSET        (1 << 0)
+	__u32 flags;
+	__u32 reserved1;
+};
+
+/*
  * Unmapping a buffer:
  *
  * To unmap a previously mapped buffer set 'offset' to the offset returned in
@@ -935,6 +1053,16 @@ struct nvgpu_as_get_va_regions_args {
 	__u32 reserved;
 };
 
+struct nvgpu_as_map_buffer_batch_args {
+	__u64 unmaps; /* ptr to array of nvgpu_unmap_buffer_args */
+	__u64 maps;   /* ptr to array of nvgpu_as_map_buffer_ex_args */
+	__u32 num_unmaps; /* in: number of unmaps
+			   * out: on error, number of successful unmaps */
+	__u32 num_maps;   /* in: number of maps
+			   * out: on error, number of successful maps */
+	__u64 reserved;
+};
+
 #define NVGPU_AS_IOCTL_BIND_CHANNEL \
 	_IOWR(NVGPU_AS_IOCTL_MAGIC, 1, struct nvgpu_as_bind_channel_args)
 #define NVGPU32_AS_IOCTL_ALLOC_SPACE \
@@ -951,9 +1079,15 @@ struct nvgpu_as_get_va_regions_args {
 	_IOWR(NVGPU_AS_IOCTL_MAGIC, 7, struct nvgpu_as_map_buffer_ex_args)
 #define NVGPU_AS_IOCTL_GET_VA_REGIONS \
 	_IOWR(NVGPU_AS_IOCTL_MAGIC, 8, struct nvgpu_as_get_va_regions_args)
+#define NVGPU_AS_IOCTL_GET_BUFFER_COMPBITS_INFO \
+	_IOWR(NVGPU_AS_IOCTL_MAGIC, 9, struct nvgpu_as_get_buffer_compbits_info_args)
+#define NVGPU_AS_IOCTL_MAP_BUFFER_COMPBITS \
+	_IOWR(NVGPU_AS_IOCTL_MAGIC, 10, struct nvgpu_as_map_buffer_compbits_args)
+#define NVGPU_AS_IOCTL_MAP_BUFFER_BATCH	\
+	_IOWR(NVGPU_AS_IOCTL_MAGIC, 11, struct nvgpu_as_map_buffer_batch_args)
 
 #define NVGPU_AS_IOCTL_LAST            \
-	_IOC_NR(NVGPU_AS_IOCTL_GET_VA_REGIONS)
+	_IOC_NR(NVGPU_AS_IOCTL_MAP_BUFFER_BATCH)
 #define NVGPU_AS_IOCTL_MAX_ARG_SIZE	\
 	sizeof(struct nvgpu_as_map_buffer_ex_args)
 

@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/dc/cursor.c
  *
- * Copyright (c) 2011-2016, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2011-2014, NVIDIA CORPORATION, All rights reserved.
  *
  * Author:
  *  Robert Morell <rmorell@nvidia.com>

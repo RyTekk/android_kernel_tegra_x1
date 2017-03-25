@@ -100,7 +100,7 @@ static LIST_HEAD(device_list);
 static DEFINE_MUTEX(device_list_lock);
 
 static unsigned bufsiz = 4096;
-module_param(bufsiz, uint, S_IRUGO | S_IWUSR);
+module_param(bufsiz, uint, S_IRUGO);
 MODULE_PARM_DESC(bufsiz, "data bytes in biggest supported SPI message");
 
 /*-------------------------------------------------------------------------*/
@@ -311,7 +311,10 @@ static int spidev_message(struct spidev_data *spidev,
 		k_tmp->len = u_tmp->len;
 
 		total += k_tmp->len;
-		if (total > bufsiz) {
+		/* Check total length of transfers.  Also check each
+		 * transfer length to avoid arithmetic overflow.
+		 */
+		if (total > bufsiz || k_tmp->len > bufsiz) {
 			status = -EMSGSIZE;
 			goto done;
 		}

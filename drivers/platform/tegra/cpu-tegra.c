@@ -68,7 +68,6 @@ static unsigned int cur_cpupwr_freqcap;
 
 static unsigned int force_cpupwr;
 static unsigned int force_cpupwr_freqcap;
-static u32 disable_driver;
 
 static bool force_policy_max;
 
@@ -653,10 +652,6 @@ static int __init tegra_cpu_debug_init(void)
 				 NULL, &status_fops))
 		goto err_out;
 
-	if (!debugfs_create_bool("disable_driver", S_IRUGO,
-				 cpu_tegra_debugfs_root, &disable_driver))
-		goto err_out;
-
 	return 0;
 
 err_out:
@@ -729,9 +724,6 @@ int tegra_update_cpu_speed(unsigned long rate)
 	unsigned int mode, mode_limit;
 
 	if (!cpu_clk)
-		return -EINVAL;
-
-	if (disable_driver)
 		return -EINVAL;
 
 	freqs.old = tegra_getspeed(0);
@@ -1140,40 +1132,7 @@ static inline void tegra_auto_cluster_switch(void) {}
 static inline void tegra_auto_cluster_switch_exit(void) {}
 #endif
 
-unsigned int tegra_count_slow_cpus(unsigned long speed_limit)
-{
-	unsigned int cnt = 0;
-	int i;
-
-	for_each_online_cpu(i)
-		if (target_cpu_speed[i] <= speed_limit)
-			cnt++;
-	return cnt;
-}
-
-unsigned int tegra_get_slowest_cpu_n(void) {
-	unsigned int cpu = nr_cpu_ids;
-	unsigned long rate = ULONG_MAX;
-	int i;
-
-	for_each_online_cpu(i)
-		if ((i > 0) && (rate > target_cpu_speed[i])) {
-			cpu = i;
-			rate = target_cpu_speed[i];
-		}
-	return cpu;
-}
-
-unsigned long tegra_cpu_lowest_speed(void) {
-	unsigned long rate = ULONG_MAX;
-	int i;
-
-	for_each_online_cpu(i)
-		rate = min(rate, target_cpu_speed[i]);
-	return rate;
-}
-
-unsigned long tegra_cpu_highest_speed(void) {
+static unsigned long tegra_cpu_highest_speed(void) {
 	unsigned long policy_max = ULONG_MAX;
 	unsigned long rate = 0;
 	int i;
@@ -1371,6 +1330,33 @@ static struct notifier_block tegra_cpu_pm_notifier = {
 	.notifier_call = tegra_pm_notify,
 };
 
+static ssize_t table_src_show(struct kobject *kobj,
+	struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", get_cpu_emc_limit_table_source());
+}
+
+static ssize_t table_src_store(struct kobject *kobj,
+	struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	unsigned int val;
+	if (kstrtouint(buf, 0, &val))
+		return -EINVAL;
+
+	if (val != CPU_EMC_TABLE_SRC_DT &&
+			val != CPU_EMC_TABLE_SRC_DEFAULT)
+		return -EINVAL;
+
+	set_cpu_emc_limit_table_source(val);
+
+	return count;
+}
+
+static struct kobj_attribute table_src_attr =
+	__ATTR(table_src, 0644, table_src_show, table_src_store);
+
+static struct kobject *tegra_cpu_emc_table_src_kobj;
+
 static int tegra_cpu_init(struct cpufreq_policy *policy)
 {
 	int idx, ret;
@@ -1379,20 +1365,11 @@ static int tegra_cpu_init(struct cpufreq_policy *policy)
 	if (policy->cpu >= CONFIG_NR_CPUS)
 		return -EINVAL;
 
-	cpu_clk = clk_get_sys(NULL, "cpu");
-	if (IS_ERR(cpu_clk))
-		return PTR_ERR(cpu_clk);
-
-	emc_clk = clk_get_sys("tegra-cpu", "cpu_emc");
-	if (IS_ERR(emc_clk))
-		emc_clk = NULL;
-
 	freq = tegra_getspeed(policy->cpu);
 	if (emc_clk) {
 		clk_set_rate(emc_clk, tegra_emc_cpu_limit(freq));
 		clk_prepare_enable(emc_clk);
 	}
-	clk_prepare_enable(cpu_clk);
 
 	cpufreq_frequency_table_cpuinfo(policy, freq_table);
 	cpufreq_frequency_table_get_attr(freq_table, policy->cpu);
@@ -1414,6 +1391,23 @@ static int tegra_cpu_init(struct cpufreq_policy *policy)
 	policy->cpuinfo.transition_latency = 300 * 1000;
 
 	cpumask_copy(policy->cpus, cpu_possible_mask);
+
+	tegra_cpu_emc_table_src_kobj =
+		kobject_create_and_add("tegra_cpu_emc",
+			kernel_kobj);
+
+	if (!tegra_cpu_emc_table_src_kobj) {
+		pr_err("%s: Couldn't create kobj\n", __func__);
+		return -ENOMEM;
+	}
+
+	ret = sysfs_create_file(tegra_cpu_emc_table_src_kobj,
+		&table_src_attr.attr);
+
+	if (ret) {
+		pr_err("%s, Couldn't create sysfs files\n", __func__);
+		return ret;
+	}
 
 	return 0;
 }
@@ -1478,8 +1472,10 @@ static struct cpufreq_driver tegra_cpufreq_driver = {
 static int __init tegra_cpufreq_init(void)
 {
 	int ret = 0;
+#ifdef CONFIG_PM_SLEEP
 	unsigned int cpu_suspend_freq = 0;
 	unsigned int i;
+#endif
 
 	struct tegra_cpufreq_table_data *table_data =
 		tegra_cpufreq_table_get();
@@ -1488,6 +1484,7 @@ static int __init tegra_cpufreq_init(void)
 
 	freq_table = table_data->freq_table;
 
+#ifdef CONFIG_PM_SLEEP
 	preserve_cpu_speed = table_data->preserve_across_suspend;
 	cpu_suspend_freq = tegra_cpu_suspend_freq();
 	if (cpu_suspend_freq == 0) {
@@ -1499,6 +1496,17 @@ static int __init tegra_cpufreq_init(void)
 		}
 		suspend_index = i;
 	}
+#endif
+
+	cpu_clk = clk_get_sys(NULL, "cpu");
+	if (IS_ERR(cpu_clk))
+		return PTR_ERR(cpu_clk);
+
+	clk_prepare_enable(cpu_clk);
+
+	emc_clk = clk_get_sys("tegra-cpu", "cpu_emc");
+	if (IS_ERR(emc_clk))
+		emc_clk = NULL;
 
 	ret = tegra_auto_hotplug_init(&tegra_cpu_lock);
 	if (ret)
@@ -1540,29 +1548,28 @@ static int __init tegra_cpufreq_init(void)
 }
 
 #ifdef CONFIG_TEGRA_CPU_FREQ_GOVERNOR_KERNEL_START
-static int __init tegra_cpufreq_governor_init(void)
+static int __init tegra_cpufreq_governor_start(void)
 {
 	/*
-	 * At this point, the full range of clocks should be available
-	 * Set the CPU governor to performance for a faster boot up
+	 * At this point, the full range of clocks should be available,
+	 * scaling up can start: set the CPU frequency, maximum possible
 	 */
-	unsigned int i;
 	struct cpufreq_policy *policy;
-	static char *start_scaling_gov = "performance";
-	for_each_online_cpu(i) {
-		policy = cpufreq_cpu_get(i);
-		if (!(policy && policy->governor &&
-			!(strcmp(policy->governor->name, start_scaling_gov) &&
-				cpufreq_set_gov(start_scaling_gov, i))))
-			pr_info("Failed to set the governor to %s for cpu %u\n",
-				start_scaling_gov, i);
-		if (policy)
-			cpufreq_cpu_put(policy);
-	}
+
+	policy = cpufreq_cpu_get(0);
+	if (!policy || tegra_target(policy, UINT_MAX, CPUFREQ_RELATION_H))
+		pr_warn("Failed to set maximum possible CPU frequency\n");
+	else
+		pr_info("Set maximum possible CPU frequency %u\n",
+			tegra_getspeed_actual());
+
+	if (policy)
+		cpufreq_cpu_put(policy);
+
 	return 0;
 }
 
-late_initcall_sync(tegra_cpufreq_governor_init);
+late_initcall_sync(tegra_cpufreq_governor_start);
 #endif
 
 static void __exit tegra_cpufreq_exit(void)

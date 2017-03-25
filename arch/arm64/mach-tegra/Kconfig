@@ -4,7 +4,6 @@ source arch/arm/mach-tegra/Kconfig
 
 config ARCH_TEGRA_13x_SOC
 	bool "Tegra 13x family SOC"
-	select ARCH_TEGRA_HAS_PCIE
 	select CPU_V8
 	select DENVER_CPU
 	select ARM_GIC
@@ -24,6 +23,7 @@ config ARCH_TEGRA_13x_SOC
 	select SOC_BUS
 	select THERMAL
 	select PM_GENERIC_DOMAINS if PM
+	select RESET_CONTROLLER
 	select MACH_HAS_SND_SOC_TEGRA_MAX98090 if SND_SOC
 	select MACH_HAS_SND_SOC_TEGRA_RT5639 if SND_SOC
 	select ZONE_DMA32 if !TEGRA_IOMMU_SMMU
@@ -34,7 +34,6 @@ config ARCH_TEGRA_13x_SOC
 
 config ARCH_TEGRA_21x_SOC
 	bool "Tegra 21x family SOC"
-	select ARCH_TEGRA_HAS_PCIE
 	select CPU_V8
 	select ARM_GIC
 	select ARCH_REQUIRE_GPIOLIB
@@ -49,6 +48,7 @@ config ARCH_TEGRA_21x_SOC
 	select TEGRA_DUAL_CBUS
 	select ARCH_TEGRA_VIC
 	select ARCH_TEGRA_APE
+	select RESET_CONTROLLER
 	select SOC_BUS
 	select THERMAL
 	select PM_GENERIC_DOMAINS if PM
@@ -64,6 +64,7 @@ config ARCH_TEGRA_21x_SOC
 	select TEGRA_ISOMGR
 	select TEGRA_ISOMGR_SYSFS
 	select ARCH_HAS_PASR if STAGING
+	select SKIP_LATE_PASR_SETUP if PASR
 	help
 	  Support for NVIDIA Tegra 21x family of SoCs, based upon the
 	  NVIDIA Denver CPU

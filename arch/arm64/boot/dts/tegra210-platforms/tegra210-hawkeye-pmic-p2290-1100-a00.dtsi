@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 #include <dt-bindings/gpio/tegra-gpio.h>
 #include <dt-bindings/thermal/thermal.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/iio/meter/ina3221x.h>
 
 / {
 	i2c@7000d000 {
@@ -146,9 +147,10 @@
 				gpio-output-high = <2 7>;
 			};
 
-			watchdog {
-				maxim,wdt-boot-timeout = <32>;
+			pmic_watchdog: watchdog {
+				maxim,wdt-boot-timeout = <0>;
 				maxim,wdt-suspend-timeout = <120>;
+				maxim,wdt-suspend-enable-from-user;
 				status = "disabled";
 			};
 
@@ -157,13 +159,13 @@
 				#size-cells = <0>;
 				fps@0 {
 					reg = <0>;
-					maxim,fps-time-period = <5120>;
+					maxim,fps-time-period = <2560>;
 					maxim,fps-enable-input = <FPS_EN_SRC_EN0>;
 				};
 
 				fps@1 {
 					reg = <1>;
-					maxim,fps-time-period = <5120>;
+					maxim,fps-time-period = <2560>;
 					maxim,fps-enable-input = <FPS_EN_SRC_EN1>;
 					maxim,enable-sleep;
 				};
@@ -212,10 +214,10 @@
 					regulator-max-microvolt = <1350000>;
 					regulator-always-on;
 					regulator-boot-on;
-					maxim,fps-source = <FPS_SRC_NONE>;
+					maxim,fps-source = <FPS_SRC_1>;
+					maxim,suspend-fps-source = <FPS_SRC_NONE>;
 					maxim,fps-power-up-period = <2>;
 					maxim,fps-power-down-period = <5>;
-					maxim,shutdown-fps-source = <FPS_SRC_1>;
 				};
 
 				max77620_sd3: sd3 {
@@ -365,7 +367,7 @@
 			reg = <0x3e>;
 			compatible = "ti,tps65132";
 			status = "okay";
-			tps65132_outp: outp {
+			outp {
 				regulator-name = "outp";
 				regulator-min-microvolt = <4000000>;
 				regulator-max-microvolt = <6000000>;
@@ -374,7 +376,7 @@
 				ti,disable-active-discharge;
 			};
 
-			tps65132_outn: outn {
+			outn {
 				regulator-name = "outn";
 				regulator-min-microvolt = <4000000>;
 				regulator-max-microvolt = <6000000>;
@@ -422,7 +424,7 @@
 			};
 		};
 
-		battery-gauge@55 {
+		battery_gauge: battery-gauge@55 {
 			status = "disabled";
 			compatible = "ti,bq27441";
 			reg = <0x55>;
@@ -438,6 +440,8 @@
 			ti,qmax-cell = <16384>;
 			ti,reserve-cap-mah = <200>;
 			ti,tz-name = "Battery";
+			io-channels = <&ina3221x INA3221_CHAN_INDEX(0, CURRENT, NORMAL)>;
+			io-channel-names = "battery-current";
 		};
 	};
 
@@ -579,7 +583,7 @@
 		#size-cells = <0>;
 	};
 
-	soft_watchdog {
+	soft_wdt: soft_watchdog {
 		compatible = "softdog-platform";
 		status = "disabled";
 	};

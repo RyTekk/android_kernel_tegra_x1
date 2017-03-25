@@ -3,6 +3,7 @@
  *
  * Copyright (c) 2011-2015 REALTEK SEMICONDUCTOR CORP. All rights reserved.
  * Author: Johnny Hsu <johnnyhsu@realtek.com>
+ * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -17,6 +18,7 @@
 #include <linux/i2c.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
+#include <linux/of.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -273,7 +275,7 @@ static const u16 rt5639_reg[RT5639_VENDOR_ID2 + 1] = {
 	[RT5639_VENDOR_ID2] = 0x6231,
 };
 
-static int rt5639_reset(struct snd_soc_codec *codec)
+int rt5639_reset(struct snd_soc_codec *codec)
 {
 	int ret;
 	int ret_mclk;
@@ -289,6 +291,7 @@ static int rt5639_reset(struct snd_soc_codec *codec)
 	}
 	return ret;
 }
+EXPORT_SYMBOL(rt5639_reset);
 
 /**
  * rt5639_index_write - Write private register.
@@ -2783,7 +2786,7 @@ static int rt5639_pll_calc(const unsigned int freq_in,
 	const unsigned int freq_out, struct rt5639_pll_code *pll_code)
 {
 	int max_n = RT5639_PLL_N_MAX, max_m = RT5639_PLL_M_MAX;
-	int k, n = 0, m = 0, red, n_t, m_t, pll_out, in_t, out_t;
+	int k, n = 0, m = 0, red, n_t, m_t = 0, pll_out, in_t, out_t;
 	int red_t = abs(freq_out - freq_in);
 	bool bypass = false;
 
@@ -3219,7 +3222,7 @@ static int rt5639_set_bias_level(struct snd_soc_codec *codec,
 				RT5639_PWR_BG | RT5639_PWR_VREF2,
 				RT5639_PWR_VREF1 | RT5639_PWR_MB |
 				RT5639_PWR_BG | RT5639_PWR_VREF2);
-			mdelay(100);
+			mdelay(50);
 			rt5639_soc_update_bits(codec, RT5639_PWR_ANLG1,
 				RT5639_PWR_FV1 | RT5639_PWR_FV2,
 				RT5639_PWR_FV1 | RT5639_PWR_FV2);
@@ -3338,7 +3341,13 @@ static int rt5639_probe(struct snd_soc_codec *codec)
 			RT5639_JD1_IN4P_MASK | RT5639_JD2_IN4N_MASK,
 			RT5639_JD1_IN4P_EN | RT5639_JD2_IN4N_EN);
 	}
+
 	rt5639_reg_init(codec);
+
+	if (rt5639->sel_jd_source >= 0)
+		rt5639_soc_update_bits(codec, RT5639_JD_CTRL,
+			RT5639_JD_MASK, rt5639->sel_jd_source << RT5639_JD_SFT);
+
 	DC_Calibrate(codec);
 	codec->dapm.bias_level = SND_SOC_BIAS_OFF;
 	rt5639->codec = codec;
@@ -3500,6 +3509,8 @@ static int rt5639_i2c_probe(struct i2c_client *i2c,
 {
 	struct rt5639_priv *rt5639;
 	int ret;
+	struct device_node *np;
+	int jd_source;
 
 	rt5639 = kzalloc(sizeof(struct rt5639_priv), GFP_KERNEL);
 	if (NULL == rt5639)
@@ -3507,6 +3518,12 @@ static int rt5639_i2c_probe(struct i2c_client *i2c,
 
 	i2c_set_clientdata(i2c, rt5639);
 
+	rt5639->sel_jd_source = -1;
+	if (i2c->dev.of_node) {
+		np = i2c->dev.of_node;
+		if (of_property_read_u32(np, "sel_jd_source", &jd_source) == 0)
+			rt5639->sel_jd_source = jd_source;
+	}
 	ret = snd_soc_register_codec(&i2c->dev, &soc_codec_dev_rt5639,
 			rt5639_dai, ARRAY_SIZE(rt5639_dai));
 	if (ret < 0)

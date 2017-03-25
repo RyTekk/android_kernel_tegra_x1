@@ -1,7 +1,7 @@
 /*
  * xhci-tegra.h - Nvidia xHCI host controller related data
  *
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -30,6 +30,10 @@
 #endif
 
 #include <mach/xusb.h>
+
+#ifdef CONFIG_NV_GAMEPAD_RESET
+extern void gamepad_reset_war(void);
+#endif
 
 #ifdef CONFIG_USB_OTG_WAKELOCK
 extern void otgwl_acquire_temp_lock(void);
@@ -329,6 +333,11 @@ struct tegra_xhci_firmware_log {
 	unsigned long flags;
 };
 
+struct tegra_rx_ctrl_ops {
+	void (*receiver_detector)(unsigned port, bool enable);
+	void (*clamp_en_early)(unsigned port, bool enable);
+};
+
 struct tegra_xhci_hcd {
 	struct platform_device *pdev;
 	struct xhci_hcd *xhci;
@@ -377,7 +386,8 @@ struct tegra_xhci_hcd {
 
 	bool otg_port_owned;
 	bool otg_port_ownership_changed;
-	u32  otg_portnum;
+	u32  hs_otg_portnum;
+	u32  ss_otg_portnum;
 
 	struct regulator **xusb_utmi_vbus_regs;
 
@@ -445,11 +455,12 @@ struct tegra_xhci_hcd {
 	unsigned long cpufreq_last_boosted;
 	bool cpufreq_boosted;
 	bool restore_cpufreq_scheduled;
-	unsigned int boost_cpu_freq;
 	unsigned int boost_cpu_trigger;
 #endif
 	bool init_done;
 	bool clock_enable_done;
+
+	struct tegra_rx_ctrl_ops *rx_ctrl_ops;
 };
 
 #define NOT_SUPPORTED	0xFFFFFFFF

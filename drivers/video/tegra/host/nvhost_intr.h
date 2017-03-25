@@ -3,7 +3,7 @@
  *
  * Tegra Graphics Host Interrupt Management
  *
- * Copyright (c) 2010-2015, NVIDIA Corporation.  All rights reserved.
+ * Copyright (c) 2010-2016, NVIDIA Corporation.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -25,6 +25,7 @@
 #include <linux/semaphore.h>
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
+#include <linux/spinlock.h>
 
 struct nvhost_channel;
 struct platform_device;
@@ -49,6 +50,13 @@ enum nvhost_intr_action {
 	NVHOST_INTR_ACTION_WAKEUP_INTERRUPTIBLE,
 
 	/**
+	 * Fast notifier event
+	 * 'data' points to a callback and private data through internal
+	 * structure
+	 */
+	NVHOST_INTR_ACTION_FAST_NOTIFY,
+
+	/**
 	 * Perform cleanup after a submit has completed.
 	 * 'data' points to a channel
 	 */
@@ -70,13 +78,24 @@ enum nvhost_intr_action {
 
 struct nvhost_intr;
 
+struct nvhost_waitlist {
+	struct list_head list;
+	struct kref refcount;
+	u32 thresh;
+	enum nvhost_intr_action action;
+	atomic_t state;
+	struct timespec isr_recv;
+	void *data;
+	int count;
+	wait_queue_head_t wq;
+};
+
 struct nvhost_intr_syncpt {
 	struct nvhost_intr *intr;
 	u8 id;
-	struct mutex lock;
+	spinlock_t lock;
 	struct list_head wait_head;
 	char thresh_irq_name[12];
-	struct work_struct work;
 	struct timespec isr_recv;
 	struct work_struct low_prio_work;
 	struct list_head low_prio_handlers[NVHOST_INTR_LOW_PRIO_COUNT];
@@ -87,7 +106,6 @@ struct nvhost_intr {
 	struct mutex mutex;
 	int general_irq;
 	int syncpt_irq;
-	struct workqueue_struct *wq;
 	u32 intstatus;
 	void (*host_isr[32])(u32, void*);
 	void *host_isr_priv[32];

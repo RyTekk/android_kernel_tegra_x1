@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/host/vi/vi_irq.c
  *
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -19,44 +19,73 @@
 #include <linux/nvhost.h>
 
 #include "nvhost_acm.h"
-#include "vi.h"
-#include "vi_irq.h"
+#include "vi/vi.h"
+#include "vi/vi_irq.h"
+
+static const int status_reg_table[] = {
+	VI_CFG_INTERRUPT_STATUS_0,
+	CSI_CSI_PIXEL_PARSER_A_STATUS_0,
+	CSI_CSI_PIXEL_PARSER_B_STATUS_0,
+	VI_CSI_0_ERROR_STATUS,
+	VI_CSI_1_ERROR_STATUS,
+#ifdef TEGRA_21X_OR_HIGHER_CONFIG
+	VI_CSI_2_ERROR_STATUS,
+	VI_CSI_3_ERROR_STATUS,
+	VI_CSI_4_ERROR_STATUS,
+	VI_CSI_5_ERROR_STATUS,
+	CSI1_CSI_PIXEL_PARSER_A_STATUS_0,
+	CSI1_CSI_PIXEL_PARSER_B_STATUS_0,
+	CSI2_CSI_PIXEL_PARSER_A_STATUS_0,
+	CSI2_CSI_PIXEL_PARSER_B_STATUS_0,
+
+#endif
+};
+
+static const int mask_reg_table[] = {
+	VI_CFG_INTERRUPT_MASK_0,
+	CSI_CSI_PIXEL_PARSER_A_INTERRUPT_MASK_0,
+	CSI_CSI_PIXEL_PARSER_B_INTERRUPT_MASK_0,
+	VI_CSI_0_ERROR_INT_MASK_0,
+	VI_CSI_1_ERROR_INT_MASK_0,
+	VI_CSI_0_WD_CTRL,
+	VI_CSI_1_WD_CTRL,
+#ifdef TEGRA_21X_OR_HIGHER_CONFIG
+	VI_CSI_2_WD_CTRL,
+	VI_CSI_3_WD_CTRL,
+	VI_CSI_2_ERROR_INT_MASK_0,
+	VI_CSI_3_ERROR_INT_MASK_0,
+	VI_CSI_4_WD_CTRL,
+	VI_CSI_5_WD_CTRL,
+	VI_CSI_4_ERROR_INT_MASK_0,
+	VI_CSI_5_ERROR_INT_MASK_0,
+	CSI1_CSI_PIXEL_PARSER_A_INTERRUPT_MASK_0,
+	CSI1_CSI_PIXEL_PARSER_B_INTERRUPT_MASK_0,
+	CSI2_CSI_PIXEL_PARSER_A_INTERRUPT_MASK_0,
+	CSI2_CSI_PIXEL_PARSER_B_INTERRUPT_MASK_0,
+#endif
+};
+
+static inline void clear_state(struct vi *tegra_vi, int addr)
+{
+	int val;
+	val = host1x_readl(tegra_vi->ndev, addr);
+	host1x_writel(tegra_vi->ndev, addr, val);
+	return;
+}
 
 int vi_enable_irq(struct vi *tegra_vi)
 {
-	int val;
+	int i;
 
-	if (tegra_vi->ndev->id) {
-		/* Disable VI interrupts by default */
-		host1x_writel(tegra_vi->ndev,
-			      CSI_CSI_PIXEL_PARSER_B_INTERRUPT_MASK_0,
-			      0);
+	/* Mask all VI interrupt */
+	for (i = 0; i < ARRAY_SIZE(mask_reg_table); i++)
+		host1x_writel(tegra_vi->ndev, mask_reg_table[i], 0);
 
-		/* Reset VI status register */
-		val = host1x_readl(tegra_vi->ndev,
-				   CSI_CSI_PIXEL_PARSER_B_STATUS_0);
+	/* Clear all VI interrupt state registers */
+	for (i = 0; i < ARRAY_SIZE(status_reg_table); i++)
+		clear_state(tegra_vi, status_reg_table[i]);
 
-		host1x_writel(tegra_vi->ndev,
-			      CSI_CSI_PIXEL_PARSER_B_STATUS_0,
-			      val);
-
-	} else {
-		/* Disable VI interrupts by default */
-		host1x_writel(tegra_vi->ndev,
-			      CSI_CSI_PIXEL_PARSER_A_INTERRUPT_MASK_0,
-			      0);
-
-		/* Reset VI status register */
-		val = host1x_readl(tegra_vi->ndev,
-				   CSI_CSI_PIXEL_PARSER_A_STATUS_0);
-
-		host1x_writel(tegra_vi->ndev,
-			      CSI_CSI_PIXEL_PARSER_A_STATUS_0,
-			      val);
-
-		/* interrupts are associated only with master dev vi.0 */
-		enable_irq(tegra_vi->vi_irq);
-	}
+	enable_irq(tegra_vi->vi_irq);
 
 	return 0;
 }
@@ -64,38 +93,17 @@ EXPORT_SYMBOL(vi_enable_irq);
 
 int vi_disable_irq(struct vi *tegra_vi)
 {
-	int val;
+	int i;
 
-	if (tegra_vi->ndev->id) {
-		/* Disable FIFO Overflow Interrupt */
-		host1x_writel(tegra_vi->ndev,
-			      CSI_CSI_PIXEL_PARSER_B_INTERRUPT_MASK_0,
-			      0);
+	disable_irq(tegra_vi->vi_irq);
 
-		/* Reset status register */
-		val = host1x_readl(tegra_vi->ndev,
-				   CSI_CSI_PIXEL_PARSER_B_STATUS_0);
+	/* Mask all VI interrupt */
+	for (i = 0; i < ARRAY_SIZE(mask_reg_table); i++)
+		host1x_writel(tegra_vi->ndev, mask_reg_table[i], 0);
 
-		host1x_writel(tegra_vi->ndev,
-			      CSI_CSI_PIXEL_PARSER_B_STATUS_0,
-			      val);
-	} else {
-		/* interrupts are associated only with master dev vi.0 */
-		disable_irq(tegra_vi->vi_irq);
-
-		/* Disable FIFO Overflow Interrupt */
-		host1x_writel(tegra_vi->ndev,
-			      CSI_CSI_PIXEL_PARSER_A_INTERRUPT_MASK_0,
-			      0);
-
-		/* Reset status register */
-		val = host1x_readl(tegra_vi->ndev,
-				   CSI_CSI_PIXEL_PARSER_A_STATUS_0);
-
-		host1x_writel(tegra_vi->ndev,
-			      CSI_CSI_PIXEL_PARSER_A_STATUS_0,
-			      val);
-	}
+	/* Clear all VI interrupt state registers */
+	for (i = 0; i < ARRAY_SIZE(status_reg_table); i++)
+		clear_state(tegra_vi, status_reg_table[i]);
 
 	return 0;
 }
@@ -123,6 +131,14 @@ static irqreturn_t vi_checkwd(struct vi *tegra_vi, int stream)
 		err_addr = VI_CSI_3_ERROR_STATUS;
 		wd_addr = VI_CSI_3_WD_CTRL;
 		break;
+	case 4:
+		err_addr = VI_CSI_4_ERROR_STATUS;
+		wd_addr = VI_CSI_4_WD_CTRL;
+		break;
+	case 5:
+		err_addr = VI_CSI_5_ERROR_STATUS;
+		wd_addr = VI_CSI_5_WD_CTRL;
+		break;
 #endif
 	default:
 		return IRQ_NONE;
@@ -132,6 +148,7 @@ static irqreturn_t vi_checkwd(struct vi *tegra_vi, int stream)
 	if (val & 0x20) {
 		host1x_writel(tegra_vi->ndev, wd_addr, 0);
 		host1x_writel(tegra_vi->ndev, err_addr, 0x20);
+		queue_work(tegra_vi->vi_workqueue, &tegra_vi->mfi_cb_work);
 		return IRQ_HANDLED;
 	}
 
@@ -152,31 +169,11 @@ static irqreturn_t vi_isr(int irq, void *dev_id)
 
 	dev_dbg(&tegra_vi->ndev->dev, "%s: ++", __func__);
 
-	if (tegra_vi->ndev->id) {
-		val = host1x_readl(tegra_vi->ndev,
-					CSI_CSI_PIXEL_PARSER_B_STATUS_0);
+	val = host1x_readl(tegra_vi->ndev, CSI_CSI_PIXEL_PARSER_A_STATUS_0);
 
-		/* changes required as per t124 register spec */
-		if (val & PPB_FIFO_OVRF)
-			atomic_inc(&(tegra_vi->vi_out.overflow));
-
-		/* Reset interrupt status register */
-		host1x_writel(tegra_vi->ndev,
-				CSI_CSI_PIXEL_PARSER_B_STATUS_0,
-				val);
-	} else {
-		val = host1x_readl(tegra_vi->ndev,
-					CSI_CSI_PIXEL_PARSER_A_STATUS_0);
-
-		/* changes required as per t124 register spec */
-		if (val & PPA_FIFO_OVRF)
-			atomic_inc(&(tegra_vi->vi_out.overflow));
-
-		/* Reset interrupt status register */
-		host1x_writel(tegra_vi->ndev,
-				CSI_CSI_PIXEL_PARSER_A_STATUS_0,
-				val);
-	}
+	/* changes required as per t124 register spec */
+	if (val & PPA_FIFO_OVRF)
+		atomic_inc(&(tegra_vi->vi_out.overflow));
 
 	/* Disable IRQ */
 	vi_disable_irq(tegra_vi);
@@ -193,11 +190,10 @@ void vi_stats_worker(struct work_struct *work)
 	struct vi *tegra_vi = container_of(work, struct vi, stats_work);
 
 	dev_dbg(&tegra_vi->ndev->dev,
-		"%s: vi[%d]_out dropped data %u times", __func__,
-		tegra_vi->ndev->id,
+		"%s: vi_out dropped data %u times", __func__,
 		atomic_read(&(tegra_vi->vi_out.overflow)));
 
-	/* Enable IRQ */
+	/* Enable IRQ's */
 	vi_enable_irq(tegra_vi);
 }
 EXPORT_SYMBOL(vi_stats_worker);
@@ -210,29 +206,27 @@ int vi_intr_init(struct vi *tegra_vi)
 	 * master dev vi.0 so irq must be programmed
 	 * with it only.
 	 */
-	if (tegra_vi->ndev->id == 0) {
-		int ret;
+	int ret;
 
-		dev_dbg(&tegra_vi->ndev->dev, "%s: ++", __func__);
+	dev_dbg(&tegra_vi->ndev->dev, "%s: ++", __func__);
 
-		tegra_vi->vi_irq = platform_get_irq(ndev, 0);
-		if (IS_ERR_VALUE(tegra_vi->vi_irq)) {
-			dev_err(&tegra_vi->ndev->dev, "missing camera irq\n");
-			return -ENXIO;
-		}
-
-		ret = request_irq(tegra_vi->vi_irq,
-				vi_isr,
-				IRQF_SHARED,
-				dev_name(&tegra_vi->ndev->dev),
-				tegra_vi);
-		if (ret) {
-			dev_err(&tegra_vi->ndev->dev, "failed to get irq\n");
-			return -EBUSY;
-		}
-
-		disable_irq(tegra_vi->vi_irq);
+	tegra_vi->vi_irq = platform_get_irq(ndev, 0);
+	if (IS_ERR_VALUE(tegra_vi->vi_irq)) {
+		dev_err(&tegra_vi->ndev->dev, "missing camera irq\n");
+		return -ENXIO;
 	}
+
+	ret = request_irq(tegra_vi->vi_irq,
+			vi_isr,
+			IRQF_SHARED,
+			dev_name(&tegra_vi->ndev->dev),
+			tegra_vi);
+	if (ret) {
+		dev_err(&tegra_vi->ndev->dev, "failed to get irq\n");
+		return -EBUSY;
+	}
+
+	disable_irq(tegra_vi->vi_irq);
 
 	return 0;
 }
@@ -242,8 +236,7 @@ int vi_intr_free(struct vi *tegra_vi)
 {
 	dev_dbg(&tegra_vi->ndev->dev, "%s: ++", __func__);
 
-	if (tegra_vi->ndev->id == 0)
-		free_irq(tegra_vi->vi_irq, tegra_vi);
+	free_irq(tegra_vi->vi_irq, tegra_vi);
 
 	return 0;
 }

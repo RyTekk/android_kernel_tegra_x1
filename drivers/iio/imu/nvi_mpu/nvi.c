@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+/* Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -10,42 +10,104 @@
  * GNU General Public License for more details.
  */
 
-/* The NVS = NVidia Sensor framework */
+/* NVS = NVidia Sensor framework */
 /* See nvs_iio.c and nvs.h for documentation */
 
 
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/kernel.h>
 #include <linux/err.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/regulator/consumer.h>
 #include <linux/of.h>
 #include <linux/nvs.h>
+#include <linux/crc32.h>
 #include <linux/mpu_iio.h>
 
 #include "nvi.h"
 
-#define NVI_DRIVER_VERSION		(210)
-#define NVI_NAME			"mpu6xxx"
-#define NVI_NAME_MPU6050		"MPU6050"
-#define NVI_NAME_MPU6500		"MPU6500"
-#define NVI_NAME_MPU9250		"MPU9250"
-#define NVI_NAME_MPU6515		"MPU6515"
-#define NVI_NAME_MPU9350		"MPU9350"
-#define NVI_NAME_ICM20628		"ICM20628"
-#define NVI_NAME_ICM20630		"ICM20630"
-#define NVI_NAME_ICM20632		"ICM20632"
+#define NVI_DRIVER_VERSION		(336)
 #define NVI_VENDOR			"Invensense"
+#define NVI_NAME			"mpu6xxx"
+#define NVI_NAME_MPU6050		"mpu6050"
+#define NVI_NAME_MPU6500		"mpu6500"
+#define NVI_NAME_MPU6515		"mpu6515"
+#define NVI_NAME_MPU9150		"mpu9150"
+#define NVI_NAME_MPU9250		"mpu9250"
+#define NVI_NAME_MPU9350		"mpu9350"
+#define NVI_NAME_ICM20628		"icm20628"
+#define NVI_NAME_ICM20630		"icm20630"
+#define NVI_NAME_ICM20632		"icm20632"
+#define NVI_HW_ID_AUTO			(0xFF)
+#define NVI_HW_ID_MPU6050		(0x68)
+#define NVI_HW_ID_MPU6500		(0x70)
+#define NVI_HW_ID_MPU6515		(0x74)
+#define NVI_HW_ID_MPU9150		(0x68)
+#define NVI_HW_ID_MPU9250		(0x71)
+#define NVI_HW_ID_MPU9350		(0x72)
+#define NVI_HW_ID_ICM20628		(0xA2)
+#define NVI_HW_ID_ICM20630		(0xAB)
+#define NVI_HW_ID_ICM20632		(0xAD)
+/* NVI_FW_CRC_CHECK used only during development to confirm valid FW */
+#define NVI_FW_CRC_CHECK		(0)
+
+struct nvi_pdata {
+	struct nvi_state st;
+	struct work_struct fw_load_work;
+	const struct i2c_device_id *i2c_dev_id;
+};
+
+struct nvi_id_hal {
+	u8 hw_id;
+	const char *name;
+	const struct nvi_hal *hal;
+};
+/* ARRAY_SIZE(nvi_id_hals) must match ARRAY_SIZE(nvi_i2c_device_id) - 1 */
+enum NVI_NDX {
+	NVI_NDX_AUTO = 0,
+	NVI_NDX_MPU6050,
+	NVI_NDX_MPU6500,
+	NVI_NDX_MPU6515,
+	NVI_NDX_MPU9150,
+	NVI_NDX_MPU9250,
+	NVI_NDX_MPU9350,
+	NVI_NDX_ICM20628,
+	NVI_NDX_ICM20630,
+	NVI_NDX_ICM20632,
+	NVI_NDX_N,
+};
+/* enum NVI_NDX_N must match ARRAY_SIZE(nvi_i2c_device_id) - 1 */
+static struct i2c_device_id nvi_i2c_device_id[] = {
+	{ NVI_NAME, NVI_NDX_AUTO },
+	{ NVI_NAME_MPU6050, NVI_NDX_MPU6050 },
+	{ NVI_NAME_MPU6500, NVI_NDX_MPU6500 },
+	{ NVI_NAME_MPU6515, NVI_NDX_MPU6515 },
+	{ NVI_NAME_MPU9150, NVI_NDX_MPU9150 },
+	{ NVI_NAME_MPU9250, NVI_NDX_MPU9250 },
+	{ NVI_NAME_MPU9350, NVI_NDX_MPU9350 },
+	{ NVI_NAME_ICM20628, NVI_NDX_ICM20628 },
+	{ NVI_NAME_ICM20630, NVI_NDX_ICM20630 },
+	{ NVI_NAME_ICM20632, NVI_NDX_ICM20632 },
+	{}
+};
 
 enum NVI_INFO {
 	NVI_INFO_VER = 0,
 	NVI_INFO_DBG,
+	NVI_INFO_DBG_SPEW,
 	NVI_INFO_AUX_SPEW,
 	NVI_INFO_FIFO_SPEW,
-	NVI_INFO_FIFO_BUF,
-	NVI_INFO_LIMIT_MAX,
+	NVI_INFO_TS_SPEW,
+	NVI_INFO_SNSR_SPEW,
+	NVI_INFO_REG_WR = 0xC6, /* use 0xD0 on cmd line */
+	NVI_INFO_MEM_RD,
+	NVI_INFO_MEM_WR,
+	NVI_INFO_DMP_FW,
+	NVI_INFO_DMP_EN_MSK,
+	NVI_INFO_FN_INIT
 };
 
 /* regulator names in order of powering on */
@@ -54,16 +116,27 @@ static char *nvi_vregs[] = {
 	"vlogic",
 };
 
-static unsigned short nvi_i2c_addrs[] = {
-	0x68,
-	0x69,
-};
-
 static struct nvi_state *nvi_state_local;
 
 
+static int nvi_dmp_fw(struct nvi_state *st);
+static int nvi_aux_bypass_enable(struct nvi_state *st, bool enable);
+static int nvi_read(struct nvi_state *st, bool flush);
+
 static int nvi_nb_vreg(struct nvi_state *st,
-		       unsigned long event, unsigned int i);
+		       unsigned long event, unsigned int i)
+{
+	if (event & REGULATOR_EVENT_POST_ENABLE)
+		st->ts_vreg_en[i] = nvs_timestamp();
+	else if (event & (REGULATOR_EVENT_DISABLE |
+			  REGULATOR_EVENT_FORCE_DISABLE))
+		st->ts_vreg_en[i] = 0;
+	if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
+		dev_info(&st->i2c->dev, "%s %s event=0x%x ts=%lld\n",
+			 __func__, st->vreg[i].supply, (unsigned int)event,
+			 st->ts_vreg_en[i]);
+	return NOTIFY_OK;
+}
 
 static int nvi_nb_vreg_vdd(struct notifier_block *nb,
 			   unsigned long event, void *ignored)
@@ -87,7 +160,7 @@ static int (* const nvi_nb_vreg_pf[])(struct notifier_block *nb,
 	nvi_nb_vreg_vlogic,
 };
 
-static void nvi_err(struct nvi_state *st)
+void nvi_err(struct nvi_state *st)
 {
 	st->errs++;
 	if (!st->errs)
@@ -99,10 +172,8 @@ static void nvi_mutex_lock(struct nvi_state *st)
 	unsigned int i;
 
 	if (st->nvs) {
-		for (i = 0; i < DEV_N; i++) {
-			if (st->nvs_st[i])
-				st->nvs->nvs_mutex_lock(st->nvs_st[i]);
-		}
+		for (i = 0; i < DEV_N; i++)
+			st->nvs->nvs_mutex_lock(st->snsr[i].nvs_st);
 	}
 }
 
@@ -111,10 +182,8 @@ static void nvi_mutex_unlock(struct nvi_state *st)
 	unsigned int i;
 
 	if (st->nvs) {
-		for (i = 0; i < DEV_N; i++) {
-			if (st->nvs_st[i])
-				st->nvs->nvs_mutex_unlock(st->nvs_st[i]);
-		}
+		for (i = 0; i < DEV_N; i++)
+			st->nvs->nvs_mutex_unlock(st->snsr[i].nvs_st);
 	}
 }
 
@@ -138,92 +207,457 @@ static void nvi_enable_irq(struct nvi_state *st)
 	}
 }
 
-int nvi_i2c_write(struct nvi_state *st, u16 addr, u16 len, u8 *buf)
+static void nvi_rc_clr(struct nvi_state *st, const char *fn)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(st->rc_msk); i++)
+		st->rc_msk[i] = 0;
+	if (st->sts & NVI_DBG_SPEW_MSG)
+		dev_info(&st->i2c->dev, "%s-%s\n", __func__, fn);
+}
+
+static int nvi_i2c_w(struct nvi_state *st, u16 len, u8 *buf)
 {
 	struct i2c_msg msg;
 
-	if (addr) {
-		msg.addr = addr;
-		msg.flags = 0;
-		msg.len = len;
-		msg.buf = buf;
-		if (i2c_transfer(st->i2c->adapter, &msg, 1) != 1) {
-			nvi_err(st);
-			return -EIO;
-		}
+	msg.addr = st->i2c->addr;
+	msg.flags = 0;
+	msg.len = len;
+	msg.buf = buf;
+	if (i2c_transfer(st->i2c->adapter, &msg, 1) != 1) {
+		nvi_err(st);
+		return -EIO;
 	}
 
 	return 0;
 }
 
-int nvi_i2c_wr(struct nvi_state *st, u8 reg, u8 val)
+static int nvi_wr_reg_bank_sel(struct nvi_state *st, u8 reg_bank)
 {
 	u8 buf[2];
-
-	buf[0] = reg;
-	buf[1] = val;
-	return nvi_i2c_write(st, st->i2c_addr, sizeof(buf), buf);
-}
-
-/* Register REG_BANK_SEL */
-static int nvi_wr_reg_bank_sel(struct nvi_state *st, u8 reg_bank_sel)
-{
+	bool wr = true;
 	int ret = 0;
 
-	if (st->hal->part >= ICM20628) {
-		reg_bank_sel <<= 4;
-		if (reg_bank_sel != st->rc.reg_bank_sel) {
-			ret = nvi_i2c_wr(st, st->hal->reg->reg_bank_sel.reg,
-					 reg_bank_sel);
-			if (ret) {
-				dev_err(&st->i2c->dev, "%s: %x->%x ERR=%d\n",
-					__func__, st->rc.reg_bank_sel,
-					reg_bank_sel, ret);
+	if (!st->hal->reg->reg_bank.reg)
+		return 0;
+
+	reg_bank <<= 4;
+	if (st->rc_msk[NVI_RC_BANK_REG_BANK] & NVI_RC_MSK_REG_BANK) {
+		if (reg_bank == st->rc.reg_bank)
+			wr = false;
+	}
+	if (wr) {
+		buf[0] = st->hal->reg->reg_bank.reg;
+		buf[1] = reg_bank;
+		ret = nvi_i2c_w(st, sizeof(buf), buf);
+		if (ret) {
+			dev_err(&st->i2c->dev, "%s 0x%x!->0x%x ERR=%d\n",
+				__func__, st->rc.reg_bank, reg_bank, ret);
+			st->rc_msk[NVI_RC_BANK_REG_BANK] &=
+							  ~NVI_RC_MSK_REG_BANK;
+		} else {
+			if (st->sts & NVI_DBG_SPEW_MSG)
+				dev_info(&st->i2c->dev, "%s 0x%x->0x%x\n",
+					 __func__, st->rc.reg_bank, reg_bank);
+			st->rc.reg_bank = reg_bank;
+			st->rc_msk[NVI_RC_BANK_REG_BANK] |=
+							   NVI_RC_MSK_REG_BANK;
+		}
+	}
+	return ret;
+}
+
+static int nvi_i2c_write(struct nvi_state *st, u8 bank, u16 len, u8 *buf)
+{
+	int ret;
+
+	ret = nvi_wr_reg_bank_sel(st, bank);
+	if (!ret)
+		ret = nvi_i2c_w(st, len, buf);
+	return ret;
+}
+
+static int nvi_i2c_write_be(struct nvi_state *st, const struct nvi_br *br,
+			    u16 len, u32 val)
+{
+	u8 buf[5];
+	unsigned int i;
+
+	buf[0] = br->reg;
+	for (i = len; i > 0; i--)
+		buf[i] = (u8)(val >> (8 * (len - i)));
+	return nvi_i2c_write(st, br->bank, len + 1, buf);
+}
+
+static int nvi_i2c_write_le(struct nvi_state *st, const struct nvi_br *br,
+			    u16 len, u32 val)
+{
+	u8 buf[5];
+	unsigned int i;
+
+	buf[0] = br->reg;
+	for (i = 0; i < len; i++)
+		buf[i + 1] = (u8)(val >> (8 * i));
+	return nvi_i2c_write(st, br->bank, len + 1, buf);
+}
+
+int nvi_i2c_write_rc(struct nvi_state *st, const struct nvi_br *br, u32 val,
+		     const char *fn, u8 *rc, bool be)
+{
+	u16 len;
+	u64 rc_msk;
+	bool wr;
+	unsigned int rc_bank;
+	unsigned int i;
+	int ret = 0;
+
+	len = br->len;
+	if (!len)
+		len++;
+	rc_bank = br->bank;
+	rc_bank <<= 7; /* registers only go to 0x7F */
+	rc_bank |= br->reg;
+	rc_msk = ((1 << len) - 1) << (rc_bank % 64);
+	rc_bank /= 64;
+	val |= br->dflt;
+	wr = st->rc_dis;
+	if (!wr) {
+		if (rc) {
+			if ((st->rc_msk[rc_bank] & rc_msk) == rc_msk) {
+				/* register is cached */
+				for (i = 0; i < len; i++) {
+					if (*(rc + i) !=
+							(u8)(val >> (8 * i))) {
+						/* register data changed */
+						wr = true;
+						break;
+					}
+				}
 			} else {
-				if (st->dbg & NVI_DBG_SPEW_MSG)
-					dev_info(&st->i2c->dev, "%s: %x->%x\n",
-						 __func__, st->rc.reg_bank_sel,
-						 reg_bank_sel);
-				st->rc.reg_bank_sel = reg_bank_sel;
+				/* register not cached */
+				wr = true;
+			}
+		} else {
+			wr = true;
+		}
+	}
+	if (wr) {
+		if (be)
+			ret = nvi_i2c_write_be(st, br, len, val);
+		else
+			ret = nvi_i2c_write_le(st, br, len, val);
+		if (ret) {
+			if (fn == NULL)
+				fn = __func__;
+			dev_err(&st->i2c->dev,
+				"%s 0x%08x!=>0x%01x%02x ERR=%d\n",
+				fn, val, br->bank, br->reg, ret);
+			st->rc_msk[rc_bank] &= ~rc_msk;
+		} else {
+			if (st->sts & NVI_DBG_SPEW_MSG && fn)
+				dev_info(&st->i2c->dev,
+					 "%s 0x%08x=>0x%01x%02x\n",
+					 fn, val, br->bank, br->reg);
+			if (rc) {
+				for (i = 0; i < len; i++)
+					*(rc + i) = (u8)(val >> (8 * i));
+				st->rc_msk[rc_bank] |= rc_msk;
+			} else {
+				/* register data not cached */
+				st->rc_msk[rc_bank] &= ~rc_msk;
 			}
 		}
 	}
 	return ret;
 }
 
-int nvi_i2c_read(struct nvi_state *st, u16 addr, u8 reg, u16 len, u8 *buf)
+int nvi_i2c_wr(struct nvi_state *st, const struct nvi_br *br,
+	       u8 val, const char *fn)
+{
+	u8 buf[2];
+	int ret;
+
+	buf[0] = br->reg;
+	buf[1] = val | br->dflt;
+	ret = nvi_wr_reg_bank_sel(st, br->bank);
+	if (!ret) {
+		ret = nvi_i2c_w(st, sizeof(buf), buf);
+		if (ret) {
+			if (fn == NULL)
+				fn = __func__;
+			dev_err(&st->i2c->dev,
+				"%s 0x%02x!=>0x%01x%02x ERR=%d\n",
+				fn, val, br->bank, br->reg, ret);
+		} else {
+			if (st->sts & NVI_DBG_SPEW_MSG && fn)
+				dev_info(&st->i2c->dev,
+					 "%s 0x%02x=>0x%01x%02x\n",
+					 fn, val, br->bank, br->reg);
+		}
+	}
+	return ret;
+}
+
+int nvi_i2c_wr_rc(struct nvi_state *st, const struct nvi_br *br,
+		  u8 val, const char *fn, u8 *rc)
+{
+	u64 rc_msk;
+	bool wr;
+	unsigned int rc_bank;
+	int ret = 0;
+
+	val |= br->dflt;
+	rc_bank = br->bank;
+	rc_bank <<= 7; /* registers only go to 0x7F */
+	rc_bank |= br->reg;
+	rc_msk = 1 << (rc_bank % 64);
+	rc_bank /= 64;
+	wr = st->rc_dis;
+	if (!wr) {
+		if (rc) {
+			if (st->rc_msk[rc_bank] & rc_msk) {
+				/* register is cached */
+				if (val != *rc)
+					/* register data changed */
+					wr = true;
+			} else {
+				/* register not cached */
+				wr = true;
+			}
+		} else {
+			wr = true;
+		}
+	}
+	if (wr) {
+		ret = nvi_i2c_wr(st, br, val, fn);
+		if (ret) {
+			st->rc_msk[rc_bank] &= ~rc_msk;
+		} else {
+			if (rc) {
+				*rc = val;
+				st->rc_msk[rc_bank] |= rc_msk;
+			} else {
+				st->rc_msk[rc_bank] &= ~rc_msk;
+			}
+		}
+	}
+	return ret;
+}
+
+int nvi_i2c_r(struct nvi_state *st, u8 bank, u8 reg, u16 len, u8 *buf)
 {
 	struct i2c_msg msg[2];
+	int ret;
 
-	if (addr) {
-		msg[0].addr = addr;
-		msg[0].flags = 0;
-		msg[0].len = 1;
-		msg[0].buf = &reg;
-		msg[1].addr = addr;
-		msg[1].flags = I2C_M_RD;
-		msg[1].len = len;
-		msg[1].buf = buf;
-		if (i2c_transfer(st->i2c->adapter, msg, 2) != 2) {
-			nvi_err(st);
-			return -EIO;
-		}
+	ret = nvi_wr_reg_bank_sel(st, bank);
+	if (ret)
+		return ret;
+
+	if (!len)
+		len++;
+	msg[0].addr = st->i2c->addr;
+	msg[0].flags = 0;
+	msg[0].len = 1;
+	msg[0].buf = &reg;
+	msg[1].addr = st->i2c->addr;
+	msg[1].flags = I2C_M_RD;
+	msg[1].len = len;
+	msg[1].buf = buf;
+	if (i2c_transfer(st->i2c->adapter, msg, 2) != 2) {
+		nvi_err(st);
+		return -EIO;
 	}
 
 	return 0;
 }
 
-int nvi_i2c_rd(struct nvi_state *st, u8 bank, u8 reg, u16 len, u8 *buf)
+int nvi_i2c_rd(struct nvi_state *st, const struct nvi_br *br, u8 *buf)
 {
+	u16 len = br->len;
+
+	if (!len)
+		len = 1;
+	return nvi_i2c_r(st, br->bank, br->reg, len, buf);
+}
+
+int nvi_mem_wr(struct nvi_state *st, u16 addr, u16 len, u8 *data,
+	       bool validate)
+{
+	struct i2c_msg msg[6];
+	u8 buf_bank[2];
+	u8 buf_addr[2];
+	u8 buf_data[257];
+	u16 bank_len;
+	u16 data_len;
+	unsigned int data_i;
 	int ret;
 
-	ret = nvi_wr_reg_bank_sel(st, bank);
-	if (!ret)
-		ret = nvi_i2c_read(st, st->i2c_addr, reg, len, buf);
+	ret = nvi_wr_reg_bank_sel(st, st->hal->reg->mem_bank.bank);
+	if (ret)
+		return ret;
+
+	buf_bank[0] = st->hal->reg->mem_bank.reg;
+	buf_bank[1] = addr >> 8;
+	buf_addr[0] = st->hal->reg->mem_addr.reg;
+	buf_addr[1] = addr & 0xFF;
+	buf_data[0] = st->hal->reg->mem_rw.reg;
+	msg[0].addr = st->i2c->addr;
+	msg[0].flags = 0;
+	msg[0].len = sizeof(buf_bank);
+	msg[0].buf = buf_bank;
+	msg[1].addr = st->i2c->addr;
+	msg[1].flags = 0;
+	msg[1].len = sizeof(buf_addr);
+	msg[1].buf = buf_addr;
+	msg[2].addr = st->i2c->addr;
+	msg[2].flags = 0;
+	msg[2].buf = buf_data;
+	msg[3].addr = st->i2c->addr;
+	msg[3].flags = 0;
+	msg[3].len = sizeof(buf_addr);
+	msg[3].buf = buf_addr;
+	msg[4].addr = st->i2c->addr;
+	msg[4].flags = 0;
+	msg[4].len = 1;
+	msg[4].buf = buf_data;
+	msg[5].addr = st->i2c->addr;
+	msg[5].flags = I2C_M_RD;
+	msg[5].buf = &buf_data[1];
+	data_i = 0;
+	bank_len = (addr + len - 1) >> 8;
+	for (; buf_bank[1] <= bank_len; buf_bank[1]++) {
+		if (buf_bank[1] == bank_len)
+			data_len = len - data_i;
+		else
+			data_len = 0x0100 - buf_addr[1];
+		msg[2].len = data_len + 1;
+		memcpy(&buf_data[1], data + data_i, data_len);
+		if (i2c_transfer(st->i2c->adapter, msg, 3) != 3) {
+			nvi_err(st);
+			return -EIO;
+		}
+
+		if (validate) {
+			msg[5].len = data_len;
+			if (i2c_transfer(st->i2c->adapter, &msg[3], 3) != 3) {
+				nvi_err(st);
+				return -EIO;
+			}
+
+			ret = memcmp(&buf_data[1], data + data_i, data_len);
+			if (ret)
+				return ret;
+		}
+
+		data_i += data_len;
+		buf_addr[1] = 0;
+	}
+
+	return 0;
+}
+
+int nvi_mem_wr_be(struct nvi_state *st, u16 addr, u16 len, u32 val)
+{
+	u8 buf[4];
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < len; i++)
+		buf[i] = (u8)(val >> (8 * (len - (i + 1))));
+	ret = nvi_mem_wr(st, addr, len, buf, false);
+	if (st->sts & NVI_DBG_SPEW_MSG)
+		dev_info(&st->i2c->dev, "%s 0x%08x=>0x%04hx err=%d\n",
+			 __func__, val, addr, ret);
 	return ret;
 }
 
-/* Register ACCEL OFFSET */
+int nvi_mem_wr_be_mc(struct nvi_state *st, u16 addr, u16 len, u32 val, u32 *mc)
+{
+	int ret = 0;
+
+	if (val != *mc || st->mc_dis) {
+		ret = nvi_mem_wr_be(st, addr, len, val);
+		if (!ret)
+			*mc = val;
+	}
+	return ret;
+}
+
+int nvi_mem_rd(struct nvi_state *st, u16 addr, u16 len, u8 *data)
+{
+	struct i2c_msg msg[4];
+	u8 buf_bank[2];
+	u8 buf_addr[2];
+	u16 bank_len;
+	u16 data_len;
+	unsigned int data_i;
+	int ret;
+
+	ret = nvi_wr_reg_bank_sel(st, st->hal->reg->mem_bank.bank);
+	if (ret)
+		return ret;
+
+	buf_bank[0] = st->hal->reg->mem_bank.reg;
+	buf_bank[1] = addr >> 8;
+	buf_addr[0] = st->hal->reg->mem_addr.reg;
+	buf_addr[1] = addr & 0xFF;
+	msg[0].addr = st->i2c->addr;
+	msg[0].flags = 0;
+	msg[0].len = sizeof(buf_bank);
+	msg[0].buf = buf_bank;
+	msg[1].addr = st->i2c->addr;
+	msg[1].flags = 0;
+	msg[1].len = sizeof(buf_addr);
+	msg[1].buf = buf_addr;
+	msg[2].addr = st->i2c->addr;
+	msg[2].flags = 0;
+	msg[2].len = 1;
+	msg[2].buf = (u8 *)&st->hal->reg->mem_rw.reg;
+	msg[3].addr = st->i2c->addr;
+	msg[3].flags = I2C_M_RD;
+	data_i = 0;
+	bank_len = (addr + len - 1) >> 8;
+	for (; buf_bank[1] <= bank_len; buf_bank[1]++) {
+		if (buf_bank[1] == bank_len)
+			data_len = len - data_i;
+		else
+			data_len = 0x0100 - buf_addr[1];
+		msg[3].len = data_len;
+		msg[3].buf = data + data_i;
+		if (i2c_transfer(st->i2c->adapter, msg, 4) != 4) {
+			nvi_err(st);
+			return -EIO;
+		}
+
+		data_i += data_len;
+		buf_addr[1] = 0;
+	}
+
+	return 0;
+}
+
+int nvi_mem_rd_le(struct nvi_state *st, u16 addr, u16 len, u32 *val)
+{
+	u32 buf_le = 0;
+	u8 buf_rd[4];
+	unsigned int i;
+	int ret;
+
+	ret = nvi_mem_rd(st, addr, len, buf_rd);
+	if (!ret) {
+		/* convert to little endian */
+		for (i = 0; i < len; i++) {
+			buf_le <<= 8;
+			buf_le |= buf_rd[i];
+		}
+
+		*val = buf_le;
+	}
+
+	return ret;
+}
+
 static int nvi_rd_accel_offset(struct nvi_state *st)
 {
 	u8 buf[2];
@@ -231,803 +665,141 @@ static int nvi_rd_accel_offset(struct nvi_state *st)
 	int ret;
 
 	for (i = 0; i < AXIS_N; i++) {
-		ret = nvi_i2c_rd(st, st->hal->reg->a_offset_h[i].bank,
-				 st->hal->reg->a_offset_h[i].reg, 2, buf);
+		ret = nvi_i2c_rd(st, &st->hal->reg->a_offset_h[i], buf);
 		if (!ret)
 			st->rc.accel_offset[i] = be16_to_cpup((__be16 *)buf);
 	}
 	return ret;
 }
 
-/* Register ACCEL OFFSET */
 int nvi_wr_accel_offset(struct nvi_state *st, unsigned int axis, u16 offset)
 {
-	u8 buf[3];
-	u16 offset_le;
-	int ret = 0;
-
-	if (axis >= AXIS_N)
-		return -EINVAL;
-
-	if ((offset != st->rc.accel_offset[axis]) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st,
-					  st->hal->reg->a_offset_h[axis].bank);
-		if (ret)
-			return ret;
-
-		buf[0] = st->hal->reg->a_offset_h[axis].reg;
-		offset_le = cpu_to_le16(offset);
-		buf[1] = offset_le >> 8;
-		buf[2] = offset_le & 0xFF;
-		ret = nvi_i2c_write(st, st->i2c_addr, sizeof(buf), buf);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->a_offset_h[axis].reg,
-				st->rc.accel_offset[axis], offset, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__, st->hal->reg->
-					 a_offset_h[axis].reg,
-					 st->rc.accel_offset[axis], offset);
-			st->rc.accel_offset[axis] = offset;
-		}
-	}
-	return ret;
+	return nvi_i2c_write_rc(st, &st->hal->reg->a_offset_h[axis], offset,
+			     __func__, (u8 *)&st->rc.accel_offset[axis], true);
 }
 
-/* Register GYRO OFFSET */
 static int nvi_rd_gyro_offset(struct nvi_state *st)
 {
-	u8 buf[AXIS_N * 2];
+	u8 buf[2];
 	unsigned int i;
 	int ret;
 
-	ret = nvi_i2c_rd(st, st->hal->reg->xg_offset_h.bank,
-			 st->hal->reg->xg_offset_h.reg, 6, buf);
-	if (!ret) {
-		for (i = 0; i < AXIS_N; i++)
-			st->rc.gyro_offset[i] = be16_to_cpup((__be16 *)
-							     (&buf[i << 1]));
+	for (i = 0; i < AXIS_N; i++) {
+		ret = nvi_i2c_rd(st, &st->hal->reg->g_offset_h[i], buf);
+		if (!ret)
+			st->rc.gyro_offset[i] = be16_to_cpup((__be16 *)buf);
 	}
 	return ret;
 }
 
-/* Register GYRO OFFSET */
 int nvi_wr_gyro_offset(struct nvi_state *st, unsigned int axis, u16 offset)
 {
-	u8 buf[3];
-	u16 offset_le;
-	int ret = 0;
-
-	if (axis >= AXIS_N)
-		return -EINVAL;
-
-	if ((offset != st->rc.gyro_offset[axis]) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->xg_offset_h.bank);
-		if (ret)
-			return ret;
-
-		buf[0] = st->hal->reg->xg_offset_h.reg + (axis << 1);
-		offset_le = cpu_to_le16(offset);
-		buf[1] = offset_le >> 8;
-		buf[2] = offset_le & 0xFF;
-		ret = nvi_i2c_write(st, st->i2c_addr,
-				    sizeof(buf), buf);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s: %x->%x ERR=%d\n",
-				__func__, st->rc.gyro_offset[axis],
-				offset, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s: %x->%x\n",
-					 __func__,
-					 st->rc.gyro_offset[axis],
-					 offset);
-			st->rc.gyro_offset[axis] = offset;
-		}
-	}
-	return ret;
+	return nvi_i2c_write_rc(st, &st->hal->reg->g_offset_h[axis], offset,
+			      __func__, (u8 *)&st->rc.gyro_offset[axis], true);
 }
 
-/* Register ACCEL_SMPLRT_DIV */
-/* Register GYRO_SMPLRT_DIV */
-int nvi_wr_smplrt_div(struct nvi_state *st, unsigned int dev, u16 val)
+int nvi_wr_fifo_cfg(struct nvi_state *st, int fifo)
 {
-	u8 buf[3];
-	u16 len;
-	u16 val_be;
-	int ret = 0;
+	u8 fifo_cfg;
 
-	dev = st->hal->smplrt[dev]->dev;
-	if ((val != st->rc.smplrt_div[dev]) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st,
-					  st->hal->reg->smplrt_div[dev].bank);
-		if (ret)
-			return ret;
-
-		len = st->hal->bit->smplrt_div_n[dev] / 8;
-		if (st->hal->bit->smplrt_div_n[dev] % 8)
-			len++;
-		val_be = cpu_to_be16(val);
-		val_be >>= ((sizeof(val_be) - len) * 8);
-		len++;
-		buf[0] = st->hal->reg->smplrt_div[dev].reg;
-		buf[1] = val_be & 0xFF;
-		buf[2] = val_be >> 8;
-		ret = nvi_i2c_write(st, st->i2c_addr, len, buf);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->smplrt_div[dev].reg,
-				st->rc.smplrt_div[dev], val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					__func__,
-					 st->hal->reg->smplrt_div[dev].reg,
-					 st->rc.smplrt_div[dev], val);
-			st->rc.smplrt_div[dev] = val;
-		}
-	}
-	return ret;
-}
-
-/* Register GYRO_CONFIG1 */
-static int nvi_wr_gyro_config1(struct nvi_state *st, u8 val)
-{
-	int ret = 0;
-
-	val |= st->hal->reg->gyro_config1.dflt;
-	if ((val != st->rc.gyro_config1) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->gyro_config1.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->gyro_config1.reg, val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->gyro_config1.reg,
-				st->rc.gyro_config1, val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__,
-					 st->hal->reg->gyro_config1.reg,
-					 st->rc.gyro_config1, val);
-			st->rc.gyro_config1 = val;
-		}
-	}
-	return ret;
-}
-
-/* Register GYRO_CONFIG2 */
-int nvi_wr_gyro_config(struct nvi_state *st, u8 test, u8 avg, u8 fsr, u8 lpf)
-{
-	u8 val = 0;
-	int ret = 0;
-
-	if (st->hal->part < MPU6500) {
-		if (lpf < 8)
-			ret = nvi_wr_gyro_config1(st, lpf);
-		if (fsr > 3)
-			val |= st->rc.gyro_config2 & 0x18;
-		else
-			val |= fsr << 3;
-	} else if (st->hal->part < ICM20628) {
-		if (lpf < 8)
-			ret = nvi_wr_gyro_config1(st, lpf);
-		if (test > 7)
-			val |= st->rc.gyro_config2 & 0xE0;
-		else
-			val |= test << 5;
-		if (fsr > 3)
-			val |= st->rc.gyro_config2 & 0x18;
-		else
-			val |= fsr << 3;
-	} else {
-		if (lpf > 7)
-			val |= st->rc.gyro_config1 & 0x39;
-		else
-			val |= lpf << 3;
-		if (fsr > 3)
-			val |= st->rc.gyro_config1 & 0x06;
-		else
-			val |= fsr << 1;
-		ret = nvi_wr_gyro_config1(st, val);
-		val = 0;
-		if (test > 7)
-			val |= st->rc.gyro_config2 & 0x38;
-		else
-			val |= test << 3;
-		if (avg > 7)
-			val |= st->rc.gyro_config2 & 0x07;
-		else
-			val |= avg;
-	}
-	if (((val != st->rc.gyro_config2) || st->rc_dis) && !ret) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->gyro_config2.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->gyro_config2.reg, val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->gyro_config2.reg,
-				st->rc.gyro_config2, val, ret);
-
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__,
-					 st->hal->reg->gyro_config2.reg,
-					 st->rc.gyro_config2, val);
-			st->rc.gyro_config2 = val;
-		}
-	}
-	return ret;
-}
-
-/* Register ACCEL_CONFIG2 */
-static int nvi_wr_accel_config2(struct nvi_state *st, u8 val)
-{
-	int ret = 0;
-
-	if ((val != st->rc.accel_config2) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st,
-					  st->hal->reg->accel_config2.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->accel_config2.reg, val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->accel_config2.reg,
-				st->rc.accel_config2, val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__,
-					 st->hal->reg->accel_config2.reg,
-					 st->rc.accel_config2, val);
-			st->rc.accel_config2 = val;
-		}
-	}
-	return ret;
-}
-
-/* Register ACCEL_CONFIG */
-int nvi_wr_accel_config(struct nvi_state *st, u8 test, u8 avg, u8 fsr, u8 lpf)
-{
-	u8 val = 0;
-	int ret = 0;
-
-	if (st->hal->part < MPU6500) {
-		if (test > 7)
-			val |= st->rc.accel_config & 0xE0;
-		else
-			val |= test << 5;
-		if (fsr > 3)
-			val |= st->rc.accel_config & 0x18;
-		else
-			val |= fsr << 3;
-		if (lpf > 7)
-			val |= st->rc.accel_config & 0x07;
-		else
-			val |= lpf;
-	} else if (st->hal->part < ICM20628) {
-		if (lpf < 8)
-			ret = nvi_wr_accel_config2(st, BIT_FIFO_SIZE_1K | lpf);
-		if (test > 7)
-			val |= st->rc.accel_config & 0xE0;
-		else
-			val |= test << 5;
-		if (fsr > 3)
-			val |= st->rc.accel_config & 0x18;
-		else
-			val |= fsr << 3;
-	} else {
-		if (test > 7)
-			val |= st->rc.accel_config2 & 0x1C;
-		else
-			val |= test << 2;
-		if (avg > 3)
-			val |= st->rc.accel_config2 & 0x03;
-		else
-			val |= avg;
-		ret = nvi_wr_accel_config2(st, val);
-		val = 0;
-		/* lpf > 8: preserve
-		 * lpf = 0: disable
-		 * lpf 1 - 8: enable lpf - 1
-		 */
-		if (lpf) {
-			if (lpf > 8) {
-				val |= st->rc.accel_config & 0x39;
-			} else {
-				lpf--;
-				val |= lpf << 3;
-				val |= 0x01;
-			}
-		}
-		if (fsr > 3)
-			val |= st->rc.accel_config & 0x06;
-		else
-			val |= fsr << 1;
-	}
-	if (((val != st->rc.accel_config) || st->rc_dis) && !ret) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->accel_config.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->accel_config.reg, val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->accel_config.reg,
-				st->rc.accel_config, val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__,
-					 st->hal->reg->accel_config.reg,
-					 st->rc.accel_config, val);
-			st->rc.accel_config = val;
-		}
-	}
-	return ret;
-}
-
-/* Register LP_CONFIG */
-int nvi_wr_lp_config(struct nvi_state *st, u8 val)
-{
-	int ret = 0;
-
-	val |= st->hal->reg->lp_config.dflt;
-	if ((val != st->rc.lp_config) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->lp_config.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->lp_config.reg, val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->lp_config.reg,
-				st->rc.lp_config, val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__, st->hal->reg->lp_config.reg,
-					 st->rc.lp_config, val);
-			st->rc.lp_config = val;
-		}
-	}
-	return ret;
-}
-
-/* Register FIFO_EN */
-int nvi_wr_fifo_en(struct nvi_state *st, u16 fifo_en)
-{
-	u8 buf[3];
-	u16 len = 1 + (st->hal->bit->bit_fifo_en_max / 8);
-	u16 fifo_en_le = cpu_to_le16(fifo_en);
-	int ret = 0;
-
-	if ((fifo_en != st->rc.fifo_en) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->fifo_en.bank);
-		if (ret)
-			return ret;
-
-		buf[0] = st->hal->reg->fifo_en.reg;
-		buf[1] = st->hal->reg->fifo_en.dflt & 0xFF;
-		buf[1] |= fifo_en_le & 0xFF;
-		buf[2] = st->hal->reg->fifo_en.dflt >> 8;
-		buf[2] |= fifo_en_le >> 8;
-		ret = nvi_i2c_write(st, st->i2c_addr, len, buf);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->fifo_en.reg,
-				st->rc.fifo_en, fifo_en, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__, st->hal->reg->fifo_en.reg,
-					 st->rc.fifo_en, fifo_en);
-			st->rc.fifo_en = fifo_en;
-		}
-	}
-	return ret;
-}
-
-/* Register I2C_MST_ODR_CONFIG */
-static int nvi_wr_i2c_mst_odr_config(struct nvi_state *st, u8 val)
-{
-	int ret = 0;
-
-	if (st->hal->reg->i2c_mst_odr_config.bank == 0xFF)
+	if (!st->hal->reg->fifo_cfg.reg)
 		return 0;
 
-	if ((val != st->rc.i2c_mst_odr_config) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st,
-					st->hal->reg->i2c_mst_odr_config.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->i2c_mst_odr_config.reg,
-				 val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->i2c_mst_odr_config.reg,
-				st->rc.i2c_mst_odr_config, val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__, st->hal->reg->
-					 i2c_mst_odr_config.reg,
-					 st->rc.i2c_mst_odr_config, val);
-			st->rc.i2c_mst_odr_config = val;
-		}
-	}
-	return ret;
+	if (fifo >= 0)
+		fifo_cfg = (fifo << 2) | 0x01;
+	else
+		fifo_cfg = 0;
+	return nvi_i2c_wr_rc(st, &st->hal->reg->fifo_cfg, fifo_cfg,
+			     NULL, &st->rc.fifo_cfg);
 }
 
-/* Register I2C_MST_DELAY_CTRL */
-static int nvi_wr_i2c_mst_delay_ctrl(struct nvi_state *st, u8 val)
-{
-	int ret = 0;
-
-	if ((val != st->rc.i2c_mst_delay_ctrl) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st,
-					st->hal->reg->i2c_mst_delay_ctrl.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->i2c_mst_delay_ctrl.reg,
-				 val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->i2c_mst_delay_ctrl.reg,
-				st->rc.i2c_mst_delay_ctrl, val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__,
-					 st->hal->reg->i2c_mst_delay_ctrl.reg,
-					 st->rc.i2c_mst_delay_ctrl, val);
-			st->rc.i2c_mst_delay_ctrl = val;
-		}
-	}
-	return ret;
-}
-
-/* Register I2C_SLV0_ADDR */
-/* Register I2C_SLV1_ADDR */
-/* Register I2C_SLV2_ADDR */
-/* Register I2C_SLV3_ADDR */
-/* Register I2C_SLV4_ADDR */
-static int nvi_wr_i2c_slv_addr(struct nvi_state *st, int port, u8 val)
-{
-	u8 reg;
-	int ret = 0;
-
-	if ((val != st->rc.i2c_slv_addr[port]) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st,
-					  st->hal->reg->i2c_slv0_addr.bank);
-		if (ret)
-			return ret;
-
-		if (st->hal->part >= ICM20628)
-			reg = (st->hal->reg->i2c_slv0_addr.reg + (port << 2));
-		else
-			reg = (st->hal->reg->i2c_slv0_addr.reg + (port * 3));
-		ret = nvi_i2c_wr(st, reg, val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s[%d]:%x=%x->%x ERR=%d\n",
-				__func__, port, reg, st->rc.i2c_slv_addr[port],
-				val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s[%d]:%x=%x->%x\n",
-					 __func__, port, reg,
-					 st->rc.i2c_slv_addr[port], val);
-			st->rc.i2c_slv_addr[port] = val;
-		}
-	}
-	return ret;
-}
-
-/* Register I2C_SLV0_REG */
-/* Register I2C_SLV1_REG */
-/* Register I2C_SLV2_REG */
-/* Register I2C_SLV3_REG */
-/* Register I2C_SLV4_REG */
-static int nvi_wr_i2c_slv_reg(struct nvi_state *st, int port, u8 val)
-{
-	u8 reg;
-	int ret = 0;
-
-	if ((val != st->rc.i2c_slv_reg[port]) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->i2c_slv0_reg.bank);
-		if (ret)
-			return ret;
-
-		if (st->hal->part >= ICM20628)
-			reg = (st->hal->reg->i2c_slv0_reg.reg + (port << 2));
-		else
-			reg = (st->hal->reg->i2c_slv0_reg.reg + (port * 3));
-		ret = nvi_i2c_wr(st, reg, val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s[%d]:%x=%x->%x ERR=%d\n",
-				__func__, port, reg,
-				st->rc.i2c_slv_reg[port], val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s[%d]:%x=%x->%x\n",
-					 __func__, port, reg,
-					 st->rc.i2c_slv_reg[port], val);
-			st->rc.i2c_slv_reg[port] = val;
-		}
-	}
-	return ret;
-}
-
-/* Register I2C_SLV0_CTRL */
-/* Register I2C_SLV1_CTRL */
-/* Register I2C_SLV2_CTRL */
-/* Register I2C_SLV3_CTRL */
-static int nvi_wr_i2c_slv_ctrl(struct nvi_state *st, int port, u8 val)
-{
-	u8 reg;
-	int ret = 0;
-
-	if ((val != st->rc.i2c_slv_ctrl[port]) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st,
-					  st->hal->reg->i2c_slv0_ctrl.bank);
-		if (ret)
-			return ret;
-
-		if (st->hal->part >= ICM20628)
-			reg = (st->hal->reg->i2c_slv0_ctrl.reg + (port << 2));
-		else
-			reg = (st->hal->reg->i2c_slv0_ctrl.reg + (port * 3));
-		ret = nvi_i2c_wr(st, reg, val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s[%d]:%x=%x->%x ERR=%d\n",
-				__func__, port, reg,
-				st->rc.i2c_slv_ctrl[port], val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s[%d]:%x=%x->%x\n",
-					 __func__, port, reg,
-					 st->rc.i2c_slv_ctrl[port], val);
-			st->rc.i2c_slv_ctrl[port] = val;
-			ret = 1; /* flag change made */
-		}
-	}
-	return ret;
-}
-
-/* Register I2C_SLV0_DO */
-/* Register I2C_SLV1_DO */
-/* Register I2C_SLV2_DO */
-/* Register I2C_SLV3_DO */
-/* Register I2C_SLV4_DO */
-static int nvi_wr_i2c_slv_do(struct nvi_state *st, int port, u8 val)
-{
-	u8 reg;
-	int ret = 0;
-
-	if ((val != st->rc.i2c_slv_do[port]) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->i2c_slv0_do.bank);
-		if (ret)
-			return ret;
-
-		if (st->hal->part >= ICM20628) {
-			reg = (st->hal->reg->i2c_slv0_do.reg + (port << 2));
-		} else {
-			if (port == AUX_PORT_IO)
-				reg = st->hal->reg->i2c_slv4_do.reg;
-			else
-				reg = st->hal->reg->i2c_slv0_do.reg + port;
-		}
-		ret = nvi_i2c_wr(st, reg, val);
-		if (ret)
-			dev_err(&st->i2c->dev, "%s[%d]:%x=%x->%x ERR=%d\n",
-				__func__, port, reg,
-				st->rc.i2c_slv_do[port], val, ret);
-		else
-			st->rc.i2c_slv_do[port] = val;
-	}
-	return ret;
-}
-
-/* Register I2C_SLV4_CTRL */
 static int nvi_wr_i2c_slv4_ctrl(struct nvi_state *st, bool slv4_en)
 {
 	u8 val;
-	int ret = 0;
 
 	val = st->aux.delay_hw;
 	val |= (st->aux.port[AUX_PORT_IO].nmp.ctrl & BIT_I2C_SLV_REG_DIS);
 	if (slv4_en)
 		val |= BIT_SLV_EN;
-	if ((val != st->rc.i2c_slv_ctrl[AUX_PORT_IO]) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st,
-					  st->hal->reg->i2c_slv4_ctrl.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->i2c_slv4_ctrl.reg, val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->i2c_slv4_ctrl.reg,
-				st->rc.i2c_slv_ctrl[AUX_PORT_IO], val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__,
-					 st->hal->reg->i2c_slv4_ctrl.reg,
-					st->rc.i2c_slv_ctrl[AUX_PORT_IO], val);
-			st->rc.i2c_slv_ctrl[AUX_PORT_IO] = val;
-			ret = 1; /* flag change made */
-		}
-	}
-	return ret;
+	return nvi_i2c_wr_rc(st, &st->hal->reg->i2c_slv4_ctrl, val,
+			     __func__, &st->rc.i2c_slv4_ctrl);
 }
 
-/* Register INT_PIN_CFG */
-static int nvi_wr_int_pin_cfg(struct nvi_state *st, u8 val)
+static int nvi_rd_int_sts_dmp(struct nvi_state *st)
 {
-	int ret = 0;
-
-	if ((val != st->rc.int_pin_cfg) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->int_pin_cfg.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->int_pin_cfg.reg, val);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->int_pin_cfg.reg,
-				st->rc.int_pin_cfg, val, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__,
-					 st->hal->reg->int_pin_cfg.reg,
-					 st->rc.int_pin_cfg, val);
-			st->rc.int_pin_cfg = val;
-		}
-	}
-	return ret;
-}
-
-/* Register INT_ENABLE */
-static int nvi_wr_int_enable(struct nvi_state *st, u32 int_enable)
-{
-	u8 buf[5];
-	u16 len = 1 + (st->hal->bit->bit_int_enable_max / 8);
-	u32 int_enable_le = cpu_to_le32(int_enable);
-	int ret = 0;
-
-	if ((int_enable != st->rc.int_enable) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->int_enable.bank);
-		if (ret)
-			return ret;
-
-		buf[0] = st->hal->reg->int_enable.reg;
-		buf[1] = int_enable_le & 0xFF;
-		buf[2] = int_enable_le >> 8;
-		buf[3] = int_enable_le >> 16;
-		buf[4] = int_enable_le >> 24;
-		ret = nvi_i2c_write(st, st->i2c_addr, len, buf);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->int_enable.reg,
-				st->rc.int_enable, int_enable, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					__func__, st->hal->reg->int_enable.reg,
-					 st->rc.int_enable, int_enable);
-			st->rc.int_enable = int_enable;
-			if (int_enable)
-				nvi_enable_irq(st);
-		}
-	}
-	return ret;
-}
-
-int nvi_int_able(struct nvi_state *st, bool enable)
-{
-	u32 int_enable = 0;
 	int ret;
 
-	if (enable) {
-		if (st->master_enable & (1 << DEV_DMP))
-			int_enable |= 1 << st->hal->bit->dmp_int_en;
-		else if (st->master_enable &
-			   (DEV_MPU_MASK | (1 << DEV_AUX)))
-			int_enable |= 1 << st->hal->bit->raw_data_0_rdy_en;
-	}
-	ret = nvi_wr_int_enable(st, int_enable);
+	ret = nvi_i2c_rd(st, &st->hal->reg->int_dmp, &st->rc.int_dmp);
+	if (ret)
+		dev_err(&st->i2c->dev, "%s %x=ERR %d\n",
+			__func__, st->hal->reg->int_dmp.reg, ret);
 	return ret;
 }
 
-/* Register USER_CTRL */
-static int nvi_wr_user_ctrl_rc(struct nvi_state *st, u8 user_ctrl)
+static int nvi_rd_int_status(struct nvi_state *st)
 {
-	int ret = 0;
-
-	if ((user_ctrl != st->rc.user_ctrl) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->user_ctrl.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->user_ctrl.reg, user_ctrl);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->user_ctrl.reg,
-				st->rc.user_ctrl, user_ctrl, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__, st->hal->reg->user_ctrl.reg,
-					 st->rc.user_ctrl, user_ctrl);
-			st->rc.user_ctrl = user_ctrl;
-		}
-	}
-	return ret;
-}
-
-int nvi_user_ctrl_en(struct nvi_state *st, bool fifo_enable, bool i2c_enable)
-{
-	u16 val = 0;
-	u16 fifo_sample_size = 0;
-	int i;
+	u8 buf[4] = {0, 0, 0, 0};
+	unsigned int i;
+	unsigned int n;
 	int ret;
 
-	st->fifo_sample_size = 0;
-	if (fifo_enable && !(st->master_enable & (1 << DEV_DMP))) {
-		if (st->enabled[DEV_ACCEL]) {
-			val |= 1 << st->hal->bit->accel_fifo_en;
-			fifo_sample_size += 6;
+	ret = nvi_i2c_rd(st, &st->hal->reg->int_status, buf);
+	if (ret) {
+		dev_err(&st->i2c->dev, "%s %x=ERR %d\n",
+			__func__, st->hal->reg->int_status.reg, ret);
+	} else {
+		/* convert to little endian */
+		st->rc.int_status = 0;
+		n = st->hal->reg->int_status.len;
+		if (!n)
+			n++;
+		for (i = 0; i < n; i++) {
+			st->rc.int_status <<= 8;
+			st->rc.int_status |= buf[i];
 		}
-		if (st->enabled[DEV_TEMP] && st->chip_config.temp_fifo_en) {
-			val |= 1 << st->hal->bit->temp_fifo_en;
-			fifo_sample_size += 2;
-		}
-		if (st->enabled[DEV_ANGLVEL] & (1 << AXIS_X)) {
-			val |= 1 << st->hal->bit->gyro_x_fifo_en;
-			fifo_sample_size += 2;
-		}
-		if (st->enabled[DEV_ANGLVEL] & (1 << AXIS_Y)) {
-			val |= 1 << st->hal->bit->gyro_y_fifo_en;
-			fifo_sample_size += 2;
-		}
-		if (st->enabled[DEV_ANGLVEL] & (1 << AXIS_Z)) {
-			val |= 1 << st->hal->bit->gyro_z_fifo_en;
-			fifo_sample_size += 2;
-		}
-		for (i = 0; i < AUX_PORT_IO; i++) {
-			if (st->aux.port[i].fifo_en &&
-				  (st->aux.port[i].nmp.addr & BIT_I2C_READ) &&
-				      (st->rc.i2c_slv_ctrl[i] & BIT_SLV_EN)) {
-				val |= 1 << st->hal->bit->slv_fifo_en[i];
-				fifo_sample_size += st->aux.port[i].nmp.ctrl &
-						    BITS_I2C_SLV_CTRL_LEN;
+
+		if (st->rc.int_status & (1 << st->hal->bit->int_dmp))
+			ret = nvi_rd_int_sts_dmp(st);
+	}
+
+	return ret;
+}
+
+int nvi_int_able(struct nvi_state *st, const char *fn, bool en)
+{
+	u32 int_en = 0;
+	u32 int_msk;
+	unsigned int fifo;
+	int dev;
+	int ret;
+
+	if (en) {
+		if (st->en_msk & (1 << DEV_DMP)) {
+			int_en |= 1 << st->hal->bit->int_dmp;
+		} else if (st->en_msk & MSK_DEV_ALL) {
+			int_msk = 1 << st->hal->bit->int_data_rdy_0;
+			if (st->rc.fifo_cfg & 0x01) {
+				/* multi FIFO enabled */
+				fifo = 0;
+				for (; fifo < st->hal->fifo_n; fifo++) {
+					dev = st->hal->fifo_dev[fifo];
+					if (dev < 0)
+						continue;
+
+					if (st->rc.fifo_en & st->hal->
+							 dev[dev]->fifo_en_msk)
+						int_en |= int_msk << fifo;
+				}
+			} else {
+				int_en |= int_msk;
 			}
 		}
 	}
-	st->fifo_sample_size = fifo_sample_size;
-	ret = nvi_wr_fifo_en(st, val);
-	if (val && !ret)
-		val = BIT_FIFO_EN;
-	else
-		val = 0;
-	if (i2c_enable && (st->master_enable & (1 << DEV_AUX)))
-		val |= BIT_I2C_MST_EN;
-	if (st->master_enable & (1 << DEV_DMP))
-		val |= BIT_DMP_EN;
-	ret |= nvi_wr_user_ctrl_rc(st, val);
+	ret = nvi_i2c_write_rc(st, &st->hal->reg->int_enable, int_en,
+			       __func__, (u8 *)&st->rc.int_enable, false);
+	if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
+		dev_info(&st->i2c->dev, "%s-%s en=%x int_en=%x err=%d\n",
+			 __func__, fn, en, int_en, ret);
 	return ret;
 }
 
@@ -1036,7 +808,7 @@ static void nvi_flush_aux(struct nvi_state *st, int port)
 	struct aux_port *ap = &st->aux.port[port];
 
 	if (ap->nmp.handler)
-		ap->nmp.handler(NULL, 0, 0LL, ap->nmp.ext_driver);
+		ap->nmp.handler(NULL, 0, 0, ap->nmp.ext_driver);
 }
 
 static void nvi_flush_push(struct nvi_state *st)
@@ -1046,10 +818,10 @@ static void nvi_flush_push(struct nvi_state *st)
 	int ret;
 
 	for (i = 0; i < DEV_N; i++) {
-		if (st->flush[i] && st->nvs_st[i]) {
-			ret = st->nvs->handler(st->nvs_st[i], NULL, 0LL);
+		if (st->snsr[i].flush) {
+			ret = st->nvs->handler(st->snsr[i].nvs_st, NULL, 0LL);
 			if (ret >= 0)
-				st->flush[i] = false;
+				st->snsr[i].flush = false;
 		}
 	}
 	for (i = 0; i < AUX_PORT_IO; i++) {
@@ -1060,217 +832,225 @@ static void nvi_flush_push(struct nvi_state *st)
 	}
 }
 
-/* Register USER_CTRL */
-int nvi_wr_user_ctrl(struct nvi_state *st, u8 user_ctrl)
+static int nvi_user_ctrl_rst(struct nvi_state *st, u8 user_ctrl)
 {
-	bool fifo_enable = true;
-	bool i2c_enable = true;
+	u8 fifo_rst;
+	unsigned int msk;
+	unsigned int n;
 	int i;
-	int ret;
+	int ret = 0;
 	int ret_t = 0;
 
-	if (!(user_ctrl & BITS_USER_CTRL_RST))
-		return nvi_wr_user_ctrl_rc(st, user_ctrl);
-
-	if (user_ctrl & BIT_I2C_MST_RST)
-		i2c_enable = false;
 	if (user_ctrl & BIT_SIG_COND_RST)
 		user_ctrl = BITS_USER_CTRL_RST;
 	if (user_ctrl & BIT_DMP_RST)
 		user_ctrl |= BIT_FIFO_RST;
 	if (user_ctrl & BIT_FIFO_RST) {
-		/* must make sure FIFO is off or IRQ storm will occur */
-		nvi_user_ctrl_en(st, false, i2c_enable);
-		if (st->hal->part >= ICM20628) {
-			ret_t = nvi_wr_reg_bank_sel(st, REG_FIFO_RST_BANK);
-			if (!ret_t) {
-				ret_t =  nvi_i2c_wr(st, REG_FIFO_RST, 0x1F);
-				ret_t |=  nvi_i2c_wr(st, REG_FIFO_RST, 0x1E);
-				if (!ret_t)
-					nvi_flush_push(st);
+		st->buf_i = 0;
+		if (st->hal->reg->fifo_rst.reg) {
+			/* ICM part */
+			if (st->en_msk & (1 << DEV_DMP)) {
+				ret = nvi_wr_fifo_cfg(st,
+						      st->hal->dmp->fifo_mode);
+			} else {
+				n = 0;
+				for (i = 0; i < DEV_AXIS_N; i++) {
+					if (st->hal->dev[i]->fifo_en_msk &&
+							    st->snsr[i].enable)
+						n++;
+				}
+
+				msk = st->snsr[DEV_AUX].enable;
+				msk |= st->aux.dmp_en_msk;
+				if (st->hal->dev[DEV_AUX]->fifo_en_msk && msk)
+					n++;
+				if (n > 1)
+					ret = nvi_wr_fifo_cfg(st, 0);
+				else
+					ret = nvi_wr_fifo_cfg(st, -1);
 			}
+			if (st->icm_fifo_off) {
+				ret |= nvi_i2c_wr(st, &st->hal->reg->fifo_rst,
+						  0x1F, __func__);
+				ret |= nvi_i2c_wr(st, &st->hal->reg->fifo_rst,
+						  0, __func__);
+				st->icm_fifo_off = false;
+			}
+			if (st->en_msk & (1 << DEV_DMP))
+				fifo_rst = 0x1E;
+			else
+				fifo_rst = 0;
+			ret |= nvi_i2c_wr(st, &st->hal->reg->fifo_rst,
+					  0x1F, __func__);
+			ret |= nvi_i2c_wr(st, &st->hal->reg->fifo_rst,
+					  fifo_rst, __func__);
+			if (ret)
+				ret_t |= ret;
+			else
+				nvi_flush_push(st);
 			if (user_ctrl == BIT_FIFO_RST)
 				/* then done */
 				return ret_t;
 
 			user_ctrl &= ~BIT_FIFO_RST;
 		}
-		fifo_enable = false;
 	}
 
-	nvi_user_ctrl_en(st, fifo_enable, i2c_enable);
-	ret_t |= nvi_wr_reg_bank_sel(st, st->hal->reg->user_ctrl.bank);
-	if (!ret_t) {
-		ret_t =  nvi_i2c_wr(st, st->hal->reg->user_ctrl.reg,
-				    user_ctrl);
-		if (ret_t) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->user_ctrl.reg,
-				st->rc.user_ctrl, user_ctrl, ret_t);
-		} else {
-			if (user_ctrl & BIT_FIFO_RST)
-				nvi_flush_push(st);
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					 __func__, st->hal->reg->user_ctrl.reg,
-					 st->rc.user_ctrl, user_ctrl);
-			for (i = 0; i < POWER_UP_TIME; i++) {
-				user_ctrl = -1;
-				ret = nvi_i2c_rd(st,
-						 st->hal->reg->user_ctrl.bank,
-						 st->hal->reg->user_ctrl.reg,
-						 1, &user_ctrl);
-				if (!(user_ctrl & BITS_USER_CTRL_RST))
-					break;
+	ret =  nvi_i2c_wr(st, &st->hal->reg->user_ctrl, user_ctrl, __func__);
+	if (ret) {
+		ret_t |= ret;
+	} else {
+		if (user_ctrl & BIT_FIFO_RST)
+			nvi_flush_push(st);
+		for (i = 0; i < POWER_UP_TIME; i++) {
+			user_ctrl = -1;
+			ret = nvi_i2c_rd(st, &st->hal->reg->user_ctrl,
+					 &user_ctrl);
+			if (!(user_ctrl & BITS_USER_CTRL_RST))
+				break;
 
-				mdelay(1);
-			}
-			ret_t |= ret;
-			st->rc.user_ctrl = user_ctrl;
+			mdelay(1);
+		}
+		ret_t |= ret;
+		st->rc.user_ctrl = user_ctrl;
+		if (user_ctrl & BIT_DMP_RST && st->hal->dmp) {
+			if (st->hal->dmp->dmp_reset_delay_ms)
+				msleep(st->hal->dmp->dmp_reset_delay_ms);
 		}
 	}
+
 	return ret_t;
 }
 
-/* Register PWR_MGMT_1 */
-static int nvi_wr_pwr_mgmt_1_war(struct nvi_state *st)
+int nvi_user_ctrl_en(struct nvi_state *st, const char *fn,
+		     bool en_dmp, bool en_fifo, bool en_i2c, bool en_irq)
 {
-	u8 val;
+	struct aux_port *ap;
 	int i;
-	int ret;
+	int ret = 0;
+	u32 val = 0;
 
-	ret = nvi_wr_reg_bank_sel(st, st->hal->reg->pwr_mgmt_1.bank);
-	if (!ret) {
-		for (i = 0; i < (POWER_UP_TIME / REG_UP_TIME); i++) {
-			ret = nvi_i2c_wr(st, st->hal->reg->pwr_mgmt_1.reg,
-					 st->hal->reg->pwr_mgmt_1.dflt);
-			mdelay(REG_UP_TIME);
-			val = -1;
-			ret = nvi_i2c_rd(st, st->hal->reg->pwr_mgmt_1.bank,
-					st->hal->reg->pwr_mgmt_1.reg, 1, &val);
-			if ((!ret) && (val == st->hal->reg->pwr_mgmt_1.dflt))
-				break;
-		}
-		st->rc.pwr_mgmt_1 = val;
+	if (en_dmp) {
+		if (!(st->en_msk & (1 << DEV_DMP)))
+			en_dmp = false;
 	}
+	if (en_fifo && !en_dmp) {
+		for (i = 0; i < st->hal->src_n; i++)
+			st->src[i].fifo_data_n = 0;
+
+		for (i = 0; i < DEV_MPU_N; i++) {
+			if (st->snsr[i].enable &&
+						st->hal->dev[i]->fifo_en_msk) {
+				val |= st->hal->dev[i]->fifo_en_msk;
+				st->src[st->hal->dev[i]->src].fifo_data_n +=
+						  st->hal->dev[i]->fifo_data_n;
+				st->fifo_src = st->hal->dev[i]->src;
+			}
+		}
+
+		if (st->hal->dev[DEV_AUX]->fifo_en_msk &&
+						    st->snsr[DEV_AUX].enable) {
+			st->src[st->hal->dev[DEV_AUX]->src].fifo_data_n +=
+							    st->aux.ext_data_n;
+			st->fifo_src = st->hal->dev[DEV_AUX]->src;
+			for (i = 0; i < AUX_PORT_IO; i++) {
+				ap = &st->aux.port[i];
+				if (st->snsr[DEV_AUX].enable & (1 << i) &&
+						   ap->nmp.addr & BIT_I2C_READ)
+					val |= (1 <<
+						st->hal->bit->slv_fifo_en[i]);
+			}
+		}
+
+		if (!val)
+			en_fifo = false;
+	}
+	ret |= nvi_i2c_write_rc(st, &st->hal->reg->fifo_en, val,
+				__func__, (u8 *)&st->rc.fifo_en, false);
+	if (!ret) {
+		val = 0;
+		if (en_dmp)
+			val |= BIT_DMP_EN;
+		if (en_fifo)
+			val |= BIT_FIFO_EN;
+		if (en_i2c && (st->en_msk & (1 << DEV_AUX)))
+			val |= BIT_I2C_MST_EN;
+		else
+			en_i2c = false;
+		if (en_irq && val)
+			ret = nvi_int_able(st, __func__, true);
+		else
+			en_irq = false;
+		ret |= nvi_i2c_wr_rc(st, &st->hal->reg->user_ctrl, val,
+				     __func__, &st->rc.user_ctrl);
+	}
+	if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
+		dev_info(&st->i2c->dev,
+			 "%s-%s DMP=%x FIFO=%x I2C=%x IRQ=%x err=%d\n",
+			 __func__, fn, en_dmp, en_fifo, en_i2c, en_irq, ret);
 	return ret;
 }
 
-/* Register PWR_MGMT_1 */
-int nvi_wr_pwr_mgmt_1(struct nvi_state *st, u8 pwr_mgmt_1)
+int nvi_wr_pm1(struct nvi_state *st, const char *fn, u8 pm1)
 {
+	u8 pm1_rd;
 	unsigned int i;
 	int ret = 0;
 
-	pwr_mgmt_1 |= st->hal->reg->pwr_mgmt_1.dflt;
-	if ((pwr_mgmt_1 != st->rc.pwr_mgmt_1) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->pwr_mgmt_1.bank);
-		if (ret)
-			return ret;
-
-		if (pwr_mgmt_1 & BIT_H_RESET) {
-			nvi_wr_user_ctrl(st, BITS_USER_CTRL_RST);
-			ret = nvi_i2c_wr(st, st->hal->reg->pwr_mgmt_1.reg,
-					 BIT_H_RESET);
-		} else {
-			ret = nvi_i2c_wr(st, st->hal->reg->pwr_mgmt_1.reg,
-					 pwr_mgmt_1);
+	if (pm1 & BIT_H_RESET) {
+		/* must make sure FIFO is off or IRQ storm will occur */
+		ret = nvi_int_able(st, __func__, false);
+		ret |= nvi_user_ctrl_en(st, __func__,
+					false, false, false, false);
+		if (!ret) {
+			nvi_user_ctrl_rst(st, BITS_USER_CTRL_RST);
+			ret = nvi_i2c_wr(st, &st->hal->reg->pm1,
+					 BIT_H_RESET, __func__);
 		}
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->pwr_mgmt_1.reg,
-				st->rc.pwr_mgmt_1, pwr_mgmt_1, ret);
-		} else {
-			if (pwr_mgmt_1 & BIT_H_RESET) {
-				memset(&st->rc, 0, sizeof(struct nvi_rc));
-				if (st->hal->por2rc)
-					st->hal->por2rc(st);
-				for (i = 0; i < DEV_N_AUX; i++)
-					st->smplrt_delay_us[i] = 0;
-				for (i = 0; i < (POWER_UP_TIME / REG_UP_TIME);
-									 i++) {
-					mdelay(REG_UP_TIME);
-					pwr_mgmt_1 = -1;
-					ret = nvi_i2c_rd(st,
-						 st->hal->reg->pwr_mgmt_1.bank,
-						  st->hal->reg->pwr_mgmt_1.reg,
-							 1, &pwr_mgmt_1);
-					if ((!ret) &&
-						 (!(pwr_mgmt_1 & BIT_H_RESET)))
-						break;
-				}
-				nvi_rd_accel_offset(st);
-				nvi_rd_gyro_offset(st);
-			}
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					__func__, st->hal->reg->pwr_mgmt_1.reg,
-					 st->rc.pwr_mgmt_1, pwr_mgmt_1);
-			st->rc.pwr_mgmt_1 = pwr_mgmt_1;
-		}
+	} else {
+		ret = nvi_i2c_wr_rc(st, &st->hal->reg->pm1, pm1,
+				    __func__, &st->rc.pm1);
 	}
+	st->pm = NVI_PM_ERR;
+	if (pm1 & BIT_H_RESET && !ret) {
+		st->en_msk &= MSK_RST;
+		nvi_rc_clr(st, __func__);
+		st->rc_dis = false;
+		for (i = 0; i < st->hal->src_n; i++)
+			st->src[i].period_us_req = 0;
+
+		for (i = 0; i < (POWER_UP_TIME / REG_UP_TIME); i++) {
+			mdelay(REG_UP_TIME);
+			pm1_rd = -1;
+			ret = nvi_i2c_rd(st, &st->hal->reg->pm1, &pm1_rd);
+			if ((!ret) && (!(pm1_rd & BIT_H_RESET)))
+				break;
+		}
+
+		msleep(POR_MS);
+		nvi_rd_accel_offset(st);
+		nvi_rd_gyro_offset(st);
+		nvi_dmp_fw(st);
+	}
+	if (st->sts & NVI_DBG_SPEW_MSG)
+		dev_info(&st->i2c->dev, "%s-%s pm1=%x err=%d\n",
+			 __func__, fn, pm1, ret);
 	return ret;
 }
 
-/* Register PWR_MGMT_2 */
-static int nvi_wr_pwr_mgmt_2(struct nvi_state *st, u8 pwr_mgmt_2)
-{
-	int ret = 0;
-
-	pwr_mgmt_2 |= st->hal->reg->pwr_mgmt_2.dflt;
-	if ((pwr_mgmt_2 != st->rc.pwr_mgmt_2) || st->rc_dis) {
-		ret = nvi_wr_reg_bank_sel(st, st->hal->reg->pwr_mgmt_2.bank);
-		if (ret)
-			return ret;
-
-		ret = nvi_i2c_wr(st, st->hal->reg->pwr_mgmt_2.reg, pwr_mgmt_2);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s:%x=%x->%x ERR=%d\n",
-				__func__, st->hal->reg->pwr_mgmt_2.reg,
-				st->rc.pwr_mgmt_2, pwr_mgmt_2, ret);
-		} else {
-			if (st->dbg & NVI_DBG_SPEW_MSG)
-				dev_info(&st->i2c->dev, "%s:%x=%x->%x\n",
-					__func__, st->hal->reg->pwr_mgmt_2.reg,
-					 st->rc.pwr_mgmt_2, pwr_mgmt_2);
-			st->rc.pwr_mgmt_2 = pwr_mgmt_2;
-		}
-	}
-	return ret;
-}
-
-static int nvi_nb_vreg(struct nvi_state *st,
-		       unsigned long event, unsigned int i)
-{
-	if (event & REGULATOR_EVENT_POST_ENABLE)
-		st->vreg_en_ts[i] = nvs_timestamp();
-	else if (event & (REGULATOR_EVENT_DISABLE |
-			  REGULATOR_EVENT_FORCE_DISABLE))
-		st->vreg_en_ts[i] = 0;
-	if (st->dbg & NVI_DBG_SPEW_MSG)
-		dev_info(&st->i2c->dev, "%s %s event=0x%x ts=%lld\n",
-			 __func__, st->vreg[i].supply, (unsigned int)event,
-			 st->vreg_en_ts[i]);
-	return NOTIFY_OK;
-}
-
-int nvi_pm_wr(struct nvi_state *st, u8 pwr_mgmt_1, u8 pwr_mgmt_2, u8 lp)
+static int nvi_pm_w(struct nvi_state *st, u8 pm1, u8 pm2, u8 lp)
 {
 	s64 por_ns;
-	bool rc_dis;
 	unsigned int delay_ms;
 	unsigned int i;
 	int ret;
-	int ret_t = 0;
 
 	ret = nvs_vregs_enable(&st->i2c->dev, st->vreg, ARRAY_SIZE(nvi_vregs));
 	if (ret) {
-		rc_dis = st->rc_dis;
-		st->rc_dis = true;
 		delay_ms = 0;
 		for (i = 0; i < ARRAY_SIZE(nvi_vregs); i++) {
-			por_ns = nvs_timestamp() - st->vreg_en_ts[i];
-			if ((por_ns < 0) || (!st->vreg_en_ts[i])) {
+			por_ns = nvs_timestamp() - st->ts_vreg_en[i];
+			if ((por_ns < 0) || (!st->ts_vreg_en[i])) {
 				delay_ms = (POR_MS * 1000000);
 				break;
 			}
@@ -1282,66 +1062,47 @@ int nvi_pm_wr(struct nvi_state *st, u8 pwr_mgmt_1, u8 pwr_mgmt_2, u8 lp)
 			}
 		}
 		delay_ms /= 1000000;
-		if (st->dbg & NVI_DBG_SPEW_MSG)
+		if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
 			dev_info(&st->i2c->dev, "%s %ums delay\n",
 				 __func__, delay_ms);
 		if (delay_ms)
 			msleep(delay_ms);
-		ret_t |= nvi_wr_pwr_mgmt_1_war(st);
-		ret_t |= nvi_wr_pwr_mgmt_1(st, BIT_H_RESET);
-		ret_t |= nvi_wr_pwr_mgmt_1_war(st);
-		st->rc_dis = rc_dis;
-	} else {
-		ret_t |= nvi_wr_pwr_mgmt_1_war(st);
+		ret = nvi_wr_pm1(st, __func__, BIT_H_RESET);
 	}
-	if (st->hal->part < MPU6500) {
-		pwr_mgmt_2 |= lp << 6;
-		ret = nvi_wr_pwr_mgmt_2(st, pwr_mgmt_2);
-		if (ret)
-			ret_t |= ret;
-		else
-			st->rc.lp_config = lp;
-		ret_t |= nvi_wr_pwr_mgmt_1(st, pwr_mgmt_1);
-	} else if (st->hal->part < ICM20628) {
-		if (pwr_mgmt_1 & BIT_CYCLE) {
-			ret_t |= nvi_wr_lp_config(st, lp);
-			ret_t |= nvi_wr_accel_config2(st, BIT_FIFO_SIZE_1K |
-						      BIT_ACCEL_FCHOCIE_B);
-		}
-		ret_t |= nvi_wr_pwr_mgmt_2(st, pwr_mgmt_2);
-		ret_t |= nvi_wr_pwr_mgmt_1(st, pwr_mgmt_1);
-		if (!(pwr_mgmt_1 & BIT_CYCLE))
-			ret_t |= nvi_wr_accel_config2(st, BIT_FIFO_SIZE_1K);
-	} else { /* ICM20628 */
-		ret_t |= nvi_wr_lp_config(st, lp);
-		ret_t |= nvi_wr_pwr_mgmt_2(st, pwr_mgmt_2);
-		ret_t |= nvi_wr_pwr_mgmt_1(st, pwr_mgmt_1);
-	}
-	return ret_t;
+	ret |= st->hal->fn->pm(st, pm1, pm2, lp);
+	return ret;
 }
 
-static int nvi_reset(struct nvi_state *st,
-		     bool reset_fifo, bool reset_i2c);
-static int nvi_aux_bypass_enable(struct nvi_state *st, bool enable);
+int nvi_pm_wr(struct nvi_state *st, const char *fn, u8 pm1, u8 pm2, u8 lp)
+{
+	int ret;
+
+	ret = nvi_pm_w(st, pm1, pm2, lp);
+	if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
+		dev_info(&st->i2c->dev, "%s-%s PM1=%x PM2=%x LPA=%x err=%d\n",
+			 __func__, fn, pm1, pm2, lp, ret);
+	st->pm = NVI_PM_ERR; /* lost st->pm status: nvi_pm is being bypassed */
+	return ret;
+}
 
 /**
  * @param st
  * @param pm_req: call with one of the following:
  *      NVI_PM_OFF_FORCE = force off state
  *      NVI_PM_ON = minimum power for device access
- *      NVI_PM_ON_FULL = power for anglvel
- *      NVI_PM_AUTO = automatically sets power for configuration
+ *      NVI_PM_ON_FULL = power for gyro
+ *      NVI_PM_AUTO = automatically sets power after
+ *                    configuration.
  *      Typical use is to set needed power for configuration and
- *      then call with NVI_PM_AUTO when done.
- *      All other NVI_PM_ levels are handled automatically and
- *      are for internal use.
+ *      then call with NVI_PM_AUTO when done. All other NVI_PM_
+ *      levels are handled automatically and are for internal
+ *      use.
  * @return int: returns 0 for success or error code
  */
-int nvi_pm(struct nvi_state *st, int pm_req)
+static int nvi_pm(struct nvi_state *st, const char *fn, int pm_req)
 {
-	bool irq;
-	u8 pwr_mgmt_1;
-	u8 pwr_mgmt_2;
+	u8 pm1;
+	u8 pm2;
 	u8 lp;
 	int i;
 	int pm;
@@ -1349,45 +1110,37 @@ int nvi_pm(struct nvi_state *st, int pm_req)
 
 	lp = st->rc.lp_config;
 	if (pm_req == NVI_PM_AUTO) {
-		pwr_mgmt_2 = 0;
-		if (!(st->enabled[DEV_ACCEL] & (1 << AXIS_X)))
-			pwr_mgmt_2 |= BIT_STBY_XA;
-		if (!(st->enabled[DEV_ACCEL] & (1 << AXIS_Y)))
-			pwr_mgmt_2 |= BIT_STBY_YA;
-		if (!(st->enabled[DEV_ACCEL] & (1 << AXIS_Z)))
-			pwr_mgmt_2 |= BIT_STBY_ZA;
-		if (!(st->enabled[DEV_ANGLVEL] & (1 << AXIS_X)))
-			pwr_mgmt_2 |= BIT_STBY_XG;
-		if (!(st->enabled[DEV_ANGLVEL] & (1 << AXIS_Y)))
-			pwr_mgmt_2 |= BIT_STBY_YG;
-		if (!(st->enabled[DEV_ANGLVEL] & (1 << AXIS_Z)))
-			pwr_mgmt_2 |= BIT_STBY_ZG;
-		if (st->master_enable & DEV_PM_ON_FULL) {
+		pm2 = 0;
+		if (!(st->en_msk & MSK_PM_ACC_EN))
+			pm2 |= BIT_PWR_ACCEL_STBY;
+		if (!st->snsr[DEV_GYR].enable)
+			pm2 |= BIT_PWR_GYRO_STBY;
+		if (st->en_msk & MSK_PM_ON_FULL) {
 			pm = NVI_PM_ON_FULL;
-		} else if (st->master_enable & DEV_PM_ON) {
+		} else if (st->en_msk & MSK_PM_ON) {
 			pm = NVI_PM_ON;
-		} else if ((st->master_enable & DEV_PM_LPA) == DEV_PM_LPA) {
-			if (st->delay_us[DEV_ACCEL] >=
-						st->chip_config.lpa_delay_us) {
-				for (lp = 0; lp < st->hal->lpa_tbl_n; lp++) {
-					if (st->delay_us[DEV_ACCEL] >=
-							  st->hal->lpa_tbl[lp])
+		} else if ((st->en_msk & ((1 << EN_LP) |
+					  MSK_DEV_ALL)) == MSK_PM_LP) {
+			if (st->snsr[DEV_ACC].period_us >=
+					     st->snsr[DEV_ACC].cfg.thresh_hi) {
+				for (lp = 0; lp < st->hal->lp_tbl_n; lp++) {
+					if (st->snsr[DEV_ACC].period_us >=
+							   st->hal->lp_tbl[lp])
 						break;
 				}
 				pm = NVI_PM_ON_CYCLE;
 			} else {
 				pm = NVI_PM_ON;
 			}
-		} else if (st->master_enable & (1 << DEV_ACCEL)) {
+		} else if (st->en_msk & MSK_PM_LP) {
 			pm = NVI_PM_ON;
-		} else if ((st->master_enable & DEV_PM_STDBY) ||
-							 st->aux.bypass_lock) {
+		} else if (st->en_msk & MSK_PM_STDBY || st->aux.bypass_lock) {
 			pm = NVI_PM_STDBY;
 		} else {
 			pm = NVI_PM_OFF;
 		}
 	} else {
-		pwr_mgmt_2 = st->rc.pwr_mgmt_2;
+		pm2 = st->rc.pm2;
 		if ((pm_req > NVI_PM_STDBY) && (pm_req < st->pm))
 			pm = st->pm;
 		else
@@ -1401,7 +1154,7 @@ int nvi_pm(struct nvi_state *st, int pm_req)
 				break;
 			}
 		}
-		if (st->master_enable & EN_FW)
+		if (st->en_msk & (1 << FW_LOADED))
 			pm = NVI_PM_STDBY;
 	}
 
@@ -1410,22 +1163,34 @@ int nvi_pm(struct nvi_state *st, int pm_req)
 	case NVI_PM_OFF:
 		pm = NVI_PM_OFF;
 	case NVI_PM_STDBY:
-		pwr_mgmt_2 = (BIT_PWR_ACCEL_STBY | BIT_PWR_GYRO_STBY);
-		pwr_mgmt_1 = BIT_SLEEP;
+		pm1 = BIT_SLEEP;
+		pm2 = (BIT_PWR_ACCEL_STBY | BIT_PWR_GYRO_STBY);
 		break;
 
 	case NVI_PM_ON_CYCLE:
-		pwr_mgmt_1 = BIT_CYCLE;
+		pm1 = BIT_CYCLE;
+		pm2 &= ~BIT_PWR_ACCEL_STBY;
 		break;
 
 	case NVI_PM_ON:
-		pwr_mgmt_1 = INV_CLK_INTERNAL;
+		pm1 = INV_CLK_INTERNAL;
+		if (pm2 & BIT_PWR_ACCEL_STBY) {
+			for (i = 0; i < DEV_N_AUX; i++) {
+				if (MSK_PM_ACC_EN & (1 << i)) {
+					if (st->snsr[i].enable) {
+						pm2 &= ~BIT_PWR_ACCEL_STBY;
+						break;
+					}
+				}
+			}
+		}
+
 		break;
 
 	case NVI_PM_ON_FULL:
-		pwr_mgmt_1 = INV_CLK_PLL;
-		/* anglvel must be turned on before going to PLL clock */
-		pwr_mgmt_2 &= ~BIT_PWR_GYRO_STBY;
+		pm1 = INV_CLK_PLL;
+		/* gyro must be turned on before going to PLL clock */
+		pm2 &= ~BIT_PWR_GYRO_STBY;
 		break;
 
 	default:
@@ -1434,80 +1199,42 @@ int nvi_pm(struct nvi_state *st, int pm_req)
 		return -EINVAL;
 	}
 
-	if ((pm != st->pm) || (lp != st->rc.lp_config) ||
-					   (pwr_mgmt_1 != st->rc.pwr_mgmt_1) ||
-					    (pwr_mgmt_2 != (st->rc.pwr_mgmt_2 &
-				  (BIT_PWR_ACCEL_STBY | BIT_PWR_GYRO_STBY)))) {
-		nvi_int_able(st, false);
-		st->ts_gyro = 0;
+	if (pm != st->pm || lp != st->rc.lp_config || pm2 != (st->rc.pm2 &
+				   (BIT_PWR_ACCEL_STBY | BIT_PWR_GYRO_STBY))) {
 		if (pm == NVI_PM_OFF) {
-			switch (st->pm) {
-			case NVI_PM_STDBY:
-			case NVI_PM_OFF_FORCE:
-			case NVI_PM_OFF:
-			case NVI_PM_ERR:
-				break;
-
-			default:
-				/* disables aux before turning off */
-				nvi_reset(st, true, false);
-				break;
-			}
-		}
-		if ((!(st->rc.pwr_mgmt_1 & (BIT_SLEEP | BIT_CYCLE))) &&
-			     (pm < NVI_PM_ON) && (st->pm > NVI_PM_ON_CYCLE)) {
-			/* tasks that need access before low power state */
-			if (pm_req == NVI_PM_AUTO)
-				/* turn off FIFO and I2C */
-				nvi_user_ctrl_en(st, false, false);
-		}
-		if (pm == NVI_PM_OFF) {
-			if (st->pm > NVI_PM_OFF) {
-				ret |= nvi_wr_pwr_mgmt_1_war(st);
-				ret |= nvi_wr_pwr_mgmt_1(st, BIT_H_RESET);
-			}
-			ret |= nvi_pm_wr(st, pwr_mgmt_1, pwr_mgmt_2, lp);
+			if (st->pm > NVI_PM_OFF || st->pm == NVI_PM_ERR)
+				ret |= nvi_wr_pm1(st, __func__, BIT_H_RESET);
+			ret |= nvi_pm_w(st, pm1, pm2, lp);
 			ret |= nvs_vregs_disable(&st->i2c->dev, st->vreg,
 						 ARRAY_SIZE(nvi_vregs));
 		} else {
-			ret |= nvi_pm_wr(st, pwr_mgmt_1, pwr_mgmt_2, lp);
+			if (pm == NVI_PM_ON_CYCLE)
+				/* last chance to write to regs before cycle */
+				ret |= nvi_int_able(st, __func__, true);
+			ret |= nvi_pm_w(st, pm1, pm2, lp);
 			if (pm > NVI_PM_STDBY)
 				mdelay(REG_UP_TIME);
 		}
 		if (ret < 0) {
-			dev_err(&st->i2c->dev, "%s %d=>%d ERR=%d\n",
+			dev_err(&st->i2c->dev, "%s PM %d=>%d ERR=%d\n",
 				__func__, st->pm, pm, ret);
 			pm = NVI_PM_ERR;
 		}
-		if (st->dbg & NVI_DBG_SPEW_MSG)
-			dev_info(&st->i2c->dev, "%s %d=>%d PM2=%x LPA=%x\n",
-				 __func__, st->pm, pm, pwr_mgmt_2, lp);
+		if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
+			dev_info(&st->i2c->dev,
+				 "%s-%s PM %d=>%d PM1=%x PM2=%x LP=%x\n",
+				 __func__, fn, st->pm, pm, pm1, pm2, lp);
 		st->pm = pm;
 		if (ret > 0)
 			ret = 0;
 	}
-	if (pm_req == NVI_PM_AUTO) {
-		if (pm > NVI_PM_STDBY)
-			irq = true;
-		else
-			irq = false;
-		if (pm > NVI_PM_ON_CYCLE)
-			nvi_user_ctrl_en(st, true, true);
-		if ((pm == NVI_PM_ON_FULL) && (!st->ts_gyro))
-			st->ts_gyro = nvs_timestamp() +
-					   st->chip_config.gyro_start_delay_ns;
-	} else {
-		/* interrupts are disabled until NVI_PM_AUTO */
-		irq = false;
-	}
-	nvi_int_able(st, irq);
 	return ret;
 }
 
 static void nvi_pm_exit(struct nvi_state *st)
 {
 	if (st->hal)
-		nvi_pm(st, NVI_PM_OFF_FORCE);
+		nvi_pm(st, __func__, NVI_PM_OFF_FORCE);
 	nvs_vregs_exit(&st->i2c->dev, st->vreg, ARRAY_SIZE(nvi_vregs));
 }
 
@@ -1521,178 +1248,356 @@ static int nvi_pm_init(struct nvi_state *st)
 	return ret;
 }
 
-static int nvi_aux_delay(struct nvi_state *st)
+static int nvi_dmp_fw(struct nvi_state *st)
+{
+#if NVI_FW_CRC_CHECK
+	u32 crc32;
+#endif /* NVI_FW_CRC_CHECK */
+	int ret;
+
+	st->icm_dmp_war = false;
+	if (!st->hal->dmp)
+		return -EINVAL;
+
+#if NVI_FW_CRC_CHECK
+	crc32 = crc32(0, st->hal->dmp->fw, st->hal->dmp->fw_len);
+	if (crc32 != st->hal->dmp->fw_crc32) {
+		dev_err(&st->i2c->dev, "%s FW CRC FAIL %x != %x\n",
+			 __func__, crc32, st->hal->dmp->fw_crc32);
+		return -EINVAL;
+	}
+#endif /* NVI_FW_CRC_CHECK */
+
+	ret = nvi_user_ctrl_en(st, __func__, false, false, false, false);
+	if (ret)
+		return ret;
+
+	ret = nvi_mem_wr(st, st->hal->dmp->fw_mem_addr,
+			 st->hal->dmp->fw_len,
+			 (u8 *)st->hal->dmp->fw, true);
+	if (ret) {
+		dev_err(&st->i2c->dev, "%s ERR: nvi_mem_wr\n", __func__);
+		return ret;
+	}
+
+	ret = nvi_i2c_write_rc(st, &st->hal->reg->fw_start,
+			       st->hal->dmp->fw_start,
+			       __func__, NULL, true);
+	if (ret)
+		return ret;
+
+	ret = st->hal->dmp->fn_init(st); /* nvi_dmp_init */
+	if (ret) {
+		dev_err(&st->i2c->dev, "%s ERR: nvi_dmp_init\n", __func__);
+		return ret;
+	}
+
+	nvi_user_ctrl_en(st, __func__, false, false, false, false);
+	st->en_msk |= (1 << FW_LOADED);
+	return 0;
+}
+
+void nvi_push_delay(struct nvi_state *st)
+{
+	unsigned int i;
+
+	for (i = 0; i < DEV_MPU_N; i++) {
+		if (st->snsr[i].enable) {
+			if (st->snsr[i].push_delay_ns &&
+						    !st->snsr[i].ts_push_delay)
+				st->snsr[i].ts_push_delay = nvs_timestamp() +
+						     st->snsr[i].push_delay_ns;
+		} else {
+			st->snsr[i].ts_push_delay = 0;
+		}
+	}
+}
+
+int nvi_aux_delay(struct nvi_state *st, const char *fn)
 {
 	u8 val;
-	unsigned int delay_us;
-	unsigned int delay_new;
-	int i;
-	int j;
-	int ret = 0;
+	unsigned int msk_en;
+	unsigned int src_us;
+	unsigned int delay;
+	unsigned int i;
+	int ret;
 
 	/* determine valid delays by ports enabled */
-	delay_new = 0;
-	for (i = 0; i < AUX_PORT_MAX; i++) {
-		if (st->rc.i2c_slv_ctrl[i] & BIT_SLV_EN) {
-			if (delay_new < st->aux.port[i].nmp.delay_ms)
-				delay_new = st->aux.port[i].nmp.delay_ms;
+	delay = 0;
+	msk_en = st->snsr[DEV_AUX].enable | st->aux.dmp_en_msk;
+	for (i = 0; msk_en; i++) {
+		if (msk_en & (1 << i)) {
+			msk_en &= ~(1 << i);
+			if (delay < st->aux.port[i].nmp.delay_ms)
+				delay = st->aux.port[i].nmp.delay_ms;
 		}
 	}
-	delay_new *= 1000;
-	/* fastest delays for AUX smplrt source */
-	delay_us = -1;
-	for (i = 0; i < st->hal->smplrt[DEV_AUX]->dev_delays_n; i++) {
-		j = st->hal->smplrt[DEV_AUX]->dev_delays[i];
-		if (st->enabled[j] && st->delay_us[j]) {
-			if (st->delay_us[j] < delay_us)
-				delay_us = st->delay_us[j];
+	src_us = st->src[st->hal->dev[DEV_AUX]->src].period_us_src;
+	if (src_us) {
+		delay *= 1000; /* ms => us */
+		if (delay % src_us) {
+			delay /= src_us;
+		} else {
+			delay /= src_us;
+			if (delay)
+				delay--;
 		}
-	}
-	if (delay_us == -1)
-		delay_us = st->hal->smplrt[DEV_AUX]->delay_us_dflt;
-	if (delay_us < st->hal->smplrt[DEV_AUX]->delay_us_min)
-		delay_us = st->hal->smplrt[DEV_AUX]->delay_us_min;
-	if (delay_us > st->hal->smplrt[DEV_AUX]->delay_us_max)
-		delay_us = st->hal->smplrt[DEV_AUX]->delay_us_max;
-	st->smplrt_delay_us[DEV_AUX] = delay_us;
-
-	if (delay_new % delay_us) {
-		delay_new /= delay_us;
 	} else {
-		delay_new /= delay_us;
-		if (delay_new)
-			delay_new--;
+		delay = 0;
 	}
-	st->aux.delay_hw = delay_new;
+	if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
+		dev_info(&st->i2c->dev, "%s-%s aux.delay_hw=%u=>%u\n",
+			 __func__, fn, st->aux.delay_hw, delay);
+	st->aux.delay_hw = delay;
 	ret = nvi_wr_i2c_slv4_ctrl(st, (bool)
-			      (st->rc.i2c_slv_ctrl[AUX_PORT_IO] & BIT_SLV_EN));
-	if (ret > 0)
-		ret = 0;
+				   (st->rc.i2c_slv4_ctrl & BIT_SLV_EN));
 	/* HW port delay enable */
 	val = BIT_DELAY_ES_SHADOW;
 	for (i = 0; i < AUX_PORT_MAX; i++) {
 		if (st->aux.port[i].nmp.delay_ms)
 			val |= (1 << i);
 	}
-	ret |= nvi_wr_i2c_mst_delay_ctrl(st, val);
-
-	if (st->hal->part >= ICM20628)
-		/* FIXME */
-		ret |= nvi_wr_i2c_mst_odr_config(st, 4);
+	ret |= nvi_i2c_wr_rc(st, &st->hal->reg->i2c_mst_delay_ctrl, val,
+			     __func__, &st->rc.i2c_mst_delay_ctrl);
 	return ret;
 }
 
-static int nvi_dev_delay(struct nvi_state *st, unsigned int dev)
+static int nvi_timeout(struct nvi_state *st)
 {
-	unsigned int delay_us;
-	unsigned int delay_us_old;
-	unsigned int fs_hz;
-	u8 lpf = 0;
-	u16 smplrt_div;
-	int i;
-	int j;
+	bool disabled = true;
+	unsigned int timeout_us = -1;
+	unsigned int i;
+
+	/* find the fastest batch timeout of all the enabled devices */
+	for (i = 0; i < DEV_N_AUX; i++) {
+		if (st->snsr[i].enable) {
+			if (st->snsr[i].timeout_us < timeout_us)
+				timeout_us = st->snsr[i].timeout_us;
+			disabled = false;
+		}
+	}
+
+	disabled = true; /* batch mode is currently disabled */
+	if (disabled)
+		timeout_us = 0; /* batch mode disabled */
+	if (timeout_us != st->bm_timeout_us) {
+		st->bm_timeout_us = timeout_us;
+		return 1;
+	}
+
+	return 0;
+}
+
+static int nvi_period_src(struct nvi_state *st, int src)
+{
+	bool enabled = false;
+	unsigned int period_us = -1;
+	unsigned int dev_msk;
+	unsigned int i;
+
+	if (src < 0)
+		return 0;
+
+	/* find the fastest period of all the enabled devices */
+	dev_msk = st->hal->src[src].dev_msk;
+	for (i = 0; dev_msk; i++) {
+		if (dev_msk & (1 << i)) {
+			dev_msk &= ~(1 << i);
+			if (st->snsr[i].enable && st->snsr[i].period_us) {
+				if (st->snsr[i].period_us < period_us)
+					period_us = st->snsr[i].period_us;
+				enabled = true;
+			}
+		}
+	}
+
+	if (enabled) {
+		if (period_us < st->src[src].period_us_min)
+			period_us = st->src[src].period_us_min;
+		if (period_us > st->src[src].period_us_max)
+			period_us = st->src[src].period_us_max;
+		if (period_us != st->src[src].period_us_req) {
+			st->src[src].period_us_req = period_us;
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+int nvi_period_aux(struct nvi_state *st)
+{
+	bool enabled = false;
+	unsigned int period_us = -1;
+	unsigned int timeout_us = -1;
+	unsigned int msk_en;
+	unsigned int i;
+	int ret;
+
+	msk_en = st->snsr[DEV_AUX].enable | st->aux.dmp_en_msk;
+	for (i = 0; msk_en; i++) {
+		if (msk_en & (1 << i)) {
+			msk_en &= ~(1 << i);
+			if (st->aux.port[i].period_us) {
+				if (st->aux.port[i].period_us < period_us)
+					period_us = st->aux.port[i].period_us;
+				if (st->aux.port[i].timeout_us < timeout_us)
+					timeout_us =
+						    st->aux.port[i].timeout_us;
+				enabled = true;
+			}
+		}
+	}
+
+	if (enabled) {
+		st->snsr[DEV_AUX].period_us = period_us;
+		st->snsr[DEV_AUX].timeout_us = timeout_us;
+	}
+	ret = nvi_period_src(st, st->hal->dev[DEV_AUX]->src);
+	ret |= nvi_timeout(st);
+	return ret;
+}
+
+static int nvi_period_all(struct nvi_state *st)
+{
+	unsigned int src;
+	int ret = 0;
+
+	for (src = 0; src < st->hal->src_n; src++) {
+		if (st->hal->src[src].dev_msk & (1 << DEV_AUX))
+			continue; /* run nvi_period_aux last for timeout */
+		else
+			ret |= nvi_period_src(st, src);
+	}
+
+	ret |= nvi_period_aux(st);
+	return ret;
+}
+
+static int nvi_en(struct nvi_state *st)
+{
+	bool dmp_en = false;
+	unsigned int i;
 	int ret;
 	int ret_t = 0;
 
-	/* find the fastest polling of all the enabled devices */
-	delay_us = -1;
-	for (i = 0; i < st->hal->smplrt[dev]->dev_delays_n; i++) {
-		j = st->hal->smplrt[dev]->dev_delays[i];
-		if (st->enabled[j] && st->delay_us[j]) {
-			if (st->delay_us[j] < delay_us)
-				delay_us = st->delay_us[j];
+	while (1) {
+		if (st->snsr[DEV_GYR].enable) {
+			ret_t = nvi_pm(st, __func__, NVI_PM_ON_FULL);
+			break;
 		}
-	}
-	if (delay_us == -1)
-		delay_us = st->hal->smplrt[dev]->delay_us_dflt;
-	if (delay_us < st->hal->smplrt[dev]->delay_us_min)
-		delay_us = st->hal->smplrt[dev]->delay_us_min;
-	if (delay_us > st->hal->smplrt[dev]->delay_us_max)
-		delay_us = st->hal->smplrt[dev]->delay_us_max;
-	delay_us_old = st->smplrt_delay_us[dev];
-	st->smplrt_delay_us[dev] = delay_us;
-	/* calculate smplrt_div */
-	fs_hz = st->hal->smplrt[dev]->base_hz;
-	smplrt_div = st->smplrt_delay_us[dev] / fs_hz - 1;
-	/* calculate LPF */
-	if (st->hal->smplrt[dev]->lpf_us_tbl_n) {
-		delay_us <<= 1;
-		for (lpf = 0; lpf < st->hal->smplrt[dev]->lpf_us_tbl_n;
-								       lpf++) {
-			if (delay_us < st->hal->smplrt[dev]->lpf_us_tbl[lpf])
+
+		for (i = 0; i < DEV_N_AUX; i++) {
+			if (st->snsr[i].enable) {
+				ret_t = nvi_pm(st, __func__, NVI_PM_ON);
 				break;
+			}
+		}
+		if (i < DEV_N_AUX)
+			break;
+
+		ret_t = nvi_pm(st, __func__, NVI_PM_AUTO);
+		if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
+			dev_info(&st->i2c->dev, "%s en_msk=%x err=%d\n",
+				 __func__, st->en_msk, ret_t);
+		return ret_t;
+	}
+
+	ret_t |= nvi_int_able(st, __func__, false);
+	ret_t |= nvi_user_ctrl_en(st, __func__, false, false, false, false);
+	if (ret_t) {
+		if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
+			dev_err(&st->i2c->dev, "%s en_msk=%x ERR=%d\n",
+				__func__, st->en_msk, ret_t);
+		return ret_t;
+	}
+
+	if (st->en_msk & (1 << FW_LOADED)) {
+		/* test if batch is needed or more specifically that an
+		 * enabled sensor doesn't support batch.  The DMP can't
+		 * do batch and non-batch at the same time.
+		 */
+		if (st->bm_timeout_us) {
+			dmp_en = true;
+		} else {
+			/* batch disabled - test if a DMP sensor is enabled */
+			for (i = 0; i < DEV_N_AUX; i++) {
+				if (st->dmp_en_msk & (1 << i)) {
+					if (st->snsr[i].enable) {
+						dmp_en = true;
+						break;
+					}
+				}
+			}
+		}
+
+		if (dmp_en) {
+			ret_t |= st->hal->dmp->fn_en(st); /* nvi_dmp_en */
+			st->en_msk |= (1 << DEV_DMP);
+			if (ret_t) {
+				/* reprogram for non-DMP mode below */
+				dmp_en = false;
+				if (st->sts & (NVS_STS_SPEW_MSG |
+					       NVI_DBG_SPEW_MSG))
+					dev_err(&st->i2c->dev,
+						"%s DMP ERR=%d\n",
+						__func__, ret_t);
+			} else {
+				if (st->sts & (NVS_STS_SPEW_MSG |
+					       NVI_DBG_SPEW_MSG))
+					dev_info(&st->i2c->dev,
+						 "%s DMP enabled\n", __func__);
+			}
 		}
 	}
+	if (!dmp_en) {
+		if (st->en_msk & (1 << DEV_DMP)) {
+			st->en_msk &= ~(MSK_DEV_SNSR | (1 << DEV_DMP));
+			if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
+				dev_info(&st->i2c->dev,
+					 "%s DMP disabled\n", __func__);
+			if (st->aux.dmp_en_msk) {
+				st->aux.dmp_en_msk = 0;
+				nvi_aux_enable(st, __func__, true, true);
+			}
+			for (i = 0; i < DEV_N_AUX; i++)
+				st->snsr[i].odr = 0;
 
-	if (st->dbg)
-		dev_info(&st->i2c->dev, "%s dev=%u delay=%u\n",
-			 __func__, dev, st->smplrt_delay_us[dev]);
-	if (st->smplrt_delay_us[dev] < delay_us_old) {
-		/* go faster */
-		nvi_aux_delay(st);
-		ret = st->hal->smplrt[dev]->lpf_wr(st, -1, -1, -1, lpf);
-		if (ret < 0)
-			ret_t |= ret;
-		ret_t |= nvi_wr_smplrt_div(st, dev, smplrt_div);
-	} else {
-		/* go slower */
-		ret_t |= nvi_wr_smplrt_div(st, dev, smplrt_div);
-		ret = st->hal->smplrt[dev]->lpf_wr(st, -1, -1, -1, lpf);
-		nvi_aux_delay(st);
-		if (ret < 0)
-			ret_t |= ret;
-	}
-	return ret_t;
-}
+			for (i = 0; i < AUX_PORT_MAX; i++)
+				st->aux.port[i].odr = 0;
+		}
 
-int nvi_en(struct nvi_state *st)
-{
-	unsigned int master_enable;
-	int i;
-	int ret;
-	int ret_t;
+		for (i = 0; i < st->hal->src_n; i++)
+			ret_t |= st->hal->src[i].fn_period(st);
 
-	master_enable = st->master_enable;
-	st->master_enable &= ~DEV_MPU_MASK;
-	for (i = 0; i < DEV_N; i++) {
-		if (st->enabled[i])
-			st->master_enable |= (1 << i);
+		if (st->snsr[DEV_ACC].enable) {
+			ret = st->hal->fn->en_acc(st);
+			if (ret) {
+				ret_t |= ret;
+				st->en_msk &= ~(1 << DEV_ACC);
+			} else {
+				st->en_msk |= (1 << DEV_ACC);
+			}
+		}
+		if (st->snsr[DEV_GYR].enable) {
+			ret = st->hal->fn->en_gyr(st);
+			if (ret) {
+				ret_t |= ret;
+				st->en_msk &= ~(1 << DEV_GYR);
+			} else {
+				st->en_msk |= (1 << DEV_GYR);
+			}
+		}
+		nvi_push_delay(st);
+		/* NVI_PM_AUTO to go to NVI_PM_ON_CYCLE if need be */
+		/* this also restores correct PM mode if error */
+		ret_t |= nvi_pm(st, __func__, NVI_PM_AUTO);
+		if (st->pm > NVI_PM_ON_CYCLE)
+			ret_t |= nvi_reset(st, __func__, true, false, true);
 	}
-	if (st->master_enable & (1 << DEV_ANGLVEL))
-		ret_t = nvi_pm(st, NVI_PM_ON_FULL);
-	else if (st->master_enable & (DEV_MPU_MASK | (1 << DEV_AUX)))
-		ret_t = nvi_pm(st, NVI_PM_ON);
-	else
-		return nvi_pm(st, NVI_PM_AUTO);
-
-	if (st->master_enable & (1 << DEV_ACCEL)) {
-		for (i = 0; i < AXIS_N; i++)
-			ret_t |= nvi_wr_accel_offset(st, i,
-						(u16)(st->rom_accel_offset[i] +
-					    (st->input_accel_offset[i] << 1)));
-		ret = nvi_wr_accel_config(st, 0, 0,
-					  st->chip_config.accel_fs, 0);
-		if (ret < 0)
-			ret_t |= ret;
-		ret_t |= nvi_dev_delay(st, DEV_ACCEL);
-	}
-	if (st->master_enable & (1 << DEV_ANGLVEL)) {
-		for (i = 0; i < AXIS_N; i++)
-			ret_t |= nvi_wr_gyro_offset(st, i,
-						 (u16)(st->rom_gyro_offset[i] +
-						    st->input_gyro_offset[i]));
-		ret = nvi_wr_gyro_config(st, 0, 0, st->chip_config.fsr, 0);
-		if (ret < 0)
-			ret_t |= ret;
-		ret_t |= nvi_dev_delay(st, DEV_ANGLVEL);
-	}
-	if ((st->master_enable & DEV_MPU_MASK) || (st->aux.reset_fifo &&
-						(st->master_enable & DEV_AUX)))
-		ret_t |= nvi_reset(st, true, false);
-	ret_t |= nvi_pm(st, NVI_PM_AUTO);
-	if (st->dbg & NVI_DBG_SPEW_MSG)
-		dev_info(&st->i2c->dev, "%s master_enable=%x=>%x ret=%d\n",
-			 __func__, master_enable, st->master_enable, ret_t);
+	if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG))
+		dev_info(&st->i2c->dev, "%s en_msk=%x err=%d\n",
+			 __func__, st->en_msk, ret_t);
 	return ret_t;
 }
 
@@ -1702,83 +1607,61 @@ static void nvi_aux_dbg(struct nvi_state *st, char *tag, int val)
 	struct aux_port *p;
 	struct aux_ports *a;
 	u8 data[4];
-	int i;
+	unsigned int i;
+	int ret;
 
-	if (!(st->dbg & NVI_DBG_SPEW_AUX))
+	if (!(st->sts & NVI_DBG_SPEW_AUX))
 		return;
 
 	dev_info(&st->i2c->dev, "%s %s %d\n", __func__, tag, val);
-	for (i = 0; i < AUX_PORT_MAX; i++) {
-		nvi_i2c_rd(st, st->hal->reg->i2c_slv0_addr.bank,
-			   st->hal->reg->i2c_slv0_addr.reg + (i * 3), 3, data);
-		nvi_i2c_rd(st, st->hal->reg->i2c_slv0_do.bank,
-			   st->hal->reg->i2c_slv0_do.reg + i, 1, &data[3]);
+	a = &st->aux;
+	for (i = 0; i < AUX_PORT_IO; i++) {
+		ret = nvi_i2c_rd(st, &st->hal->reg->i2c_slv_addr[i], &data[0]);
+		ret |= nvi_i2c_rd(st, &st->hal->reg->i2c_slv_reg[i], &data[1]);
+		ret |= nvi_i2c_rd(st, &st->hal->reg->i2c_slv_ctrl[i],
+				  &data[2]);
+		ret |= nvi_i2c_rd(st, &st->hal->reg->i2c_slv_do[i], &data[3]);
 		/* HW = hardware */
-		pr_info("HW: P%d AD=%x RG=%x CL=%x DO=%x\n",
-			i, data[0], data[1], data[2], data[3]);
+		if (ret)
+			pr_info("HW: ERR=%d\n", ret);
+		else
+			pr_info("HW: P%d AD=%x RG=%x CL=%x DO=%x\n",
+				i, data[0], data[1], data[2], data[3]);
+		/* RC = hardware register cache */
+		pr_info("HC: P%d AD=%x RG=%x CL=%x DO=%x\n",
+			i, st->rc.i2c_slv_addr[i], st->rc.i2c_slv_reg[i],
+			st->rc.i2c_slv_ctrl[i], st->rc.i2c_slv_do[i]);
 		n = &st->aux.port[i].nmp;
 		/* NS = nmp structure */
-		pr_info("NS: P%d AD=%x RG=%x CL=%x DO=%x MS=%u US=%lu SB=%x\n",
+		pr_info("NS: P%d AD=%x RG=%x CL=%x DO=%x MS=%u US=%u SB=%x\n",
 			i, n->addr, n->reg, n->ctrl, n->data_out, n->delay_ms,
-			n->delay_us, n->shutdown_bypass);
+			st->aux.port[i].period_us, n->shutdown_bypass);
 		p = &st->aux.port[i];
 		/* PS = port structure */
-		pr_info("PS: P%d OFFSET=%u EN=%x FIFOEN=%x HWDOUT=%x\n",
-			i, p->ext_data_offset,
-			!!(st->enabled[DEV_AUX] & (1 << i)),
-			p->fifo_en, p->hw_do);
+		pr_info("PS: P%d EDO=%u ODR=%u DMP_CTRL=%x EN=%x HWDOUT=%x\n",
+			i, p->ext_data_offset, p->odr,
+			!!(a->dmp_ctrl_msk & (1 << i)),
+			!!(st->snsr[DEV_AUX].enable & (1 << i)), p->hw_do);
 	}
-	a = &st->aux;
-	pr_info("AUX: EN=%x MEN=%x MDLY=%x GDLY=%u DATN=%u BPEN=%x BPLK=%d\n",
-		!!(st->master_enable & (1 << DEV_AUX)),
-		!!(st->rc.user_ctrl & BIT_I2C_MST_EN),
-		(st->rc.i2c_slv_ctrl[AUX_PORT_IO] & BITS_I2C_MST_DLY),
-		st->smplrt_delay_us[DEV_AUX], a->ext_data_n,
-		(st->rc.int_pin_cfg & BIT_BYPASS_EN), a->bypass_lock);
-}
 
-static void nvi_aux_read(struct nvi_state *st)
-{
-	struct aux_port *ap;
-	s64 ts;
-	u8 *p;
-	unsigned int i;
-	unsigned int len;
-	int ret;
-
-	if ((!st->aux.ext_data_n) || (!(st->rc.user_ctrl & BIT_I2C_MST_EN)))
-		return;
-
-	ret = nvi_i2c_rd(st, st->hal->reg->ext_sens_data_00.bank,
-			 st->hal->reg->ext_sens_data_00.reg,
-			 st->aux.ext_data_n, (u8 *)&st->aux.ext_data);
-	if (ret)
-		return;
-
-	ts = nvs_timestamp();
-	for (i = 0; i < AUX_PORT_IO; i++) {
-		ap = &st->aux.port[i];
-		if ((st->rc.i2c_slv_ctrl[i] & BIT_SLV_EN) && (!ap->fifo_en) &&
-					       (ap->nmp.addr & BIT_I2C_READ) &&
-						   (ap->nmp.handler != NULL)) {
-			p = &st->aux.ext_data[ap->ext_data_offset];
-			len = ap->nmp.ctrl & BITS_I2C_SLV_CTRL_LEN;
-			ap->nmp.handler(p, len, ts, ap->nmp.ext_driver);
-		}
-	}
+	pr_info("AUX: EN=%x MEN=%x DEN=%x DLY=%x SRC=%u DN=%u BEN=%x BLK=%d\n",
+		!!(st->en_msk & (1 << DEV_AUX)),
+		!!(st->rc.user_ctrl & BIT_I2C_MST_EN), st->aux.dmp_en_msk,
+		(st->rc.i2c_slv4_ctrl & BITS_I2C_MST_DLY),
+		st->src[st->hal->dev[DEV_AUX]->src].period_us_src,
+		a->ext_data_n, (st->rc.int_pin_cfg & BIT_BYPASS_EN),
+		a->bypass_lock);
 }
 
 static void nvi_aux_ext_data_offset(struct nvi_state *st)
 {
-	int i;
-	unsigned short offset;
+	unsigned int i;
+	unsigned int offset = 0;
 
-	offset = 0;
 	for (i = 0; i < AUX_PORT_IO; i++) {
-		if ((st->rc.i2c_slv_ctrl[i] & BIT_SLV_EN) &&
-				  (st->aux.port[i].nmp.addr & BIT_I2C_READ)) {
+		if (st->aux.port[i].nmp.addr & BIT_I2C_READ) {
 			st->aux.port[i].ext_data_offset = offset;
-			offset += (st->aux.port[i].nmp.ctrl &
+			offset += (st->rc.i2c_slv_ctrl[i] &
 				   BITS_I2C_SLV_CTRL_LEN);
 		}
 	}
@@ -1796,7 +1679,8 @@ static int nvi_aux_port_data_out(struct nvi_state *st,
 {
 	int ret;
 
-	ret = nvi_wr_i2c_slv_do(st, port, data_out);
+	ret = nvi_i2c_wr_rc(st, &st->hal->reg->i2c_slv_do[port], data_out,
+			    NULL, &st->rc.i2c_slv_do[port]);
 	if (!ret) {
 		st->aux.port[port].nmp.data_out = data_out;
 		st->aux.port[port].hw_do = true;
@@ -1812,182 +1696,169 @@ static int nvi_aux_port_wr(struct nvi_state *st, int port)
 	int ret;
 
 	ap = &st->aux.port[port];
-	ret = nvi_wr_i2c_slv_addr(st, port, ap->nmp.addr);
-	ret |= nvi_wr_i2c_slv_reg(st, port, ap->nmp.reg);
-	ret |= nvi_wr_i2c_slv_do(st, port, ap->nmp.data_out);
+	ret = nvi_i2c_wr_rc(st, &st->hal->reg->i2c_slv_addr[port],
+			   ap->nmp.addr, __func__, &st->rc.i2c_slv_addr[port]);
+	ret |= nvi_i2c_wr_rc(st, &st->hal->reg->i2c_slv_reg[port], ap->nmp.reg,
+			     __func__, &st->rc.i2c_slv_reg[port]);
+	ret |= nvi_i2c_wr_rc(st, &st->hal->reg->i2c_slv_do[port],
+			 ap->nmp.data_out, __func__, &st->rc.i2c_slv_do[port]);
 	return ret;
 }
 
-static int nvi_aux_port_en(struct nvi_state *st,
-			   int port, bool en)
+static int nvi_aux_port_en(struct nvi_state *st, int port, bool en)
 {
 	struct aux_port *ap;
-	u8 val;
+	u8 slv_ctrl;
+	u8 ctrl;
+	u8 reg;
+	unsigned int dmp_ctrl_msk;
 	int ret = 0;
 
-	st->aux.ext_data_n = 0;
 	ap = &st->aux.port[port];
-	if ((!(st->rc.i2c_slv_addr[port])) && en) {
+	if (en && ap->nmp.addr != st->rc.i2c_slv_addr[port]) {
 		ret = nvi_aux_port_wr(st, port);
 		if (!ret)
 			ap->hw_do = true;
 	}
-	if ((!ap->hw_do) && en)
+	if (en && !ap->hw_do)
 		nvi_aux_port_data_out(st, port, ap->nmp.data_out);
 	if (port == AUX_PORT_IO) {
 		ret = nvi_wr_i2c_slv4_ctrl(st, en);
 	} else {
-		if (en)
-			val = (ap->nmp.ctrl | BIT_SLV_EN);
-		else
-			val = 0;
-		ret = nvi_wr_i2c_slv_ctrl(st, port, val);
-	}
-	if (ret > 0) {
-		nvi_aux_ext_data_offset(st);
-		ret = 0;
+		slv_ctrl = st->rc.i2c_slv_ctrl[port];
+		if (en) {
+			dmp_ctrl_msk = st->aux.dmp_ctrl_msk;
+			reg = ap->nmp.reg;
+			ctrl = ap->nmp.ctrl;
+			if (ap->dd && st->en_msk & (1 << DEV_DMP)) {
+				reg = ap->dd->dmp_rd_reg;
+				if (ctrl != ap->dd->dmp_rd_ctrl) {
+					ctrl = ap->dd->dmp_rd_ctrl;
+					st->aux.dmp_ctrl_msk |= (1 << port);
+				}
+			} else {
+				st->aux.dmp_ctrl_msk &= ~(1 << port);
+			}
+			if (dmp_ctrl_msk != st->aux.dmp_ctrl_msk)
+				/* AUX HW needs to be reset if slv_ctrl values
+				 * change other than enable bit.
+				 */
+				st->aux.reset_i2c = true;
+			ret = nvi_i2c_wr_rc(st,
+					    &st->hal->reg->i2c_slv_reg[port],
+					    reg, __func__,
+					    &st->rc.i2c_slv_reg[port]);
+			ctrl |= BIT_SLV_EN;
+		} else {
+			ctrl = 0;
+			st->aux.dmp_ctrl_msk &= ~(1 << port);
+		}
+		ret |= nvi_i2c_wr_rc(st, &st->hal->reg->i2c_slv_ctrl[port],
+				   ctrl, __func__, &st->rc.i2c_slv_ctrl[port]);
+		if (slv_ctrl != st->rc.i2c_slv_ctrl[port])
+			nvi_aux_ext_data_offset(st);
 	}
 	return ret;
 }
 
-static int nvi_aux_enable(struct nvi_state *st, bool enable)
+int nvi_aux_enable(struct nvi_state *st, const char *fn,
+		   bool en_req, bool force)
 {
+	bool enable = en_req;
+	bool enabled = false;
 	bool en;
+	unsigned int msk_en;
 	unsigned int i;
 	int ret = 0;
 
 	if (st->rc.int_pin_cfg & BIT_BYPASS_EN)
 		enable = false;
-	en = false;
-	if (enable) {
-		/* global enable is honored only if a port is enabled */
-		for (i = 0; i < AUX_PORT_MAX; i++) {
-			if (st->enabled[DEV_AUX] & (1 << i)) {
-				en = true;
-				break;
+	/* global enable is honored only if a port is enabled */
+	msk_en = st->snsr[DEV_AUX].enable | st->aux.dmp_en_msk;
+	if (!msk_en)
+		enable = false;
+	if (st->en_msk & (1 << DEV_AUX))
+		enabled = true;
+	if (force || enable != enabled) {
+		if (enable) {
+			st->en_msk |= (1 << DEV_AUX);
+			for (i = 0; i < AUX_PORT_MAX; i++) {
+				if (msk_en & (1 << i))
+					en = true;
+				else
+					en = false;
+				ret |= nvi_aux_port_en(st, i, en);
+			}
+		} else {
+			st->en_msk &= ~(1 << DEV_AUX);
+			for (i = 0; i < AUX_PORT_MAX; i++) {
+				if (st->rc.i2c_slv_addr[i])
+					nvi_aux_port_en(st, i, false);
 			}
 		}
-		if (en == (bool)(st->rc.user_ctrl & BIT_I2C_MST_EN))
-			/* if already on then just update delays */
-			nvi_dev_delay(st, DEV_AUX);
+		if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG |
+			       NVI_DBG_SPEW_AUX))
+			dev_info(&st->i2c->dev,
+				 "%s-%s en_req=%x enabled: %x->%x err=%d\n",
+				 __func__, fn, en_req, enabled, enable, ret);
 	}
-	if (en)
-		st->master_enable |= (1 << DEV_AUX);
-	else
-		st->master_enable &= (~(1 << DEV_AUX));
-	if ((bool)(st->rc.user_ctrl & BIT_I2C_MST_EN) == en) {
-		if (st->aux.reset_fifo)
-			nvi_reset(st, true, false);
-		return 0;
-	}
-
-	if (en) {
-		for (i = 0; i < AUX_PORT_MAX; i++) {
-			if (st->enabled[DEV_AUX] & (1 << i))
-				ret |= nvi_aux_port_en(st, i, true);
-		}
-	} else {
-		for (i = 0; i < AUX_PORT_MAX; i++) {
-			if (st->rc.i2c_slv_addr[i])
-				nvi_aux_port_en(st, i, false);
-		}
-	}
-	ret |= nvi_dev_delay(st, DEV_AUX);
-	if (st->aux.reset_fifo)
-		ret |= nvi_reset(st, true, false);
-	else
-		ret |= nvi_user_ctrl_en(st, true, en);
 	return ret;
 }
 
-static int nvi_aux_port_enable(struct nvi_state *st, int port, bool enable)
+static int nvi_aux_port_enable(struct nvi_state *st,
+			       unsigned int port_mask, bool en)
 {
-	bool fifo_enable = true;
+	unsigned int enabled;
 	unsigned int i;
 	int ret;
 
-	if (enable)
-		st->enabled[DEV_AUX] |= (1 << port);
+	enabled = st->snsr[DEV_AUX].enable;
+	if (en)
+		st->snsr[DEV_AUX].enable |= port_mask;
 	else
-		st->enabled[DEV_AUX] &= ~(1 << port);
-	/* find the fastest polling of all the enabled aux devices */
-	st->delay_us[DEV_AUX] = st->hal->smplrt[DEV_AUX]->delay_us_max;
-	for (i = 0; i < AUX_PORT_MAX; i++) {
-		if (st->aux.port[i].nmp.delay_us && (st->enabled[DEV_AUX] &
-						     (1 << i))) {
-			if (st->aux.port[i].nmp.delay_us <
-							 st->delay_us[DEV_AUX])
-				st->delay_us[DEV_AUX] =
-						  st->aux.port[i].nmp.delay_us;
-		}
-	}
-	if ((!enable) || (!(st->aux.port[port].nmp.addr & BIT_I2C_READ)))
-		fifo_enable = false;
-#ifdef NVI_AUX_FIFO_ENABLE
-	if (st->aux.port[port].fifo_en != fifo_enable)
-		st->aux.reset_fifo = true;
-	st->aux.port[port].fifo_en = fifo_enable;
-#else
-	st->aux.port[port].fifo_en = false;
-#endif /* NVI_AUX_FIFO_ENABLE */
-	if (enable && (st->rc.int_pin_cfg & BIT_BYPASS_EN))
+		st->snsr[DEV_AUX].enable &= ~port_mask;
+	if (enabled == st->snsr[DEV_AUX].enable)
 		return 0;
 
-	ret = nvi_aux_port_en(st, port, enable);
-	ret |= nvi_aux_enable(st, true);
-	return ret;
-}
-
-static int nvi_reset(struct nvi_state *st,
-		     bool reset_fifo, bool reset_i2c)
-{
-	u8 val;
-	bool irq = true;
-	int ret;
-
-	if (st->dbg & NVI_DBG_SPEW_MSG)
-		dev_info(&st->i2c->dev, "%s FIFO=%x I2C=%x\n",
-			 __func__, reset_fifo, reset_i2c);
-	if (st->irq_dis)
-		irq = false;
-	ret = nvi_int_able(st, false);
-	val = 0;
-	if (reset_i2c) {
-		st->aux.reset_i2c = false;
-		ret |= nvi_aux_enable(st, false);
-		val |= BIT_I2C_MST_RST;
+	if (st->hal->dev[DEV_AUX]->fifo_en_msk) {
+		/* AUX uses FIFO */
+		for (i = 0; i < AUX_PORT_IO; i++) {
+			if (port_mask & (1 << i)) {
+				if (st->aux.port[i].nmp.addr & BIT_I2C_READ)
+					st->aux.reset_fifo = true;
+			}
+		}
 	}
-	if (reset_fifo) {
-		st->aux.reset_fifo = false;
-		val |= BIT_FIFO_RST;
-		if (st->master_enable & (1 << DEV_DMP))
-			val |= BIT_DMP_RST;
+	if (en && (st->rc.int_pin_cfg & BIT_BYPASS_EN))
+		return 0;
+
+	ret = 0;
+	for (i = 0; i < AUX_PORT_MAX; i++) {
+		if (port_mask & (1 << i))
+			ret |= nvi_aux_port_en(st, i, en);
 	}
-	ret |= nvi_user_ctrl_en(st, !reset_fifo, !reset_i2c);
-	val |= st->rc.user_ctrl;
-	ret |= nvi_wr_user_ctrl(st, val);
-	if (reset_i2c)
-		ret |= nvi_aux_enable(st, true);
-	else
-		ret |= nvi_user_ctrl_en(st, true, true);
-	if (reset_fifo && (st->rc.user_ctrl & BIT_FIFO_EN))
-		st->ts_last = nvs_timestamp();
-	if (irq)
-		ret |= nvi_int_able(st, true);
+	ret |= nvi_aux_enable(st, __func__, true, false);
+	nvi_period_aux(st);
+	if (port_mask & ((1 << AUX_PORT_IO) - 1))
+		ret |= nvi_en(st);
 	return ret;
 }
 
 static int nvi_aux_port_free(struct nvi_state *st, int port)
 {
 	memset(&st->aux.port[port], 0, sizeof(struct aux_port));
-	st->enabled[DEV_AUX] &= ~(1 << port);
+	st->snsr[DEV_AUX].enable &= ~(1 << port);
+	st->aux.dmp_en_msk &= ~(1 << port);
 	if (st->rc.i2c_slv_addr[port]) {
 		nvi_aux_port_wr(st, port);
 		nvi_aux_port_en(st, port, false);
-		nvi_aux_enable(st, false);
-		nvi_aux_enable(st, true);
+		nvi_aux_enable(st, __func__, false, false);
+		nvi_user_ctrl_en(st, __func__, false, false, false, false);
+		nvi_aux_enable(st, __func__, true, false);
 		if (port != AUX_PORT_IO)
 			st->aux.reset_i2c = true;
+		nvi_period_aux(st);
+		nvi_en(st);
 	}
 	return 0;
 }
@@ -1995,50 +1866,91 @@ static int nvi_aux_port_free(struct nvi_state *st, int port)
 static int nvi_aux_port_alloc(struct nvi_state *st,
 			      struct nvi_mpu_port *nmp, int port)
 {
-	int i;
+	struct nvi_aux_port_dmp_dev *dd = NULL;
+	struct nvi_dmp_aux_port *ap;
+	unsigned int i;
+	unsigned int j;
 
 	if (st->aux.reset_i2c)
-		nvi_reset(st, false, true);
+		nvi_reset(st, __func__, false, true, true);
 	if (port < 0) {
 		for (i = 0; i < AUX_PORT_IO; i++) {
-			if (st->aux.port[i].nmp.addr == 0)
+			if (!st->aux.port[i].nmp.addr)
+				/* port available */
 				break;
 		}
-		if (i == AUX_PORT_IO)
+		if (i < AUX_PORT_IO)
+			port = i;
+		else
 			return -ENODEV;
 	} else {
-		if (st->aux.port[port].nmp.addr == 0)
-			i = port;
+		if (st->aux.port[port].nmp.addr)
+			/* already taken */
+			return -ENODEV;
+	}
+
+	/* override port setting if DMP used */
+	if (st->hal->dmp && port < AUX_PORT_IO) {
+		for (i = 0; i < st->hal->dmp->ap_n; i++) {
+			ap = &st->hal->dmp->ap[i];
+			if (nmp->type == ap->type && ap->port_rd ==
+					    (bool)(nmp->addr & BIT_I2C_READ)) {
+				if (ap->dd) {
+					for (j = 0; j < ap->dd_n; j++) {
+						if (nmp->id == ap->dd[j].dev) {
+							dd = &ap->dd[j];
+							break;
+						}
+					}
+					if (j >= ap->dd_n)
+						/* device not supported */
+						return -ENODEV;
+				}
+
+				break;
+			}
+		}
+		if (i < st->hal->dmp->ap_n && !st->aux.port[ap->port].nmp.addr)
+			port = ap->port;
 		else
 			return -ENODEV;
 	}
 
-	memset(&st->aux.port[i], 0, sizeof(struct aux_port));
-	memcpy(&st->aux.port[i].nmp, nmp, sizeof(struct nvi_mpu_port));
-	return i;
+	memset(&st->aux.port[port], 0, sizeof(struct aux_port));
+	memcpy(&st->aux.port[port].nmp, nmp, sizeof(struct nvi_mpu_port));
+	st->aux.port[port].dd = dd;
+	st->aux.port[port].nmp.ctrl &= ~BIT_SLV_EN;
+	st->aux.port[port].period_us = st->aux.port[port].nmp.period_us;
+	return port;
 }
 
-static int nvi_aux_bypass_enable(struct nvi_state *st, bool enable)
+static int nvi_aux_bypass_enable(struct nvi_state *st, bool en)
 {
 	u8 val;
 	int ret;
 
-	if ((bool)(st->rc.int_pin_cfg & BIT_BYPASS_EN) == enable)
+	if (en && (st->rc.int_pin_cfg & BIT_BYPASS_EN))
 		return 0;
 
 	val = st->rc.int_pin_cfg;
-	if (enable) {
-		ret = nvi_aux_enable(st, false);
+	if (en) {
+		ret = nvi_aux_enable(st, __func__, false, false);
+		ret |= nvi_user_ctrl_en(st, __func__,
+					false, false, false, false);
 		if (!ret) {
 			val |= BIT_BYPASS_EN;
-			ret = nvi_wr_int_pin_cfg(st, val);
+			ret = nvi_i2c_wr_rc(st, &st->hal->reg->int_pin_cfg,
+					   val, __func__, &st->rc.int_pin_cfg);
 		}
 	} else {
 		val &= ~BIT_BYPASS_EN;
-		ret = nvi_wr_int_pin_cfg(st, val);
+		ret = nvi_i2c_wr_rc(st, &st->hal->reg->int_pin_cfg, val,
+				    __func__, &st->rc.int_pin_cfg);
 		if (!ret)
-			nvi_aux_enable(st, true);
+			nvi_aux_enable(st, __func__, true, false);
 	}
+	nvi_period_aux(st);
+	nvi_en(st);
 	return ret;
 }
 
@@ -2056,7 +1968,8 @@ static int nvi_aux_bypass_request(struct nvi_state *st, bool enable)
 	} else {
 		if (st->aux.bypass_lock) {
 			ns = nvs_timestamp() - st->aux.bypass_timeout_ns;
-			to = st->chip_config.bypass_timeout_ms * 1000000;
+			to = st->bypass_timeout_ms;
+			to *= 1000000;
 			if (ns > to)
 				st->aux.bypass_lock = 0;
 			else
@@ -2107,11 +2020,13 @@ static int nvi_aux_dev_valid(struct nvi_state *st,
 		return -EBUSY;
 	}
 
-	/* enable it */
+	/* enable it at fastest speed */
 	st->aux.port[AUX_PORT_IO].nmp.delay_ms = 0;
-	st->aux.port[AUX_PORT_IO].nmp.delay_us =
-					st->hal->smplrt[DEV_AUX]->delay_us_min;
-	ret = nvi_aux_port_enable(st, AUX_PORT_IO, true);
+	st->aux.port[AUX_PORT_IO].period_us =
+			     st->src[st->hal->dev[DEV_AUX]->src].period_us_min;
+	ret = nvi_user_ctrl_en(st, __func__, false, false, false, false);
+	ret |= nvi_aux_port_enable(st, 1 << AUX_PORT_IO, true);
+	ret |= nvi_user_ctrl_en(st, __func__, false, false, true, false);
 	if (ret) {
 		nvi_aux_port_free(st, AUX_PORT_IO);
 		nvi_aux_bypass_release(st);
@@ -2127,8 +2042,7 @@ static int nvi_aux_dev_valid(struct nvi_state *st,
 	for (i = 0; i < AUX_DEV_VALID_READ_LOOP_MAX; i++) {
 		mdelay(AUX_DEV_VALID_READ_DELAY_MS);
 		val = 0;
-		ret = nvi_i2c_rd(st, st->hal->reg->i2c_mst_status.bank,
-				 st->hal->reg->i2c_mst_status.reg, 1, &val);
+		ret = nvi_i2c_rd(st, &st->hal->reg->i2c_mst_status, &val);
 		if (ret)
 			continue;
 
@@ -2138,15 +2052,14 @@ static int nvi_aux_dev_valid(struct nvi_state *st,
 	/* these will restore all previously disabled ports */
 	nvi_aux_bypass_release(st);
 	nvi_aux_port_free(st, AUX_PORT_IO);
-	if (i == AUX_DEV_VALID_READ_LOOP_MAX)
+	if (i >= AUX_DEV_VALID_READ_LOOP_MAX)
 		return -ENODEV;
 
 	if (val & 0x10) /* NACK */
 		return -EIO;
 
 	if (nmp->addr & BIT_I2C_READ) {
-		ret = nvi_i2c_rd(st, st->hal->reg->i2c_slv4_di.bank,
-				 st->hal->reg->i2c_slv4_di.reg, 1, &val);
+		ret = nvi_i2c_rd(st, &st->hal->reg->i2c_slv4_di, &val);
 		if (ret)
 			return -EBUSY;
 
@@ -2191,7 +2104,7 @@ int nvi_mpu_dev_valid(struct nvi_mpu_port *nmp, u8 *data)
 	int ret = -EPERM;
 
 	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
+		if (st->sts & NVI_DBG_SPEW_AUX)
 			pr_info("%s\n", __func__);
 	} else {
 		pr_debug("%s ERR -EAGAIN\n", __func__);
@@ -2206,10 +2119,10 @@ int nvi_mpu_dev_valid(struct nvi_mpu_port *nmp, u8 *data)
 
 	nvi_mutex_lock(st);
 	if (!(st->sts & (NVS_STS_SHUTDOWN | NVS_STS_SUSPEND))) {
-		nvi_pm(st, NVI_PM_ON);
+		nvi_pm(st, __func__, NVI_PM_ON);
 		ret = nvi_aux_dev_valid(st, nmp, data);
-		nvi_pm(st, NVI_PM_AUTO);
-		nvi_aux_dbg(st, "nvi_mpu_dev_valid ret=", ret);
+		nvi_pm(st, __func__, NVI_PM_AUTO);
+		nvi_aux_dbg(st, "nvi_mpu_dev_valid=", ret);
 	}
 	nvi_mutex_unlock(st);
 	return ret;
@@ -2222,26 +2135,28 @@ int nvi_mpu_port_alloc(struct nvi_mpu_port *nmp)
 	int ret = -EPERM;
 
 	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
+		if (st->sts & NVI_DBG_SPEW_AUX)
 			pr_info("%s\n", __func__);
 	} else {
 		pr_debug("%s ERR -EAGAIN\n", __func__);
 		return -EAGAIN;
 	}
 
-	if (nmp == NULL)
+	if (nmp == NULL || !(nmp->ctrl & BITS_I2C_SLV_CTRL_LEN))
 		return -EINVAL;
 
-	if (!(nmp->ctrl & BITS_I2C_SLV_CTRL_LEN))
+	if (nmp->addr & BIT_I2C_READ && !nmp->handler)
 		return -EINVAL;
 
 	nvi_mutex_lock(st);
 	if (!(st->sts & (NVS_STS_SHUTDOWN | NVS_STS_SUSPEND))) {
-		nvi_pm(st, NVI_PM_ON);
+		nvi_pm(st, __func__, NVI_PM_ON);
 		ret = nvi_aux_port_alloc(st, nmp, -1);
-		nvi_pm(st, NVI_PM_AUTO);
-		ret = nvi_aux_mpu_call_post(st,
-					 "nvi_mpu_port_alloc ret/port=", ret);
+		if (ret >= 0 && st->hal->dmp)
+			/* need to reinitialize DMP for new device */
+			st->hal->dmp->fn_init(st);
+		nvi_pm(st, __func__, NVI_PM_AUTO);
+		ret = nvi_aux_mpu_call_post(st, "nvi_mpu_port_alloc=", ret);
 	}
 	nvi_mutex_unlock(st);
 	return ret;
@@ -2254,7 +2169,7 @@ int nvi_mpu_port_free(int port)
 	int ret;
 
 	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
+		if (st->sts & NVI_DBG_SPEW_AUX)
 			pr_info("%s port %d\n", __func__, port);
 	} else {
 		pr_debug("%s port %d ERR -EAGAIN\n", __func__, port);
@@ -2264,37 +2179,49 @@ int nvi_mpu_port_free(int port)
 	nvi_mutex_lock(st);
 	ret = nvi_aux_mpu_call_pre(st, port);
 	if (!ret) {
-		nvi_pm(st, NVI_PM_ON);
+		nvi_pm(st, __func__, NVI_PM_ON);
 		ret = nvi_aux_port_free(st, port);
-		nvi_pm(st, NVI_PM_AUTO);
-		ret = nvi_aux_mpu_call_post(st, "nvi_mpu_port_free ret=", ret);
+		nvi_pm(st, __func__, NVI_PM_AUTO);
+		ret = nvi_aux_mpu_call_post(st, "nvi_mpu_port_free=", ret);
 	}
 	nvi_mutex_unlock(st);
 	return ret;
 }
 EXPORT_SYMBOL(nvi_mpu_port_free);
 
-int nvi_mpu_enable(int port, bool enable)
+int nvi_mpu_enable(unsigned int port_mask, bool enable)
 {
 	struct nvi_state *st = nvi_state_local;
+	unsigned int i;
 	int ret;
 
 	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
-			pr_info("%s port %d: %x\n", __func__, port, enable);
+		if (st->sts & NVI_DBG_SPEW_AUX)
+			pr_info("%s port_mask 0x%x: %x\n",
+				__func__, port_mask, enable);
 	} else {
-		pr_debug("%s port %d: %x ERR -EAGAIN\n",
-			 __func__, port, enable);
+		pr_debug("%s port_mask 0x%x: %x ERR -EAGAIN\n",
+			 __func__, port_mask, enable);
 		return -EAGAIN;
 	}
 
+	if (port_mask >= (1 << AUX_PORT_IO) || !port_mask)
+		return -EINVAL;
+
+	for (i = 0; i < AUX_PORT_IO; i++) {
+		if (port_mask & (1 << i)) {
+			if (!st->aux.port[i].nmp.addr)
+				return -EINVAL;
+		}
+	}
+
 	nvi_mutex_lock(st);
-	ret = nvi_aux_mpu_call_pre(st, port);
-	if (!ret) {
-		nvi_pm(st, NVI_PM_ON);
-		ret = nvi_aux_port_enable(st, port, enable);
-		nvi_pm(st, NVI_PM_AUTO);
-		ret = nvi_aux_mpu_call_post(st, "nvi_mpu_enable ret=", ret);
+	if (st->sts & (NVS_STS_SHUTDOWN | NVS_STS_SUSPEND)) {
+		ret = -EPERM;
+	} else {
+		nvi_pm(st, __func__, NVI_PM_ON);
+		ret = nvi_aux_port_enable(st, port_mask, enable);
+		ret = nvi_aux_mpu_call_post(st, "nvi_mpu_enable=", ret);
 	}
 	nvi_mutex_unlock(st);
 	return ret;
@@ -2307,7 +2234,7 @@ int nvi_mpu_delay_ms(int port, u8 delay_ms)
 	int ret;
 
 	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
+		if (st->sts & NVI_DBG_SPEW_AUX)
 			pr_info("%s port %d: %u\n", __func__, port, delay_ms);
 	} else {
 		pr_debug("%s port %d: %u ERR -EAGAIN\n",
@@ -2320,42 +2247,13 @@ int nvi_mpu_delay_ms(int port, u8 delay_ms)
 	if (!ret) {
 		st->aux.port[port].nmp.delay_ms = delay_ms;
 		if (st->rc.i2c_slv_ctrl[port] & BIT_SLV_EN)
-			ret = nvi_dev_delay(st, DEV_AUX);
-		ret |= nvi_aux_mpu_call_post(st, "nvi_mpu_delay_ms ret=", ret);
+			ret = nvi_aux_delay(st, __func__);
+		ret = nvi_aux_mpu_call_post(st, "nvi_mpu_delay_ms=", ret);
 	}
 	nvi_mutex_unlock(st);
 	return ret;
 }
 EXPORT_SYMBOL(nvi_mpu_delay_ms);
-
-int nvi_mpu_delay_us(int port, unsigned long delay_us)
-{
-	struct nvi_state *st = nvi_state_local;
-	int ret;
-
-	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
-			pr_info("%s port %d: %lu\n", __func__, port, delay_us);
-	} else {
-		pr_debug("%s port %d: %lu ERR -EAGAIN\n",
-			__func__, port, delay_us);
-		return -EAGAIN;
-	}
-
-	nvi_mutex_lock(st);
-	ret = nvi_aux_mpu_call_pre(st, port);
-	if (!ret) {
-		if (st->aux.port[port].nmp.delay_us != delay_us) {
-			st->aux.port[port].nmp.delay_us = delay_us;
-			if (st->rc.i2c_slv_ctrl[port] & BIT_SLV_EN)
-				ret = nvi_dev_delay(st, DEV_AUX);
-		}
-		ret |= nvi_aux_mpu_call_post(st, "nvi_mpu_delay_us ret=", ret);
-	}
-	nvi_mutex_unlock(st);
-	return ret;
-}
-EXPORT_SYMBOL(nvi_mpu_delay_us);
 
 int nvi_mpu_data_out(int port, u8 data_out)
 {
@@ -2380,39 +2278,44 @@ int nvi_mpu_data_out(int port, u8 data_out)
 }
 EXPORT_SYMBOL(nvi_mpu_data_out);
 
-int nvi_mpu_batch(int port, unsigned int flags,
-		  unsigned int period_us, unsigned int timeout_us)
+int nvi_mpu_batch(int port, unsigned int period_us, unsigned int timeout_us)
 {
 	struct nvi_state *st = nvi_state_local;
 	int ret;
 
 	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
-			pr_info("%s port %d: f=%x p=%u t=%u\n",
-				__func__, port, flags, period_us, timeout_us);
+		if (st->sts & NVI_DBG_SPEW_AUX)
+			pr_info("%s port %d: p=%u t=%u\n",
+				__func__, port, period_us, timeout_us);
 	} else {
-		pr_debug("%s port %d: f=%x p=%u t=%u ERR -EAGAIN\n",
-			__func__, port, flags, period_us, timeout_us);
+		pr_debug("%s port %d: p=%u t=%u ERR -EAGAIN\n",
+			__func__, port, period_us, timeout_us);
 		return -EAGAIN;
 	}
 
 	nvi_mutex_lock(st);
 	ret = nvi_aux_mpu_call_pre(st, port);
 	if (!ret) {
-		if ((st->aux.port[port].nmp.id != ID_INVALID) &&
-				(st->aux.port[port].nmp.id < ID_INVALID_END)) {
-			st->aux.port[port].batch_flags = flags;
-			st->aux.port[port].batch_period_us = period_us;
-			st->aux.port[port].batch_timeout_us = timeout_us;
-			if (st->aux.port[port].nmp.delay_us != period_us) {
-				st->aux.port[port].nmp.delay_us = period_us;
-				if (st->rc.i2c_slv_ctrl[port] & BIT_SLV_EN)
-					ret = nvi_dev_delay(st, DEV_AUX);
-			}
-			ret = nvi_aux_mpu_call_post(st,
-					      "nvi_mpu_batch ret/flags=", ret);
-		} else {
+		if (timeout_us && ((st->aux.port[port].nmp.id == ID_INVALID) ||
+			      (st->aux.port[port].nmp.id >= ID_INVALID_END))) {
+			/* sensor not supported by DMP */
 			ret = -EINVAL;
+		} else {
+			st->aux.port[port].period_us = period_us;
+			st->aux.port[port].timeout_us = timeout_us;
+			ret = nvi_period_aux(st);
+			if (st->en_msk & (1 << DEV_DMP) &&
+						  st->hal->dmp->fn_dev_batch) {
+				/* batch can be done real-time with DMP on */
+				/* nvi_dd_batch */
+				ret = st->hal->dmp->fn_dev_batch(st, DEV_AUX,
+								 port);
+			} else {
+				if (ret > 0)
+					/* timings changed */
+					ret = nvi_en(st);
+			}
+			ret = nvi_aux_mpu_call_post(st, "nvi_mpu_batch=", ret);
 		}
 	}
 	nvi_mutex_unlock(st);
@@ -2426,7 +2329,7 @@ int nvi_mpu_flush(int port)
 	int ret;
 
 	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
+		if (st->sts & NVI_DBG_SPEW_AUX)
 			pr_info("%s port %d\n", __func__, port);
 	} else {
 		pr_debug("%s port %d ERR -EAGAIN\n", __func__, port);
@@ -2436,59 +2339,65 @@ int nvi_mpu_flush(int port)
 	nvi_mutex_lock(st);
 	ret = nvi_aux_mpu_call_pre(st, port);
 	if (!ret) {
-		if ((st->aux.port[port].nmp.id != ID_INVALID) &&
-				(st->aux.port[port].nmp.id < ID_INVALID_END)) {
-			if (st->aux.port[port].fifo_en) {
-				st->aux.port[port].flush = true;
-				ret = nvi_en(st);
-			} else {
-				nvi_flush_aux(st, port);
-			}
-			ret = nvi_aux_mpu_call_post(st, "nvi_mpu_flush ret=",
-						    ret);
+		if (st->hal->dev[DEV_AUX]->fifo_en_msk) {
+			/* HW flush only when FIFO is used for AUX */
+			st->aux.port[port].flush = true;
+			ret = nvi_read(st, true);
 		} else {
-			ret = -EINVAL;
+			nvi_flush_aux(st, port);
 		}
+		ret = nvi_aux_mpu_call_post(st, "nvi_mpu_flush=", ret);
 	}
 	nvi_mutex_unlock(st);
 	return ret;
 }
 EXPORT_SYMBOL(nvi_mpu_flush);
 
-int nvi_mpu_fifo(int port, unsigned int *reserve, unsigned int *max)
+int nvi_mpu_info(int read_port, struct nvi_mpu_inf *inf)
 {
 	struct nvi_state *st = nvi_state_local;
+	struct nvi_aux_port_dmp_dev *dd;
+	unsigned int i;
 	int ret;
 
 	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
-			pr_info("%s port %d\n", __func__, port);
+		if (st->sts & NVI_DBG_SPEW_AUX)
+			pr_info("%s port %d\n", __func__, read_port);
 	} else {
-		pr_debug("%s port %d ERR -EAGAIN\n", __func__, port);
+		pr_debug("%s port %d ERR -EAGAIN\n", __func__, read_port);
 		return -EAGAIN;
 	}
 
+	if (!inf)
+		return -EINVAL;
+
 	nvi_mutex_lock(st);
-	ret = nvi_aux_mpu_call_pre(st, port);
+	ret = nvi_aux_mpu_call_pre(st, read_port);
 	if (!ret) {
-		if ((st->aux.port[port].nmp.id != ID_INVALID) &&
-			(st->aux.port[port].nmp.id < ID_INVALID_END)) {
-			if (reserve)
-				/* batch not supported at this time */
-				*reserve = 0;
-			if (max)
-				/* batch not supported at this time */
-				*max = 0;
-			ret = nvi_aux_mpu_call_post(st, "nvi_mpu_fifo ret=",
-						    ret);
+		i = st->hal->dev[DEV_AUX]->src;
+		inf->period_us_min = st->src[i].period_us_min;
+		inf->period_us_max = st->src[i].period_us_max;
+		/* batch not supported at this time */
+		inf->fifo_reserve = 0;
+		inf->fifo_max = 0;
+		dd = st->aux.port[read_port].dd;
+		if (dd) {
+			inf->dmp_rd_len_sts = dd->dmp_rd_len_sts;
+			inf->dmp_rd_len_data = dd->dmp_rd_len_data;
+			inf->dmp_rd_be_sts = dd->dmp_rd_be_sts;
+			inf->dmp_rd_be_data = dd->dmp_rd_be_data;
 		} else {
-			ret = -EINVAL;
+			inf->dmp_rd_len_sts = 0;
+			inf->dmp_rd_len_data = 0;
+			inf->dmp_rd_be_sts = false;
+			inf->dmp_rd_be_data = false;
 		}
+		ret = nvi_aux_mpu_call_post(st, "nvi_mpu_info=", 0);
 	}
 	nvi_mutex_unlock(st);
 	return ret;
 }
-EXPORT_SYMBOL(nvi_mpu_fifo);
+EXPORT_SYMBOL(nvi_mpu_info);
 
 int nvi_mpu_bypass_request(bool enable)
 {
@@ -2496,7 +2405,7 @@ int nvi_mpu_bypass_request(bool enable)
 	int ret = -EPERM;
 
 	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
+		if (st->sts & NVI_DBG_SPEW_AUX)
 			pr_info("%s enable=%x\n", __func__, enable);
 	} else {
 		pr_debug("%s ERR -EAGAIN\n", __func__);
@@ -2505,10 +2414,10 @@ int nvi_mpu_bypass_request(bool enable)
 
 	nvi_mutex_lock(st);
 	if (!(st->sts & (NVS_STS_SHUTDOWN | NVS_STS_SUSPEND))) {
-		nvi_pm(st, NVI_PM_ON);
+		nvi_pm(st, __func__, NVI_PM_ON);
 		ret = nvi_aux_bypass_request(st, enable);
-		nvi_pm(st, NVI_PM_AUTO);
-		ret = nvi_aux_mpu_call_post(st, "nvi_mpu_bypass_request ret=",
+		nvi_pm(st, __func__, NVI_PM_AUTO);
+		ret = nvi_aux_mpu_call_post(st, "nvi_mpu_bypass_request=",
 					    ret);
 	}
 	nvi_mutex_unlock(st);
@@ -2521,7 +2430,7 @@ int nvi_mpu_bypass_release(void)
 	struct nvi_state *st = nvi_state_local;
 
 	if (st != NULL) {
-		if (st->dbg & NVI_DBG_SPEW_AUX)
+		if (st->sts & NVI_DBG_SPEW_AUX)
 			pr_info("%s\n", __func__);
 	} else {
 		pr_debug("%s\n", __func__);
@@ -2530,9 +2439,9 @@ int nvi_mpu_bypass_release(void)
 
 	nvi_mutex_lock(st);
 	if (!(st->sts & (NVS_STS_SHUTDOWN | NVS_STS_SUSPEND))) {
-		nvi_pm(st, NVI_PM_ON);
+		nvi_pm(st, __func__, NVI_PM_ON);
 		nvi_aux_bypass_release(st);
-		nvi_pm(st, NVI_PM_AUTO);
+		nvi_pm(st, __func__, NVI_PM_AUTO);
 		nvi_aux_mpu_call_post(st, "nvi_mpu_bypass_release", 0);
 	}
 	nvi_mutex_unlock(st);
@@ -2541,248 +2450,673 @@ int nvi_mpu_bypass_release(void)
 EXPORT_SYMBOL(nvi_mpu_bypass_release);
 
 
-static unsigned int nvi_report_accel(struct nvi_state *st, u8 *data, s64 ts)
+int nvi_reset(struct nvi_state *st, const char *fn,
+	      bool rst_fifo, bool rst_i2c, bool en_irq)
 {
-	s16 accel[AXIS_N + 1]; /* +1 for FSYNC status */
-	s16 accel_uc;
+	s64 ts;
+	u8 val;
+	bool rst_dmp = false;
 	unsigned int i;
-	unsigned int buf_i = 0;
-
-	for (i = 0; i < AXIS_N; i++) {
-		if (st->enabled[DEV_ACCEL] & (1 << i)) {
-			accel_uc = be16_to_cpup((__be16 *)&data[2 * i]);
-			accel[buf_i] = accel_uc * st->chip_info.multi;
-			buf_i++;
-		}
-	}
-	accel[AXIS_N] = 0;
-	if (st->fsync[DEV_ACCEL]) {
-		/* FSYNC enabled for this sensor */
-		if (accel[st->fsync[DEV_ACCEL] - 1] & 1)
-			/* FSYNC asserted if LSb set for this axis */
-			accel[AXIS_N] = 0x10 << st->fsync[DEV_ACCEL];
-	}
-	st->nvs->handler(st->nvs_st[DEV_ACCEL], accel, ts);
-	return buf_i * 2;
-}
-
-static void nvi_report_temp(struct nvi_state *st, u8 *data, s64 ts)
-{
-	s16 temp;
-
-	temp = be16_to_cpup((__be16 *)data);
-	st->nvs->handler(st->nvs_st[DEV_TEMP], &temp, ts);
-}
-
-static unsigned int nvi_report_gyro(struct nvi_state *st, u8 *data, s64 ts)
-{
-	s16 anglvel[AXIS_N + 1]; /* +1 for FSYNC status */
-	unsigned int i;
-	unsigned int buf_i = 0;
-
-	for (i = 0; i < AXIS_N; i++) {
-		if (st->enabled[DEV_ANGLVEL] & (1 << i)) {
-			anglvel[buf_i] =
-				      be16_to_cpup((__be16 *)&data[2 * buf_i]);
-			buf_i++;
-		}
-	}
-	anglvel[AXIS_N] = 0;
-	if (st->fsync[DEV_ANGLVEL]) {
-		/* FSYNC enabled for this sensor */
-		if (anglvel[st->fsync[DEV_ANGLVEL] - 1] & 1)
-			/* FSYNC asserted if LSb set for this axis */
-			anglvel[AXIS_N] = 0x10 << st->fsync[DEV_ANGLVEL];
-	}
-	if (ts >= st->ts_gyro)
-		st->nvs->handler(st->nvs_st[DEV_ANGLVEL], &anglvel, ts);
-	return buf_i * 2;
-}
-
-static int nvi_accel_read(struct nvi_state *st, s64 ts)
-{
-	u8 data[6];
 	int ret;
 
-	ret = nvi_i2c_rd(st, st->hal->reg->accel_xout_h.bank,
-			 st->hal->reg->accel_xout_h.reg, 6, data);
-	if (!ret)
-		ret = nvi_report_accel(st, data, ts);
+	ret = nvi_int_able(st, __func__, false);
+	val = 0;
+	if (rst_i2c || st->aux.reset_i2c) {
+		st->aux.reset_i2c = false;
+		rst_i2c = true;
+		ret |= nvi_aux_enable(st, __func__, false, false);
+		val |= BIT_I2C_MST_RST;
+	}
+	if (rst_fifo) {
+		st->aux.reset_fifo = false;
+		val |= BIT_FIFO_RST;
+		if (st->en_msk & (1 << DEV_DMP)) {
+			val |= BIT_DMP_RST;
+			rst_dmp = true;
+			ret |= nvi_aux_enable(st, __func__, false, false);
+		}
+	}
+	ret |= nvi_user_ctrl_en(st, __func__,
+				!rst_fifo, !rst_fifo, !rst_i2c, false);
+	val |= st->rc.user_ctrl;
+	ret |= nvi_user_ctrl_rst(st, val);
+	if (rst_i2c || rst_dmp)
+		ret |= nvi_aux_enable(st, __func__, true, false);
+	ts = nvs_timestamp();
+	if (rst_fifo) {
+		for (i = 0; i < st->hal->src_n; i++) {
+			st->src[i].ts_reset = true;
+			st->src[i].ts_1st = ts;
+			st->src[i].ts_end = ts;
+			st->src[i].ts_period = st->src[i].period_us_src * 1000;
+		}
+
+		for (i = 0; i < DEV_N_AUX; i++) {
+			st->snsr[i].ts_reset = true;
+			st->snsr[i].ts_last = ts;
+			st->snsr[i].ts_n = 0;
+		}
+
+		for (i = 0; i < AUX_PORT_MAX; i++) {
+			st->aux.port[i].ts_reset = true;
+			st->aux.port[i].ts_last = ts;
+		}
+
+		if (st->hal->dmp) {
+			/* nvi_dmp_clk_n */
+			ret |= st->hal->dmp->fn_clk_n(st, &st->dmp_clk_n);
+			st->src[SRC_DMP].ts_reset = true;
+			st->src[SRC_DMP].ts_1st = ts;
+			st->src[SRC_DMP].ts_end = ts;
+			st->src[SRC_DMP].ts_period =
+					 st->src[SRC_DMP].period_us_src * 1000;
+		}
+	}
+
+	ret |= nvi_user_ctrl_en(st, __func__, true, true, true, en_irq);
+	if (st->sts & (NVS_STS_SPEW_MSG | NVI_DBG_SPEW_MSG |
+		       NVI_DBG_SPEW_FIFO | NVI_DBG_SPEW_TS))
+		dev_info(&st->i2c->dev,
+			 "%s-%s DMP=%x FIFO=%x I2C=%x ts=%lld err=%d\n",
+			 __func__, fn, rst_dmp, rst_fifo, rst_i2c, ts, ret);
 	return ret;
 }
 
-static unsigned int nvi_fifo_read_accel(struct nvi_state *st,
-					unsigned int buf_i, s64 ts)
+s64 nvi_ts_dev(struct nvi_state *st, s64 ts_now,
+	       unsigned int dev, unsigned int aux_port)
 {
-	if (st->rc.fifo_en & (1 << st->hal->bit->accel_fifo_en)) {
-		nvi_report_accel(st, &st->buf[buf_i], ts);
-		buf_i += 6;
-	}
-	return buf_i;
-}
-
-static unsigned int nvi_fifo_read_anglvel(struct nvi_state *st,
-					  unsigned int buf_i, s64 ts)
-{
-	/* if gyro is enabled then FIFO is enabled for gyro */
-	if (st->enabled[DEV_ANGLVEL])
-		buf_i += nvi_report_gyro(st, &st->buf[buf_i], ts);
-	return buf_i;
-}
-
-static unsigned int nvi_fifo_read_temp(struct nvi_state *st,
-				       unsigned int buf_i, s64 ts)
-{
-	if (st->rc.fifo_en & (1 << st->hal->bit->temp_fifo_en)) {
-		nvi_report_temp(st, &st->buf[buf_i], ts);
-		buf_i += 2;
-	}
-	return buf_i;
-}
-
-static irqreturn_t nvi_irq_thread(int irq, void *dev_id)
-{
-	struct nvi_state *st = (struct nvi_state *)dev_id;
-	struct aux_port *ap;
-	u16 fifo_count = 0;
-	u16 fifo_sample_size = 0;
-	u16 fifo_rd_n;
-	u16 fifo_align;
 	s64 ts;
-	s64 ts_now;
-	s64 ts_end;
-	s64 ts_rng;
-	unsigned int ts_dly;
-	unsigned int ts_n;
-	unsigned int buf_index;
-	unsigned int samples;
+	int src;
+
+	if (ts_now) {
+		if (st->en_msk & (1 << DEV_DMP))
+			src = SRC_DMP;
+		else
+			src = st->hal->dev[dev]->src;
+	} else {
+		src = -1;
+	}
+	if (src < 0) {
+		ts = nvs_timestamp();
+	} else {
+		if (dev == DEV_AUX && aux_port < AUX_PORT_MAX) {
+			if (st->aux.port[aux_port].ts_reset) {
+				st->aux.port[aux_port].ts_reset = false;
+				ts = st->src[src].ts_1st;
+			} else {
+				ts = st->src[src].ts_period;
+				if (st->aux.port[aux_port].odr)
+					ts *= (st->aux.port[aux_port].odr + 1);
+				ts += st->aux.port[aux_port].ts_last;
+			}
+		} else {
+			if (st->snsr[dev].ts_reset) {
+				st->snsr[dev].ts_reset = false;
+				ts = st->src[src].ts_1st;
+			} else {
+				ts = st->src[src].ts_period;
+				if (st->snsr[dev].odr)
+					ts *= (st->snsr[dev].odr + 1);
+				ts += st->snsr[dev].ts_last;
+			}
+		}
+		if (ts > ts_now) {
+			if (st->sts & (NVI_DBG_SPEW_FIFO | NVI_DBG_SPEW_TS))
+				dev_info(&st->i2c->dev,
+					 "%s ts > ts_now (%lld > %lld)\n",
+					 __func__, ts, ts_now);
+			ts = ts_now;
+		}
+	}
+	if (dev == DEV_AUX && aux_port < AUX_PORT_MAX) {
+		if (ts < st->aux.port[aux_port].ts_last)
+			ts = -1;
+		else
+			st->aux.port[aux_port].ts_last = ts;
+	} else {
+		if (ts < st->snsr[dev].ts_last)
+			ts = -1;
+		else
+			st->snsr[dev].ts_last = ts;
+	}
+	if (ts < st->snsr[dev].ts_push_delay)
+		ts = -1;
+	if (st->sts & NVI_DBG_SPEW_FIFO && src >= 0)
+		dev_info(&st->i2c->dev,
+			 "src[%d] ts_period=%lld ts_end=%lld %s ts[%u]=%lld\n",
+			 src, st->src[src].ts_period, st->src[src].ts_end,
+			 st->snsr[dev].cfg.name, st->snsr[dev].ts_n, ts);
+	st->snsr[dev].ts_n++;
+	return ts;
+}
+
+static void nvi_aux_rd(struct nvi_state *st)
+{
+	s64 ts;
+	u8 *p;
+	struct aux_port *ap;
 	unsigned int len;
 	unsigned int i;
 	int ret;
 
-	nvi_mutex_lock(st);
-	if (st->irq_storm_n > NVI_IRQ_STORM_MAX_N)
-		goto nvi_irq_thread_exit_reset;
+	if ((!st->aux.ext_data_n) || (!(st->rc.user_ctrl & BIT_I2C_MST_EN)))
+		return;
 
-	if (st->sts & (NVS_STS_SUSPEND | NVS_STS_SHUTDOWN))
-		goto nvi_irq_thread_exit;
-
-	/* if only accelermeter data */
-	if (st->rc.pwr_mgmt_1 & BIT_CYCLE) {
-		ts = nvs_timestamp();
-		ret = nvi_accel_read(st, ts);
-		goto nvi_irq_thread_exit_ts;
-	}
-
-	nvi_aux_read(st);
-	/* handle FIFO enabled data */
-	fifo_sample_size = st->fifo_sample_size;
-	if (!fifo_sample_size)
-		goto nvi_irq_thread_exit;
-
-	ts_now = nvs_timestamp();
-	ret = nvi_i2c_rd(st, st->hal->reg->fifo_count_h.bank,
-			 st->hal->reg->fifo_count_h.reg, 2, st->buf);
+	ret = nvi_i2c_r(st, st->hal->reg->ext_sens_data_00.bank,
+			st->hal->reg->ext_sens_data_00.reg,
+			st->aux.ext_data_n, (u8 *)&st->aux.ext_data);
 	if (ret)
-		goto nvi_irq_thread_exit;
+		return;
 
-	ts_end = atomic64_read(&st->ts_irq);
-	fifo_count = be16_to_cpup((__be16 *)(&st->buf));
-	/* FIFO threshold */
-	if (st->chip_config.fifo_thr > fifo_sample_size) {
-		if (fifo_count > st->chip_config.fifo_thr) {
-			if (st->dbg & NVI_DBG_SPEW_FIFO)
-				dev_info(&st->i2c->dev,
-					 "FIFO threshold exceeded\n");
-			goto nvi_irq_thread_exit_reset;
+	ts = nvi_ts_dev(st, 0, DEV_AUX, -1);
+	for (i = 0; i < AUX_PORT_IO; i++) {
+		ap = &st->aux.port[i];
+		if ((st->rc.i2c_slv_ctrl[i] & BIT_SLV_EN) &&
+						 ap->nmp.addr & BIT_I2C_READ) {
+			p = &st->aux.ext_data[ap->ext_data_offset];
+			len = ap->nmp.ctrl & BITS_I2C_SLV_CTRL_LEN;
+			ap->nmp.handler(p, len, ts, ap->nmp.ext_driver);
 		}
 	}
+}
 
-	fifo_align = fifo_count % fifo_sample_size;
-	if (fifo_count < fifo_sample_size + fifo_align)
-		/* consider resetting FIFO if doesn't divide cleanly */
-		goto nvi_irq_thread_exit;
+static s32 nvi_matrix(struct nvi_state *st, signed char *matrix,
+		      s32 x, s32 y, s32 z, unsigned int axis)
+{
+	return ((matrix[0 + axis] == 1 ? x :
+		 (matrix[0 + axis] == -1 ? -x : 0)) +
+		(matrix[3 + axis] == 1 ? y :
+		 (matrix[3 + axis] == -1 ? -y : 0)) +
+		(matrix[6 + axis] == 1 ? z :
+		 (matrix[6 + axis] == -1 ? -z : 0)));
+}
 
-	samples = (fifo_count / fifo_sample_size);
-	if (st->dbg & NVI_DBG_SPEW_FIFO)
-		dev_info(&st->i2c->dev,
-			 "fifo_count=%u sample_size=%u offset=%u samples=%u\n",
-			 fifo_count, fifo_sample_size, fifo_align, samples);
-	if (!samples)
-		goto nvi_irq_thread_exit;
+int nvi_push(struct nvi_state *st, unsigned int dev, u8 *buf, s64 ts)
+{
+	u8 buf_le[20];
+	s32 val_le[4];
+	s32 val[AXIS_N];
+	u32 u_val;
+	unsigned int sts;
+	unsigned int buf_le_i;
+	unsigned int ch;
+	unsigned int ch_sz;
+	unsigned int m;
+	unsigned int n;
+	int i;
 
-	/* ts_dly = the programmed sample rate */
-	ts_dly = st->smplrt_delay_us[0] * 1000;
-	if (ts_end < (ts_now - ts_dly))
-		/* if TS IRQ hasn't occured within the rate then use now TS */
-		ts_end = ts_now;
-	/* ts_rng = the time range we have for TSs to fit */
-	ts_rng = ts_end - st->ts_last;
-	ts = ts_rng;
-	do_div(ts, ts_dly);
-	/* ts_n = the number of TS we'll have at unmodified rate */
-	ts_n = ts;
-	if (samples > ts_n) {
-		/* modify rate to fit */
-		do_div(ts_rng, samples);
-		ts_dly = ts_rng;
+	ch_sz = abs(st->snsr[dev].cfg.ch_sz);
+	m = 0;
+	if (st->snsr[dev].buf_n) {
+		n = st->snsr[dev].buf_n / st->snsr[dev].cfg.ch_n;
+		m = st->snsr[dev].buf_n % st->snsr[dev].cfg.ch_n;
+		if (m)
+			n++;
+	} else {
+		n = ch_sz;
 	}
-	ts = ts_end - (ts_dly * samples);
-	fifo_rd_n = 0;
-	buf_index = 0;
-	while (samples) {
-		if (buf_index >= fifo_rd_n) {
-			fifo_rd_n = sizeof(st->buf);
-			fifo_rd_n -= fifo_align;
-			fifo_rd_n /= fifo_sample_size;
-			if (samples < fifo_rd_n)
-				fifo_rd_n = samples;
-			fifo_rd_n *= fifo_sample_size;
-			fifo_rd_n += fifo_align;
-			ret = nvi_i2c_rd(st, st->hal->reg->fifo_r_w.bank,
-					 st->hal->reg->fifo_r_w.reg,
-					 fifo_rd_n, st->buf);
-			if (ret)
-				goto nvi_irq_thread_exit_ts;
-
-			buf_index = fifo_align;
-		}
-
-		ts += ts_dly;
-		for (i = 0; i < st->hal->fifo_read_n; i++)
-			buf_index = st->hal->fifo_read[i](st, buf_index, ts);
-		for (i = 0; i < AUX_PORT_IO; i++) {
-			ap = &st->aux.port[i];
-			if (ap->fifo_en &&
-				      (st->rc.i2c_slv_ctrl[i] & BIT_SLV_EN)) {
-				len = ap->nmp.ctrl & BITS_I2C_SLV_CTRL_LEN;
-				if (ap->nmp.handler != NULL)
-					ap->nmp.handler(&st->buf[buf_index],
-							len, ts,
-							ap->nmp.ext_driver);
-				buf_index += len;
+	/* convert big endian byte stream to little endian channel data */
+	for (ch = 0; ch < st->snsr[dev].cfg.ch_n; ch++) {
+		val_le[ch] = 0;
+		if (st->snsr[dev].enable & (1 << ch)) {
+			if (m && ch == (st->snsr[dev].cfg.ch_n - 1)) {
+				/* handle last channel misalignment */
+				for (i = 0; i < m; i++) {
+					val_le[ch] <<= 8;
+					val_le[ch] |= (u8)*buf++;
+				}
+				/* extend sign bit */
+				i = (sizeof(val_le[ch]) - m) * 8;
+				val_le[ch] <<= i;
+				val_le[ch] >>= i;
+			} else {
+				for (i = 0; i < n; i++) {
+					val_le[ch] <<= 8;
+					val_le[ch] |= (u8)*buf++;
+				}
+				/* extend sign bit */
+				i = (sizeof(val_le[ch]) - n) * 8;
+				if (i) {
+					val_le[ch] <<= i;
+					val_le[ch] >>= i;
+				}
 			}
 		}
-		samples--;
 	}
-nvi_irq_thread_exit_ts:
-	st->ts_last = ts;
-nvi_irq_thread_exit:
-	nvi_enable_irq(st);
-	nvi_mutex_unlock(st);
-	return IRQ_HANDLED;
 
-nvi_irq_thread_exit_reset:
-	if (st->dbg & NVI_DBG_SPEW_FIFO)
+	/* shift HW data size to channel size if needed */
+	if (st->snsr[dev].buf_shft) {
+		if (st->snsr[dev].buf_shft < 0) {
+			n = abs(st->snsr[dev].buf_shft);
+			for (ch = 0; ch < st->snsr[dev].cfg.ch_n; ch++)
+				val_le[ch] >>= n;
+		} else {
+			for (ch = 0; ch < st->snsr[dev].cfg.ch_n; ch++)
+				val_le[ch] <<= st->snsr[dev].buf_shft;
+		}
+	}
+
+	/* apply matrix if needed */
+	if (st->snsr[dev].matrix) {
+		for (ch = 0; ch < AXIS_N; ch++)
+			val[ch] = val_le[ch];
+
+		for (ch = 0; ch < AXIS_N; ch++)
+			val_le[ch] = nvi_matrix(st, st->snsr[dev].cfg.matrix,
+						val[AXIS_X], val[AXIS_Y],
+						val[AXIS_Z], ch);
+	}
+
+	/* convert little endian channel data to little endian byte stream */
+	buf_le_i = 0;
+	for (ch = 0; ch < st->snsr[dev].cfg.ch_n; ch++) {
+		u_val = (u32)val_le[ch];
+		for (i = 0; i < ch_sz; i++) {
+			buf_le[buf_le_i + i] = (u8)(u_val & 0xFF);
+			u_val >>= 8;
+		}
+		buf_le_i += ch_sz;
+	}
+
+	/* add status if needed (no endian conversion) */
+	if (buf_le_i < st->snsr[dev].cfg.snsr_data_n) {
+		n = st->snsr[dev].cfg.snsr_data_n - buf_le_i;
+		u_val = st->snsr[dev].sts;
+		for (i = 0; i < n; i++) {
+			buf_le[buf_le_i + i] = (u8)(u_val & 0xFF);
+			u_val >>= 8;
+		}
+	}
+
+	if (ts >= 0) {
+		if (st->sts & (NVI_DBG_SPEW_SNSR << dev)) {
+			sts = st->sts;
+			st->sts |= NVS_STS_SPEW_DATA;
+			st->nvs->handler(st->snsr[dev].nvs_st, buf_le, ts);
+			if (!(sts & NVS_STS_SPEW_DATA))
+				st->sts &= ~NVS_STS_SPEW_DATA;
+		} else {
+			st->nvs->handler(st->snsr[dev].nvs_st, buf_le, ts);
+		}
+	}
+	return buf_le_i;
+}
+
+static int nvi_push_event(struct nvi_state *st, unsigned int dev)
+{
+	s64 ts = nvs_timestamp();
+	u8 val = 1;
+	unsigned int sts;
+	int ret;
+
+	if (st->sts & (NVI_DBG_SPEW_SNSR << dev)) {
+		sts = st->sts;
+		st->sts |= NVS_STS_SPEW_DATA;
+		ret = st->nvs->handler(st->snsr[dev].nvs_st, &val, ts);
+		if (!(sts & NVS_STS_SPEW_DATA))
+			st->sts &= ~NVS_STS_SPEW_DATA;
+	} else {
+		ret = st->nvs->handler(st->snsr[dev].nvs_st, &val, ts);
+	}
+	return ret;
+}
+
+static int nvi_push_oneshot(struct nvi_state *st, unsigned int dev)
+{
+	/* disable now to avoid reinitialization on handler's disable */
+	st->snsr[dev].enable = 0;
+	st->en_msk &= ~(1 << dev);
+	return nvi_push_event(st, dev);
+}
+
+static int nvi_dev_rd(struct nvi_state *st, unsigned int dev)
+{
+	u8 buf[AXIS_N * 2];
+	u16 len;
+	int ret;
+
+	if (!st->snsr[dev].enable)
+		return 0;
+
+	len = st->snsr[dev].cfg.ch_n << 1;
+	ret = nvi_i2c_r(st, st->hal->reg->out_h[dev].bank,
+			st->hal->reg->out_h[dev].reg, len, buf);
+	if (!ret)
+		ret = nvi_push(st, dev, buf, nvi_ts_dev(st, 0, dev, 0));
+	return ret;
+}
+
+static int nvi_fifo_aux(struct nvi_state *st, s64 ts, unsigned int n)
+{
+	struct aux_port *ap;
+	unsigned int fifo_data_n;
+	unsigned int port;
+
+	ts = nvi_ts_dev(st, ts, DEV_AUX, -1);
+	for (port = 0; port < AUX_PORT_IO; port++) {
+		ap = &st->aux.port[port];
+		if (st->rc.fifo_en & (1 << st->hal->bit->slv_fifo_en[port])) {
+			fifo_data_n = ap->nmp.ctrl & BITS_I2C_SLV_CTRL_LEN;
+			if (fifo_data_n > n)
+				return 0;
+
+			ap->nmp.handler(&st->buf[st->buf_i], fifo_data_n, ts,
+					ap->nmp.ext_driver);
+			st->buf_i += fifo_data_n;
+			n -= fifo_data_n;
+		}
+		if (st->sts & (NVS_STS_SUSPEND | NVS_STS_SHUTDOWN))
+			return -1;
+	}
+
+	return 1;
+}
+
+static int nvi_fifo_dev_rd(struct nvi_state *st, s64 ts, unsigned int n,
+			   unsigned int dev)
+{
+	if (st->sts & (NVS_STS_SUSPEND | NVS_STS_SHUTDOWN))
+		return -1;
+
+	if (st->hal->dev[dev]->fifo_data_n > n)
+		return 0;
+
+	nvi_push(st, dev, &st->buf[st->buf_i], nvi_ts_dev(st, ts, dev, 0));
+	st->buf_i += st->hal->dev[dev]->fifo_data_n;
+	return 1;
+}
+
+static int nvi_fifo_dev(struct nvi_state *st, s64 ts, unsigned int n)
+{
+	unsigned int dev;
+	int ret;
+
+	dev = st->hal->fifo_dev[(st->rc.fifo_cfg >> 2) & 0x07];
+	if (dev == DEV_AUX)
+		ret = nvi_fifo_aux(st, ts, n);
+	else
+		ret = nvi_fifo_dev_rd(st, ts, n, dev);
+	return ret;
+}
+
+static int nvi_fifo_devs(struct nvi_state *st, s64 ts, unsigned int n)
+{
+	unsigned int dev;
+	int ret = 0;
+
+	for (dev = 0; dev < DEV_MPU_N; dev++) {
+		if (st->rc.fifo_en & st->hal->dev[dev]->fifo_en_msk) {
+			ret = nvi_fifo_dev_rd(st, ts, n, dev);
+			if (ret <= 0)
+				return ret;
+		}
+	}
+
+	if (st->rc.fifo_en & st->hal->dev[DEV_AUX]->fifo_en_msk)
+		ret = nvi_fifo_aux(st, ts, n);
+	return ret;
+}
+
+/* fifo_n_max can be used if we want to round-robin FIFOs */
+static int nvi_fifo_rd(struct nvi_state *st, int src, unsigned int fifo_n_max,
+		       int (*fn)(struct nvi_state *st, s64 ts, unsigned int n))
+{
+	u16 fifo_count;
+	u32 dmp_clk_n = 0;
+	s64 ts_period;
+	s64 ts_now;
+	s64 ts_end;
+	bool sync;
+	unsigned int ts_n;
+	unsigned int fifo_n;
+	unsigned int buf_n;
+	int ret = 0;
+
+	ts_end = nvs_timestamp();
+	if (src < 0)
+		/* nvi_dmp_clk_n */
+		ret = st->hal->dmp->fn_clk_n(st, &dmp_clk_n);
+	ret |= nvi_i2c_rd(st, &st->hal->reg->fifo_count_h, (u8 *)&fifo_count);
+	if (ret || !fifo_count)
+		return 0;
+
+	ts_now = nvs_timestamp();
+	if (ts_now < (ts_end + 5000000))
+		sync = true;
+	else
+		sync = false;
+	ts_end = atomic64_read(&st->ts_irq);
+	fifo_n = (unsigned int)be16_to_cpu(fifo_count);
+	if (st->sts & NVS_STS_SPEW_IRQ)
 		dev_info(&st->i2c->dev,
-			 "%s_exit_reset fifo_count=%u fifo_sample_size=%u\n",
-			 __func__, fifo_count, fifo_sample_size);
-	nvi_reset(st, true, false);
+			 "src=%d sync=%x fifo_n=%u ts_clk_n=%u ts_diff=%lld\n",
+			 src, sync, fifo_n, dmp_clk_n, ts_now - st->ts_now);
+	st->ts_now = ts_now;
+	if (src < 0) {
+		/* DMP timing */
+		if (dmp_clk_n > st->dmp_clk_n)
+			ts_n = dmp_clk_n - st->dmp_clk_n;
+		else
+			/* counter rolled over */
+			ts_n = (~st->dmp_clk_n + 1) + dmp_clk_n;
+		/* ts_n is the number of DMP clock ticks since last time */
+		st->dmp_clk_n = dmp_clk_n;
+		src = SRC_DMP;
+		fifo_n_max = 0; /* DMP disables round-robin FIFOs */
+	} else {
+		/* FIFO timing */
+		ts_n = fifo_n / st->src[src].fifo_data_n; /* TS's needed */
+		if ((fifo_n % st->src[src].fifo_data_n) || !ts_n)
+			/* reset FIFO if doesn't divide cleanly */
+			return -1;
+	}
+
+	if (ts_n) {
+		ts_period = st->src[src].period_us_src;
+		ts_period *= 1000;
+		if (sync && ts_end > st->src[src].ts_end && ts_end < ts_now &&
+					  ts_end > (ts_now - (ts_period >> 2)))
+			/* ts_irq is within the rate so sync to IRQ */
+			ts_now = ts_end;
+		if (st->src[src].ts_reset) {
+			st->src[src].ts_reset = false;
+			ts_end = st->src[src].ts_period * (ts_n - 1);
+			if (sync) {
+				st->src[src].ts_1st = ts_now - ts_end;
+				st->src[src].ts_end = st->src[src].ts_1st;
+			}
+		} else {
+			ts_end = st->src[src].ts_period * ts_n;
+		}
+		ts_end += st->src[src].ts_end;
+		/* ts_now will be sent to nvi_ts_dev where the timestamp is
+		 * prevented from going into the future which allows some
+		 * tolerance here for ts_end being a little more than ts_now.
+		 * The more tolerance we have the less recalculating the period
+		 * to avoid swing around the true period.  Plus, the clamp on
+		 * ts_now in nvi_ts_dev has the benefit of "syncing" with the
+		 * current calculations per device.
+		 */
+		if (ts_end > (ts_now + (ts_period >> 3)) || (sync && (ts_end <
+					       (ts_now - (ts_period >> 1))))) {
+			if (st->sts & (NVI_DBG_SPEW_FIFO | NVI_DBG_SPEW_TS)) {
+				dev_info(&st->i2c->dev,
+					 "sync=%x now=%lld end=%lld ts_n=%u\n",
+					 sync, ts_now, ts_end, ts_n);
+				dev_info(&st->i2c->dev,
+					 "src=%d old period=%lld end=%lld\n",
+					 src, st->src[src].ts_period,
+					 st->src[src].ts_end);
+			}
+			/* st->src[src].ts_period needs to be adjusted */
+			ts_period = ts_now - st->src[src].ts_end;
+			do_div(ts_period, ts_n);
+			st->src[src].ts_period = ts_period;
+			ts_end = ts_period * ts_n;
+			ts_end += st->src[src].ts_end;
+			if (st->sts & (NVI_DBG_SPEW_FIFO | NVI_DBG_SPEW_TS))
+				dev_info(&st->i2c->dev,
+					 "src=%d new period=%lld end=%lld\n",
+					 src, ts_period, ts_end);
+		}
+		if (fifo_n_max) {
+			/* would only apply to FIFO timing (non-DMP) */
+			if (fifo_n_max < fifo_n) {
+				fifo_n = fifo_n_max;
+				ts_n = fifo_n / st->src[src].fifo_data_n;
+				ts_end = st->src[src].ts_period * ts_n;
+				ts_end += st->src[src].ts_end;
+			}
+		}
+		st->src[src].ts_end = ts_end;
+	} else {
+		/* wasn't able to calculate TS */
+		ts_now = 0;
+	}
+
+	while (fifo_n) {
+		buf_n = sizeof(st->buf) - st->buf_i;
+		if (buf_n > fifo_n)
+			buf_n = fifo_n;
+		ret = nvi_i2c_r(st, st->hal->reg->fifo_rw.bank,
+				st->hal->reg->fifo_rw.reg,
+				buf_n, &st->buf[st->buf_i]);
+		if (ret)
+			return 0;
+
+		fifo_n -= buf_n;
+		buf_n += st->buf_i;
+		st->buf_i = 0;
+		/* fn updates st->buf_i */
+		while (st->buf_i < buf_n) {
+			ret = fn(st, ts_now, buf_n - st->buf_i);
+			/* ret < 0: error to exit
+			 * ret = 0: not enough data to process
+			 * ret > 0: all done processing data
+			 */
+			if (ret <= 0)
+				break;
+		}
+
+		buf_n -= st->buf_i;
+		if (buf_n) {
+			memcpy(st->buf, &st->buf[st->buf_i], buf_n);
+			st->buf_i = buf_n;
+		} else {
+			st->buf_i = 0;
+		}
+		if (ret < 0)
+			break;
+	}
+
+	return ret;
+}
+
+static int nvi_rd(struct nvi_state *st)
+{
+	u8 val;
+	u32 int_msk;
+	unsigned int fifo;
+	int src;
+	int ret;
+
+	if (st->en_msk & (1 << DEV_DMP)) {
+		if (st->en_msk & ((1 << DEV_SM) | (1 << DEV_STP))) {
+			ret = nvi_i2c_rd(st, &st->hal->reg->int_dmp, &val);
+			if (val & (1 << st->hal->bit->dmp_int_sm))
+				nvi_push_oneshot(st, DEV_SM);
+			if (val & (1 << st->hal->bit->dmp_int_stp))
+				nvi_push_event(st, DEV_STP);
+		}
+		if (st->en_msk & st->dmp_en_msk)
+			/* nvi_dmp_rd */
+			return nvi_fifo_rd(st, -1, 0, st->hal->dmp->fn_rd);
+
+		nvi_en(st);
+		return 0;
+	}
+
+	if (st->pm == NVI_PM_ON_CYCLE) {
+		/* only low power accelerometer data */
+		nvi_pm(st, __func__, NVI_PM_ON);
+		ret = nvi_dev_rd(st, DEV_ACC);
+		nvi_pm(st, __func__, NVI_PM_AUTO);
+		return 0;
+	}
+
+	nvi_dev_rd(st, DEV_TMP);
+	if (!(st->rc.fifo_en & st->hal->dev[DEV_AUX]->fifo_en_msk))
+		nvi_aux_rd(st);
+	/* handle FIFO enabled data */
+	if (st->rc.fifo_cfg & 0x01) {
+		/* multi FIFO enabled */
+		int_msk = 1 << st->hal->bit->int_data_rdy_0;
+		for (fifo = 0; fifo < st->hal->fifo_n; fifo++) {
+			if (st->rc.int_enable & (int_msk << fifo)) {
+				ret = nvi_wr_fifo_cfg(st, fifo);
+				if (ret)
+					return 0;
+
+				src = st->hal->dev[st->hal->
+						   fifo_dev[fifo]]->src;
+				ret = nvi_fifo_rd(st, src, 0, nvi_fifo_dev);
+				if (st->buf_i || (ret < 0)) {
+					/* HW FIFO misalignment - reset */
+					nvi_err(st);
+					return -1;
+				}
+			}
+		}
+	} else {
+		/* st->fifo_src is either SRC_MPU or the source for the single
+		 * device enabled for the single FIFO in ICM.
+		 */
+		ret = nvi_fifo_rd(st, st->fifo_src, 0, nvi_fifo_devs);
+		if (st->buf_i || (ret < 0)) {
+			/* HW FIFO misalignment - reset */
+			nvi_err(st);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int nvi_read(struct nvi_state *st, bool flush)
+{
+	int ret;
+
+	if (st->irq_dis && !(st->sts & NVS_STS_SHUTDOWN)) {
+		dev_err(&st->i2c->dev, "%s ERR: IRQ storm reset. n=%u\n",
+			__func__, st->irq_storm_n);
+		st->irq_storm_n = 0;
+		nvi_pm(st, __func__, NVI_PM_ON);
+		nvi_wr_pm1(st, __func__, BIT_H_RESET);
+		nvi_enable_irq(st);
+		nvi_en(st);
+	} else if (!(st->sts & (NVS_STS_SUSPEND | NVS_STS_SHUTDOWN))) {
+		ret = nvi_rd(st);
+		if (ret < 0)
+			nvi_en(st); /* a little harder reset for ICM DMP */
+		else if (flush)
+			nvi_reset(st, __func__, true, false, true);
+	} else if (flush) {
+		nvi_flush_push(st);
+	}
+	return 0;
+}
+
+static irqreturn_t nvi_thread(int irq, void *dev_id)
+{
+	struct nvi_state *st = (struct nvi_state *)dev_id;
+
+	nvi_mutex_lock(st);
+	nvi_read(st, false);
 	nvi_mutex_unlock(st);
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t nvi_irq_handler(int irq, void *dev_id)
+static irqreturn_t nvi_handler(int irq, void *dev_id)
 {
 	struct nvi_state *st = (struct nvi_state *)dev_id;
 	u64 ts = nvs_timestamp();
@@ -2809,9 +3143,37 @@ static int nvi_enable(void *client, int snsr_id, int enable)
 	struct nvi_state *st = (struct nvi_state *)client;
 
 	if (enable < 0)
-		return st->enabled[snsr_id];
+		/* return current enable request status */
+		return st->snsr[snsr_id].enable;
 
-	st->enabled[snsr_id] = enable;
+	if (st->snsr[snsr_id].enable == enable)
+		/* nothing has changed with enable request */
+		return 0;
+
+	st->snsr[snsr_id].enable = enable;
+	if (!enable)
+		/* officially flagged as off here */
+		st->en_msk &= ~(1 << snsr_id);
+	if (st->sts & NVS_STS_SUSPEND)
+		/* speed up suspend/resume by not doing nvi_en for every dev */
+		return 0;
+
+	if (snsr_id == DEV_TMP)
+		/* this is a static sensor that will be read when gyro is on */
+		return 0;
+
+	if (st->en_msk & (1 << DEV_DMP)) {
+		/* DMP is currently on */
+		if (!(st->en_msk & st->dmp_en_msk))
+			/* DMP may get turned off (may stay on due to batch) so
+			 * we update timings that may have changed while DMP
+			 * was on.
+			 */
+			nvi_period_all(st);
+	} else {
+		nvi_period_src(st, st->hal->dev[snsr_id]->src);
+		nvi_timeout(st);
+	}
 	return nvi_en(st);
 }
 
@@ -2819,20 +3181,50 @@ static int nvi_batch(void *client, int snsr_id, int flags,
 		     unsigned int period, unsigned int timeout)
 {
 	struct nvi_state *st = (struct nvi_state *)client;
-	unsigned int old;
 	int ret = 0;
 
-	if (timeout)
-		/* timeout not supported at this time */
+	/* We use batch to set parameters in realtime for one-shot sensors
+	 * (that normally doesn't use batch)
+	 */
+	if (SENSOR_FLAG_ONE_SHOT_MODE == (st->snsr[snsr_id].cfg.flags &
+					  REPORTING_MODE_MASK)) {
+		st->snsr[snsr_id].cfg.delay_us_min = period;
+		st->snsr[snsr_id].cfg.delay_us_max = timeout;
+		st->snsr[snsr_id].cfg.report_n = flags;
+		if (st->en_msk & (1 << DEV_DMP))
+			ret = st->hal->dmp->fn_dev_init(st, snsr_id);
+		return ret;
+	}
+
+	if (timeout && !st->snsr[snsr_id].cfg.fifo_max_evnt_cnt)
 		return -EINVAL;
 
-	old = st->delay_us[snsr_id];
-	st->delay_us[snsr_id] = period;
-	if (st->enabled[snsr_id]) {
-		ret = nvi_en(st);
-		if (ret)
-			st->delay_us[snsr_id] = old;
+	if (snsr_id == DEV_TMP)
+		return 0;
+
+	if (period == st->snsr[snsr_id].period_us &&
+				       timeout == st->snsr[snsr_id].timeout_us)
+		return 0;
+
+	st->snsr[snsr_id].period_us = period;
+	st->snsr[snsr_id].timeout_us = timeout;
+	if (!st->snsr[snsr_id].enable)
+		return 0;
+
+	ret = nvi_timeout(st);
+	if (st->en_msk & (1 << DEV_DMP)) {
+		if (st->hal->dmp->fn_dev_batch)
+			/* batch can be done in real-time with the DMP on */
+			/* nvi_dd_batch */
+			ret = st->hal->dmp->fn_dev_batch(st, snsr_id, -1);
+		else
+			ret = nvi_en(st);
+	} else {
+		ret |= nvi_period_src(st, st->hal->dev[snsr_id]->src);
+		if (ret > 0)
+			ret = nvi_en(st);
 	}
+
 	return ret;
 }
 
@@ -2841,9 +3233,9 @@ static int nvi_flush(void *client, int snsr_id)
 	struct nvi_state *st = (struct nvi_state *)client;
 	int ret = -EINVAL;
 
-	if (st->enabled[snsr_id]) {
-		st->flush[snsr_id] = true;
-		ret = nvi_en(st);
+	if (st->snsr[snsr_id].enable) {
+		st->snsr[snsr_id].flush = true;
+		ret = nvi_read(st, true);
 	}
 	return ret;
 }
@@ -2851,77 +3243,46 @@ static int nvi_flush(void *client, int snsr_id)
 static int nvi_max_range(void *client, int snsr_id, int max_range)
 {
 	struct nvi_state *st = (struct nvi_state *)client;
+	int ret = 0;
 	unsigned int i = max_range;
-	unsigned int axis;
-	unsigned int old;
-	int ret;
+	unsigned int ch;
 
-	switch (snsr_id) {
-	case DEV_ACCEL:
-		if (i >= NUM_ACCEL_FSR)
-			return -EINVAL;
-
-		old = st->chip_config.accel_fs;
-		st->chip_config.accel_fs = i;
-		if (st->enabled[DEV_ACCEL]) {
-			ret = nvi_en(st);
-			if (ret) {
-				st->chip_config.accel_fs = old;
-				return -EINVAL;
-			}
-		}
-		break;
-
-	case DEV_ANGLVEL:
-		if (i >= NUM_FSR)
-			return -EINVAL;
-
-		old = st->chip_config.fsr;
-		st->chip_config.fsr = i;
-		if (st->enabled[DEV_ANGLVEL]) {
-			ret = nvi_en(st);
-			if (ret) {
-				st->chip_config.fsr = old;
-				return -EINVAL;
-			}
-		}
-		break;
-
-	case DEV_TEMP:
-		if (i)
-			return -EINVAL;
-
-		st->cfg[DEV_TEMP].offset.ival =
-					   st->hal->dev[DEV_TEMP]->offset.ival;
-		st->cfg[DEV_TEMP].offset.fval =
-					   st->hal->dev[DEV_TEMP]->offset.fval;
-		st->cfg[DEV_TEMP].scale.ival =
-					    st->hal->dev[DEV_TEMP]->scale.ival;
-		st->cfg[DEV_TEMP].scale.fval =
-					    st->hal->dev[DEV_TEMP]->scale.fval;
-		break;
-
-	default:
+	if (snsr_id < 0 || snsr_id >= DEV_N)
 		return -EINVAL;
-	}
 
-	if (snsr_id != DEV_TEMP) {
-		for (axis = 0; axis < AXIS_N; axis++) {
-			st->cfg[snsr_id].scales[axis].ival =
+	if (st->snsr[snsr_id].enable)
+		/* can't change settings on the fly (disable device first) */
+		return -EPERM;
+
+	if (i > st->hal->dev[snsr_id]->rr_0n)
+		/* clamp to highest setting */
+		i = st->hal->dev[snsr_id]->rr_0n;
+	st->snsr[snsr_id].usr_cfg = i;
+	st->snsr[snsr_id].cfg.resolution.ival =
 				  st->hal->dev[snsr_id]->rr[i].resolution.ival;
-			st->cfg[snsr_id].scales[axis].fval =
+	st->snsr[snsr_id].cfg.resolution.fval =
 				  st->hal->dev[snsr_id]->rr[i].resolution.fval;
+	st->snsr[snsr_id].cfg.max_range.ival =
+				   st->hal->dev[snsr_id]->rr[i].max_range.ival;
+	st->snsr[snsr_id].cfg.max_range.fval =
+				   st->hal->dev[snsr_id]->rr[i].max_range.fval;
+	st->snsr[snsr_id].cfg.offset.ival = st->hal->dev[snsr_id]->offset.ival;
+	st->snsr[snsr_id].cfg.offset.fval = st->hal->dev[snsr_id]->offset.fval;
+	st->snsr[snsr_id].cfg.scale.ival = st->hal->dev[snsr_id]->scale.ival;
+	st->snsr[snsr_id].cfg.scale.fval = st->hal->dev[snsr_id]->scale.fval;
+	/* AXIS sensors need resolution put in the scales */
+	if (st->snsr[snsr_id].cfg.ch_n_max) {
+		for (ch = 0; ch < st->snsr[snsr_id].cfg.ch_n_max; ch++) {
+			st->snsr[snsr_id].cfg.scales[ch].ival =
+					 st->snsr[snsr_id].cfg.resolution.ival;
+			st->snsr[snsr_id].cfg.scales[ch].fval =
+					 st->snsr[snsr_id].cfg.resolution.fval;
 		}
 	}
-	st->cfg[snsr_id].resolution.ival =
-				  st->hal->dev[snsr_id]->rr[i].resolution.ival;
-	st->cfg[snsr_id].resolution.fval =
-				  st->hal->dev[snsr_id]->rr[i].resolution.fval;
-	st->cfg[snsr_id].max_range.ival =
-				   st->hal->dev[snsr_id]->rr[i].max_range.ival;
-	st->cfg[snsr_id].max_range.fval =
-				   st->hal->dev[snsr_id]->rr[i].max_range.fval;
-	return 0;
+
+	if (st->en_msk & (1 << DEV_DMP))
+		ret = nvi_en(st);
+	return ret;
 }
 
 static int nvi_offset(void *client, int snsr_id, int channel, int offset)
@@ -2930,46 +3291,68 @@ static int nvi_offset(void *client, int snsr_id, int channel, int offset)
 	int old;
 	int ret;
 
+	if (snsr_id >= DEV_AXIS_N || channel >= AXIS_N)
+		return -EINVAL;
+
+	old = st->dev_offset[snsr_id][channel];
+	st->dev_offset[snsr_id][channel] = offset;
+	if (st->en_msk & (1 << snsr_id)) {
+		ret = nvi_en(st);
+		if (ret) {
+			st->dev_offset[snsr_id][channel] = old;
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static int nvi_thresh_lo(void *client, int snsr_id, int thresh_lo)
+{
+	struct nvi_state *st = (struct nvi_state *)client;
+	int ret = 1;
+
 	switch (snsr_id) {
-	case DEV_ACCEL:
-		if (channel < 0)
-			return -EINVAL;
+	case DEV_ACC:
+		return 0;
 
-		old = st->input_accel_offset[channel];
-		st->input_accel_offset[channel] = offset;
-		if (st->master_enable & (1 << DEV_ACCEL)) {
-			ret = nvi_en(st);
-			if (ret) {
-				st->input_accel_offset[channel] = old;
-				return -EINVAL;
-			}
-		}
-		break;
-
-	case DEV_ANGLVEL:
-		if (channel < 0)
-			return -EINVAL;
-
-		old = st->input_gyro_offset[channel];
-		st->input_gyro_offset[channel] = offset;
-		if (st->master_enable & (1 << DEV_ANGLVEL)) {
-			ret = nvi_en(st);
-			if (ret) {
-				st->input_gyro_offset[channel] = old;
-				return -EINVAL;
-			}
-		}
-		break;
-
-	case DEV_TEMP:
-		st->cfg[DEV_TEMP].offset.ival = offset;
-		break;
+	case DEV_SM:
+		st->snsr[DEV_SM].cfg.thresh_lo = thresh_lo;
+		if (st->en_msk & (1 << DEV_DMP))
+			ret = st->hal->dmp->fn_dev_init(st, snsr_id);
+		return ret;
 
 	default:
 		return -EINVAL;
 	}
 
-	return 0;
+	return ret;
+}
+
+static int nvi_thresh_hi(void *client, int snsr_id, int thresh_hi)
+{
+	struct nvi_state *st = (struct nvi_state *)client;
+	int ret = 1;
+
+	switch (snsr_id) {
+	case DEV_ACC:
+		if (thresh_hi > 0)
+			st->en_msk |= (1 << EN_LP);
+		else
+			st->en_msk &= ~(1 << EN_LP);
+		return 1;
+
+	case DEV_SM:
+		st->snsr[DEV_SM].cfg.thresh_hi = thresh_hi;
+		if (st->en_msk & (1 << DEV_DMP))
+			ret = st->hal->dmp->fn_dev_init(st, snsr_id);
+		return ret;
+
+	default:
+		return -EINVAL;
+	}
+
+	return ret;
 }
 
 static int nvi_reset_dev(void *client, int snsr_id)
@@ -2977,8 +3360,9 @@ static int nvi_reset_dev(void *client, int snsr_id)
 	struct nvi_state *st = (struct nvi_state *)client;
 	int ret;
 
-	ret = nvi_pm(st, NVI_PM_ON);
-	ret |= nvi_wr_pwr_mgmt_1(st, BIT_H_RESET);
+	ret = nvi_pm(st, __func__, NVI_PM_ON);
+	ret |= nvi_wr_pm1(st, __func__, BIT_H_RESET);
+	nvi_period_all(st);
 	ret |= nvi_en(st);
 	return ret;
 }
@@ -2986,17 +3370,24 @@ static int nvi_reset_dev(void *client, int snsr_id)
 static int nvi_self_test(void *client, int snsr_id, char *buf)
 {
 	struct nvi_state *st = (struct nvi_state *)client;
-	int ret = 0;
+	int ret;
 
-	if (snsr_id != DEV_TEMP) {
-		nvi_aux_enable(st, false);
-		ret = inv_hw_self_test(st, snsr_id);
-		nvi_aux_enable(st, true);
-		if (ret)
-			return sprintf(buf, "%d   FAIL\n", ret);
-	}
+	nvi_pm(st, __func__, NVI_PM_ON);
+	nvi_aux_enable(st, __func__, false, false);
+	nvi_user_ctrl_en(st, __func__, false, false, false, false);
+	if (snsr_id == DEV_ACC)
+		ret = st->hal->fn->st_acc(st);
+	else if (snsr_id == DEV_GYR)
+		ret = st->hal->fn->st_gyr(st);
+	else
+		ret = 0;
+	nvi_aux_enable(st, __func__, true, false);
+	nvi_period_all(st);
+	nvi_en(st);
+	if (ret)
+		return snprintf(buf, PAGE_SIZE, "%d   FAIL\n", ret);
 
-	return sprintf(buf, "%d   PASS\n", ret);
+	return snprintf(buf, PAGE_SIZE, "%d   PASS\n", ret);
 }
 
 static int nvi_regs(void *client, int snsr_id, char *buf)
@@ -3008,20 +3399,21 @@ static int nvi_regs(void *client, int snsr_id, char *buf)
 	unsigned int j;
 	int ret;
 
-	t = sprintf(buf, "registers: (only data != 0 shown)\n");
+	t = snprintf(buf, PAGE_SIZE, "registers: (only data != 0 shown)\n");
 	for (j = 0; j < st->hal->reg_bank_n; j++) {
-		t += sprintf(buf + t, "bank %u:\n", j);
+		t += snprintf(buf + t, PAGE_SIZE - t, "bank %u:\n", j);
 		for (i = 0; i < st->hal->regs_n; i++) {
-			if ((j == st->hal->reg->fifo_r_w.bank) &&
-					     (i == st->hal->reg->fifo_r_w.reg))
+			if ((j == st->hal->reg->fifo_rw.bank) &&
+					      (i == st->hal->reg->fifo_rw.reg))
 				continue;
 
-			ret = nvi_i2c_rd(st, j, i, 1, &data);
+			ret = nvi_i2c_r(st, j, i, 1, &data);
 			if (ret)
-				t += sprintf(buf + t, "%#2x=ERR\n", i);
+				t += snprintf(buf + t, PAGE_SIZE - t,
+					      "0x%02x=ERR\n", i);
 			else if (data)
-				t += sprintf(buf + t,
-					     "%#2x=%#2x\n", i, data);
+				t += snprintf(buf + t, PAGE_SIZE - t,
+					     "0x%02x=0x%02x\n", i, data);
 		}
 	}
 	return t;
@@ -3031,91 +3423,269 @@ static int nvi_nvs_write(void *client, int snsr_id, unsigned int nvs)
 {
 	struct nvi_state *st = (struct nvi_state *)client;
 
-	st->info = nvs;
-	switch (nvs) {
+	switch (nvs & 0xFF) {
 	case NVI_INFO_VER:
-		st->dbg = 0;
+	case NVI_INFO_DBG:
+	case NVI_INFO_REG_WR:
+	case NVI_INFO_MEM_RD:
+	case NVI_INFO_MEM_WR:
+	case NVI_INFO_DMP_FW:
+	case NVI_INFO_DMP_EN_MSK:
+	case NVI_INFO_FN_INIT:
 		break;
 
-	case NVI_INFO_DBG:
-		st->dbg ^= NVI_DBG_SPEW_MSG;
+	case NVI_INFO_DBG_SPEW:
+		st->sts ^= NVI_DBG_SPEW_MSG;
 		break;
 
 	case NVI_INFO_AUX_SPEW:
-		st->dbg ^= NVI_DBG_SPEW_AUX;
+		st->sts ^= NVI_DBG_SPEW_AUX;
 		nvi_aux_dbg(st, "SNAPSHOT", 0);
 		break;
 
 	case NVI_INFO_FIFO_SPEW:
-		st->dbg ^= NVI_DBG_SPEW_FIFO;
+		st->sts ^= NVI_DBG_SPEW_FIFO;
 		break;
 
-	case NVI_INFO_FIFO_BUF:
-		st->dbg ^= NVI_DBG_SPEW_BUF;
+	case NVI_INFO_TS_SPEW:
+		st->sts ^= NVI_DBG_SPEW_TS;
 		break;
 
 	default:
-		return -EINVAL;
+		if (nvs < (NVI_INFO_SNSR_SPEW + DEV_N))
+			st->sts ^= (NVI_DBG_SPEW_SNSR <<
+				    (nvs - NVI_INFO_SNSR_SPEW));
+		else
+			return -EINVAL;
 	}
 
+	st->info = nvs;
 	return 0;
-
 }
 
 static int nvi_nvs_read(void *client, int snsr_id, char *buf)
 {
 	struct nvi_state *st = (struct nvi_state *)client;
-	enum NVI_INFO info;
+	u8 buf_rw[256];
+	unsigned int n;
+	unsigned int i;
+	unsigned int info;
+	int ret;
 	ssize_t t;
 
 	info = st->info;
 	st->info = NVI_INFO_VER;
-	switch (info) {
+	switch (info & 0xFF) {
 	case NVI_INFO_VER:
-		t = sprintf(buf, "NVI driver v. %u\n", NVI_DRIVER_VERSION);
-		t += sprintf(buf + t, "standby_en=%x\n",
-			     !!(st->master_enable & (1 << EN_STDBY)));
-		t += sprintf(buf + t, "lpa_delay_us=%u\n",
-			     st->chip_config.lpa_delay_us);
-		t += sprintf(buf + t, "gyro_start_delay_ns=%lld\n",
-			     st->chip_config.gyro_start_delay_ns);
-		t += sprintf(buf + t, "bypass_timeout_ms=%u\n",
-			     st->chip_config.bypass_timeout_ms);
-		t += sprintf(buf + t, "temp_fifo_en=%u\n",
-			     st->chip_config.temp_fifo_en);
-		t += sprintf(buf + t, "fifo_threshold=%u\n",
-			     st->chip_config.fifo_thr);
+		t = snprintf(buf, PAGE_SIZE, "NVI driver v. %u\n",
+			     NVI_DRIVER_VERSION);
+		if (st->en_msk & (1 << FW_LOADED)) {
+			t += snprintf(buf + t, PAGE_SIZE - t, "DMP FW v. %u\n",
+				      st->hal->dmp->fw_ver);
+			t += snprintf(buf + t, PAGE_SIZE - t,
+				      "DMP enabled=%u\n",
+				      !!(st->en_msk & (1 << DEV_DMP)));
+		}
+		t += snprintf(buf + t, PAGE_SIZE - t, "standby_en=%x\n",
+			      !!(st->en_msk & (1 << EN_STDBY)));
+		t += snprintf(buf + t, PAGE_SIZE - t, "bypass_timeout_ms=%u\n",
+			      st->bypass_timeout_ms);
+		for (i = 0; i < DEV_N_AUX; i++) {
+			if (st->snsr[i].push_delay_ns)
+				t += snprintf(buf + t, PAGE_SIZE - t,
+					      "%s_push_delay_ns=%lld\n",
+					      st->snsr[i].cfg.name,
+					      st->snsr[i].push_delay_ns);
+		}
+
+		for (i = 0; i < DEV_N_AUX; i++) {
+			if ((st->dmp_dev_msk | MSK_DEV_MPU_AUX) & (1 << i)) {
+				if (st->dmp_en_msk & (1 << i))
+					t += snprintf(buf + t, PAGE_SIZE - t,
+						      "%s_dmp_en=1\n",
+						      st->snsr[i].cfg.name);
+				else
+					t += snprintf(buf + t, PAGE_SIZE - t,
+						      "%s_dmp_en=0\n",
+						      st->snsr[i].cfg.name);
+			}
+		}
+
 		return t;
 
 	case NVI_INFO_DBG:
-		return sprintf(buf, "DBG spew=%x\n",
-			       !!(st->dbg & NVI_DBG_SPEW_MSG));
+		t = snprintf(buf, PAGE_SIZE, "en_msk=%x\n", st->en_msk);
+		t += snprintf(buf + t, PAGE_SIZE - t, "sts=%x\n", st->sts);
+		t += snprintf(buf + t, PAGE_SIZE - t, "pm=%d\n", st->pm);
+		t += snprintf(buf + t, PAGE_SIZE - t, "bm_timeout_us=%u\n",
+			      st->bm_timeout_us);
+		t += snprintf(buf + t, PAGE_SIZE - t, "fifo_src=%d\n",
+			      st->fifo_src);
+		for (i = 0; i < DEV_N_AUX; i++) {
+			t += snprintf(buf + t, PAGE_SIZE - t, "snsr[%u] %s:\n",
+				      i, st->snsr[i].cfg.name);
+			t += snprintf(buf + t, PAGE_SIZE - t, "usr_cfg=%x\n",
+				      st->snsr[i].usr_cfg);
+			t += snprintf(buf + t, PAGE_SIZE - t, "enable=%x\n",
+				      st->snsr[i].enable);
+			t += snprintf(buf + t, PAGE_SIZE - t, "period_us=%u\n",
+				      st->snsr[i].period_us);
+			t += snprintf(buf + t, PAGE_SIZE - t,
+				      "timeout_us=%u\n",
+				      st->snsr[i].timeout_us);
+			t += snprintf(buf + t, PAGE_SIZE - t, "odr=%u\n",
+				      st->snsr[i].odr);
+			t += snprintf(buf + t, PAGE_SIZE - t, "ts_last=%lld\n",
+				      st->snsr[i].ts_last);
+			t += snprintf(buf + t, PAGE_SIZE - t, "ts_reset=%x\n",
+				      st->snsr[i].ts_reset);
+			t += snprintf(buf + t, PAGE_SIZE - t, "flush=%x\n",
+				      st->snsr[i].flush);
+			t += snprintf(buf + t, PAGE_SIZE - t, "matrix=%x\n",
+				      st->snsr[i].matrix);
+			t += snprintf(buf + t, PAGE_SIZE - t, "buf_shft=%d\n",
+				      st->snsr[i].buf_shft);
+			t += snprintf(buf + t, PAGE_SIZE - t, "buf_n=%u\n",
+				      st->snsr[i].buf_n);
+		}
+
+		if (st->hal->dmp) {
+			/* nvi_dmp_clk_n */
+			st->hal->dmp->fn_clk_n(st, &n);
+			t += snprintf(buf + t, PAGE_SIZE - t,
+				      "nvi_dmp_clk_n=%u\n", n);
+			t += snprintf(buf + t, PAGE_SIZE - t,
+				      "st->dmp_clk_n=%u\n", st->dmp_clk_n);
+			n = SRC_DMP;
+		} else {
+			n = 0;
+		}
+		for (i = 0; i < SRC_N; i++) {
+			if (i >= st->hal->src_n && i != SRC_DMP)
+				continue;
+
+			t += snprintf(buf + t, PAGE_SIZE - t, "src[%u]:\n", i);
+			t += snprintf(buf + t, PAGE_SIZE - t, "ts_reset=%x\n",
+				      st->src[i].ts_reset);
+			t += snprintf(buf + t, PAGE_SIZE - t, "ts_end=%lld\n",
+				      st->src[i].ts_end);
+			t += snprintf(buf + t, PAGE_SIZE - t,
+				      "ts_period=%lld\n",
+				      st->src[i].ts_period);
+			t += snprintf(buf + t, PAGE_SIZE - t,
+				      "period_us_src=%u\n",
+				      st->src[i].period_us_src);
+			t += snprintf(buf + t, PAGE_SIZE - t,
+				      "period_us_req=%u\n",
+				      st->src[i].period_us_req);
+			t += snprintf(buf + t, PAGE_SIZE - t,
+				      "period_us_min=%u\n",
+				      st->src[i].period_us_min);
+			t += snprintf(buf + t, PAGE_SIZE - t,
+				      "period_us_max=%u\n",
+				      st->src[i].period_us_max);
+			t += snprintf(buf + t, PAGE_SIZE - t,
+				      "fifo_data_n=%u\n",
+				      st->src[i].fifo_data_n);
+			t += snprintf(buf + t, PAGE_SIZE - t, "base_t=%u\n",
+				      st->src[i].base_t);
+		}
+		return t;
+
+	case NVI_INFO_DBG_SPEW:
+		return snprintf(buf, PAGE_SIZE, "DBG spew=%x\n",
+				!!(st->sts & NVI_DBG_SPEW_MSG));
 
 	case NVI_INFO_AUX_SPEW:
-		return sprintf(buf, "AUX spew=%x\n",
-			       !!(st->dbg & NVI_DBG_SPEW_AUX));
+		return snprintf(buf, PAGE_SIZE, "AUX spew=%x\n",
+				!!(st->sts & NVI_DBG_SPEW_AUX));
 
 	case NVI_INFO_FIFO_SPEW:
-		return sprintf(buf, "FIFO spew=%x\n",
-			       !!(st->dbg & NVI_DBG_SPEW_FIFO));
+		return snprintf(buf, PAGE_SIZE, "FIFO spew=%x\n",
+				!!(st->sts & NVI_DBG_SPEW_FIFO));
 
-	case NVI_INFO_FIFO_BUF:
-		return sprintf(buf, "BUF spew=%x\n",
-			       !!(st->dbg & NVI_DBG_SPEW_BUF));
+	case NVI_INFO_TS_SPEW:
+		return snprintf(buf, PAGE_SIZE, "TS spew=%x\n",
+				!!(st->sts & NVI_DBG_SPEW_TS));
+
+	case NVI_INFO_REG_WR:
+		st->rc_dis = true;
+		buf_rw[0] = (u8)(info >> 16);
+		buf_rw[1] = (u8)(info >> 8);
+		ret = nvi_i2c_write(st, info >> 24, 2, buf_rw);
+		return snprintf(buf, PAGE_SIZE,
+				"REG WR: b=%02x r=%02x d=%02x ERR=%d\n",
+				info >> 24, buf_rw[0], buf_rw[1], ret);
+
+	case NVI_INFO_MEM_RD:
+		n = (info >> 8) & 0xFF;
+		if (!n)
+			n = sizeof(buf_rw);
+		ret = nvi_mem_rd(st, info >> 16, n, buf_rw);
+		if (ret)
+			return snprintf(buf, PAGE_SIZE,
+					"MEM RD: ERR=%d\n", ret);
+
+		t = snprintf(buf, PAGE_SIZE, "MEM RD:\n");
+		for (i = 0; i < n; i++) {
+			if (!(i % 8))
+				t += snprintf(buf + t, PAGE_SIZE - t, "%04x: ",
+					      (info >> 16) + i);
+			t += snprintf(buf + t, PAGE_SIZE - t, "%02x ",
+				      buf_rw[i]);
+			if (!((i + 1) % 8))
+				t += snprintf(buf + t, PAGE_SIZE - t, "\n");
+		}
+		t += snprintf(buf + t, PAGE_SIZE - t, "\n");
+		return t;
+
+	case NVI_INFO_MEM_WR:
+		st->mc_dis = true;
+		buf_rw[0] = (u8)(info >> 8);
+		ret = nvi_mem_wr(st, info >> 16, 1, buf_rw, true);
+		return snprintf(buf, PAGE_SIZE,
+				"MEM WR: a=%04x d=%02x ERR=%d\n",
+				info >> 16, buf_rw[0], ret);
+
+	case NVI_INFO_DMP_FW:
+		ret = nvi_dmp_fw(st);
+		return snprintf(buf, PAGE_SIZE, "DMP FW: ERR=%d\n", ret);
+
+	case NVI_INFO_DMP_EN_MSK:
+		st->dmp_en_msk = (info >> 8) & MSK_DEV_ALL;
+		return snprintf(buf, PAGE_SIZE, "st->dmp_en_msk=%x\n",
+				st->dmp_en_msk);
+
+	case NVI_INFO_FN_INIT:
+		if (st->hal->fn->init) {
+			ret = st->hal->fn->init(st);
+			return snprintf(buf, PAGE_SIZE,
+					"hal->fn->init() ret=%d\n", ret);
+		} else {
+			return snprintf(buf, PAGE_SIZE,
+					"no hal->fn->init()\n");
+		}
 
 	default:
+		i = info - NVI_INFO_SNSR_SPEW;
+		if (i < DEV_N)
+			return snprintf(buf, PAGE_SIZE, "%s spew=%x\n",
+					st->snsr[i].cfg.name,
+				       !!(st->sts & (NVI_DBG_SPEW_SNSR << i)));
 		break;
 	}
 
 	return -EINVAL;
 }
 
-static struct nvs_fn_dev nvi_fn_dev = {
+static struct nvs_fn_dev nvi_nvs_fn = {
 	.enable				= nvi_enable,
 	.batch				= nvi_batch,
 	.flush				= nvi_flush,
 	.max_range			= nvi_max_range,
 	.offset				= nvi_offset,
+	.thresh_lo			= nvi_thresh_lo,
+	.thresh_hi			= nvi_thresh_hi,
 	.reset				= nvi_reset_dev,
 	.self_test			= nvi_self_test,
 	.regs				= nvi_regs,
@@ -3123,31 +3693,82 @@ static struct nvs_fn_dev nvi_fn_dev = {
 	.nvs_read			= nvi_nvs_read,
 };
 
+
 static int nvi_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct nvi_state *st = i2c_get_clientdata(client);
 	unsigned int i;
-	int ret = 0;
+	int ret;
+	int ret_t = 0;
+	s64 ts = 0; /* = 0 to fix compile */
 
+	if (st->sts & NVS_STS_SPEW_MSG)
+		ts = nvs_timestamp();
 	st->sts |= NVS_STS_SUSPEND;
 	if (st->nvs) {
-		for (i = 0; i < DEV_N; i++) {
-			if (st->nvs_st[i])
-				ret |= st->nvs->suspend(st->nvs_st[i]);
+		for (i = 0; i < DEV_N; i++)
+			ret_t |= st->nvs->suspend(st->snsr[i].nvs_st);
+	}
+
+	nvi_mutex_lock(st);
+	ret_t |= nvi_en(st);
+	for (i = 0; i < DEV_N; i++) {
+		if (st->snsr[i].enable && (st->snsr[i].cfg.flags &
+					   SENSOR_FLAG_WAKE_UP)) {
+			ret = irq_set_irq_wake(st->i2c->irq, 1);
+			if (!ret) {
+				st->irq_set_irq_wake = true;
+				break;
+			}
 		}
 	}
 	if (st->sts & NVS_STS_SPEW_MSG)
-		dev_info(&client->dev, "%s err=%d\n", __func__, ret);
-	return ret;
+		dev_info(&client->dev,
+			 "%s WAKE_ON=%x elapsed_t=%lldns err=%d\n", __func__,
+			 st->irq_set_irq_wake, nvs_timestamp() - ts, ret_t);
+	nvi_mutex_unlock(st);
+	return ret_t;
 }
 
 static int nvi_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct nvi_state *st = i2c_get_clientdata(client);
+	s64 ts = 0; /* = 0 to fix compile */
 	unsigned int i;
-	int ret = 0;
+	int ret;
+
+	if (st->sts & NVS_STS_SPEW_MSG)
+		ts = nvs_timestamp();
+	nvi_mutex_lock(st);
+	if (st->irq_set_irq_wake) {
+		/* determine if wake source */
+		ret = nvi_rd_int_status(st);
+		if (ret) {
+			dev_err(&client->dev, "%s IRQ STS ERR=%d\n",
+				__func__, ret);
+		} else {
+			if (st->sts & NVS_STS_SPEW_MSG)
+				dev_info(&client->dev,
+					 "%s IRQ STS=%#x DMP=%#x\n", __func__,
+					 st->rc.int_status, st->rc.int_dmp);
+			if (st->rc.int_status & (1 << st->hal->bit->int_dmp)) {
+				if (st->rc.int_dmp &
+					       (1 << st->hal->bit->dmp_int_sm))
+					nvi_push_oneshot(st, DEV_SM);
+			}
+		}
+		ret = irq_set_irq_wake(st->i2c->irq, 0);
+		if (!ret)
+			st->irq_set_irq_wake = false;
+	}
+	nvi_mutex_unlock(st);
+	ret = 0;
+	if (st->nvs) {
+		for (i = 0; i < DEV_N; i++)
+			ret |= st->nvs->resume(st->snsr[i].nvs_st);
+	}
 
 	nvi_mutex_lock(st);
 	for (i = 0; i < AUX_PORT_MAX; i++) {
@@ -3155,19 +3776,16 @@ static int nvi_resume(struct device *dev)
 			break;
 	}
 	if (i < AUX_PORT_MAX) {
-		nvi_pm(st, NVI_PM_ON);
+		nvi_pm(st, __func__, NVI_PM_ON);
 		nvi_aux_bypass_enable(st, false);
 	}
-	nvi_mutex_unlock(st);
-	if (st->nvs) {
-		for (i = 0; i < DEV_N; i++) {
-			if (st->nvs_st[i])
-				ret |= st->nvs->resume(st->nvs_st[i]);
-		}
-	}
 	st->sts &= ~NVS_STS_SUSPEND;
+	nvi_period_all(st);
+	ret = nvi_en(st);
 	if (st->sts & NVS_STS_SPEW_MSG)
-		dev_info(&client->dev, "%s err=%d\n", __func__, ret);
+		dev_info(&client->dev, "%s elapsed_t=%lldns err=%d\n",
+			 __func__, nvs_timestamp() - ts, ret);
+	nvi_mutex_unlock(st);
 	return ret;
 }
 
@@ -3183,14 +3801,14 @@ static void nvi_shutdown(struct i2c_client *client)
 
 	st->sts |= NVS_STS_SHUTDOWN;
 	if (st->nvs) {
-		for (i = 0; i < DEV_N; i++) {
-			if (st->nvs_st[i])
-				st->nvs->shutdown(st->nvs_st[i]);
-		}
+		for (i = 0; i < DEV_N; i++)
+			st->nvs->shutdown(st->snsr[i].nvs_st);
 	}
 	nvi_disable_irq(st);
-	if (st->hal)
-		nvi_pm(st, NVI_PM_OFF);
+	if (st->hal) {
+		nvi_user_ctrl_en(st, __func__, false, false, false, false);
+		nvi_pm(st, __func__, NVI_PM_OFF);
+	}
 	if (st->sts & NVS_STS_SPEW_MSG)
 		dev_info(&client->dev, "%s\n", __func__);
 }
@@ -3203,10 +3821,8 @@ static int nvi_remove(struct i2c_client *client)
 	if (st != NULL) {
 		nvi_shutdown(client);
 		if (st->nvs) {
-			for (i = 0; i < DEV_N; i++) {
-				if (st->nvs_st[i])
-					st->nvs->remove(st->nvs_st[i]);
-			}
+			for (i = 0; i < DEV_N; i++)
+				st->nvs->remove(st->snsr[i].nvs_st);
 		}
 		nvi_pm_exit(st);
 	}
@@ -3214,873 +3830,159 @@ static int nvi_remove(struct i2c_client *client)
 	return 0;
 }
 
-static const unsigned int nvi_lpf_us_tbl_6050[] = {
-	0, /* WAR: disabled 3906, 256Hz */
-	5319,	/* 188Hz */
-	10204,	/* 98Hz */
-	23810,	/* 42Hz */
-	50000,	/* 20Hz */
-	100000,	/* 10Hz */
-	/* 200000, 5Hz */
+static struct nvi_id_hal nvi_id_hals[] = {
+	{ NVI_HW_ID_AUTO, NVI_NAME, &nvi_hal_6050 },
+	{ NVI_HW_ID_MPU6050, NVI_NAME_MPU6050, &nvi_hal_6050 },
+	{ NVI_HW_ID_MPU6500, NVI_NAME_MPU6500, &nvi_hal_6500 },
+	{ NVI_HW_ID_MPU6515, NVI_NAME_MPU6515, &nvi_hal_6515 },
+	{ NVI_HW_ID_MPU9150, NVI_NAME_MPU9150, &nvi_hal_6050 },
+	{ NVI_HW_ID_MPU9250, NVI_NAME_MPU9250, &nvi_hal_6500 },
+	{ NVI_HW_ID_MPU9350, NVI_NAME_MPU9350, &nvi_hal_6515 },
+	{ NVI_HW_ID_ICM20628, NVI_NAME_ICM20628, &nvi_hal_20628 },
+	{ NVI_HW_ID_ICM20630, NVI_NAME_ICM20630, &nvi_hal_20628 },
+	{ NVI_HW_ID_ICM20632, NVI_NAME_ICM20632, &nvi_hal_20628 },
 };
 
-static const unsigned long nvi_lpa_delay_us_tbl_6050[] = {
-	800000,	/* 800ms */
-	200000,	/* 200ms */
-	50000,	/* 50ms */
-	/* 25000, 25ms */
-};
-
-static const unsigned int smplrt_6050_dev_delays[] = {
-	DEV_ACCEL,
-	DEV_ANGLVEL,
-	DEV_TEMP,
-	DEV_AUX,
-};
-
-static const struct nvi_smplrt smplrt_6050 = {
-	.dev				= DEV_ACCEL,
-	.delay_us_min			= 10000,
-	.delay_us_max			= 256000,
-	.delay_us_dflt			= 100000,
-	.dev_delays_n			= ARRAY_SIZE(smplrt_6050_dev_delays),
-	.dev_delays			= smplrt_6050_dev_delays,
-	.lpf_us_tbl_n			= ARRAY_SIZE(nvi_lpf_us_tbl_6050),
-	.lpf_us_tbl			= nvi_lpf_us_tbl_6050,
-	.base_hz			= 1000,
-	.lpf_wr				= nvi_wr_gyro_config,
-};
-
-static struct nvi_rr nvi_rr_accel[] = {
-	/* all accelerometer values are in g's  fval = NVS_FLOAT_NANO */
-	{
-		.max_range		= {
-			.ival		= 19,
-			.fval		= 613300000,
-		},
-		.resolution		= {
-			.ival		= 0,
-			.fval		= 598550,
-		},
-	},
-	{
-		.max_range		= {
-			.ival		= 39,
-			.fval		= 226600000,
-		},
-		.resolution		= {
-			.ival		= 0,
-			.fval		= 1197101,
-		},
-	},
-	{
-		.max_range		= {
-			.ival		= 78,
-			.fval		= 453200000,
-		},
-		.resolution		= {
-			.ival		= 0,
-			.fval		= 2394202,
-		},
-	},
-	{
-		.max_range		= {
-			.ival		= 156,
-			.fval		= 906400000,
-		},
-		.resolution		= {
-			.ival		= 0,
-			.fval		= 4788403,
-		},
-	},
-};
-
-static struct nvi_rr nvi_rr_anglvel[] = {
-	/* rad / sec  fval = NVS_FLOAT_NANO */
-	{
-		.max_range		= {
-			.ival		= 4,
-			.fval		= 363323130,
-		},
-		.resolution		= {
-			.ival		= 0,
-			.fval		= 133231,
-		},
-	},
-	{
-		.max_range		= {
-			.ival		= 8,
-			.fval		= 726646260,
-		},
-		.resolution		= {
-			.ival		= 0,
-			.fval		= 266462,
-		},
-	},
-	{
-		.max_range		= {
-			.ival		= 17,
-			.fval		= 453292520,
-		},
-		.resolution		= {
-			.ival		= 0,
-			.fval		= 532113,
-		},
-	},
-	{
-		.max_range		= {
-			.ival		= 34,
-			.fval		= 906585040,
-		},
-		.resolution		= {
-			.ival		= 0,
-			.fval		= 1064225,
-		},
-	},
-};
-
-static struct nvi_rr nvi_rr_temp[] = {
-	{
-		.max_range		= {
-			.ival		= 125,
-			.fval		= 0,
-		},
-		.resolution		= {
-			.ival		= 1,
-			.fval		= 0,
-		},
-	},
-};
-
-static const struct nvi_hal_dev nvi_hal_6050_accel = {
-	.version			= 3,
-	.selftest_scale			= 8,
-	.rr				= nvi_rr_accel,
-	.milliamp			= {
-		.ival			= 0,
-		.fval			= 500000000, /* NVS_FLOAT_NANO */
-	},
-};
-
-static const struct nvi_hal_dev nvi_hal_6050_anglvel = {
-	.version			= 3,
-	.selftest_scale			= 250,
-	.rr				= nvi_rr_anglvel,
-	.milliamp			= {
-		.ival			= 3,
-		.fval			= 700000000, /* NVS_FLOAT_NANO */
-	},
-};
-
-static const struct nvi_hal_dev nvi_hal_6050_temp = {
-	.version			= 2,
-	.rr				= nvi_rr_temp,
-	.scale				= {
-		.ival			= 0,
-		.fval			= 315806400, /* NVS_FLOAT_MICRO */
-	},
-	.offset				= {
-		.ival			= 0,
-		.fval			= 239418400, /* NVS_FLOAT_MICRO */
-	},
-	.milliamp			= {
-		.ival			= 3,
-		.fval			= 700000000, /* NVS_FLOAT_MICRO */
-	},
-};
-
-static const struct nvi_hal_reg nvi_hal_reg_6050 = {
-	.a_offset_h[AXIS_X]		= {
-		.reg			= 0x06,
-	},
-	.a_offset_h[AXIS_Y]		= {
-		.reg			= 0x08,
-	},
-	.a_offset_h[AXIS_Z]		= {
-		.reg			= 0x0A,
-	},
-	.xg_offset_h			= {
-		.reg			= 0x13,
-	},
-	.smplrt_div[DEV_ACCEL]		= {
-		.reg			= 0x19,
-	},
-	.gyro_config1			= {
-		.reg			= 0x1A,
-	},
-	.gyro_config2			= {
-		.reg			= 0x1B,
-	},
-	.accel_config			= {
-		.reg			= 0x1C,
-	},
-	.accel_config2			= {
-		.reg			= 0x1D,
-	},
-	.lp_config			= {
-		.reg			= 0x1E,
-	},
-	.fifo_en			= {
-		.reg			= 0x23,
-		.dflt			= 0x4000,
-	},
-	.i2c_mst_ctrl			= {
-		.reg			= 0x24,
-	},
-	.i2c_slv0_addr			= {
-		.reg			= 0x25,
-	},
-	.i2c_slv0_reg			= {
-		.reg			= 0x26,
-	},
-	.i2c_slv0_ctrl			= {
-		.reg			= 0x27,
-	},
-	.i2c_slv4_ctrl			= {
-		.reg			= 0x34,
-	},
-	.i2c_slv4_di			= {
-		.reg			= 0x35,
-	},
-	.i2c_mst_status			= {
-		.reg			= 0x36,
-	},
-	.int_pin_cfg			= {
-		.reg			= 0x37,
-	},
-	.int_enable			= {
-		.reg			= 0x38,
-	},
-	.int_status			= {
-		.reg			= 0x3A,
-	},
-	.accel_xout_h			= {
-		.reg			= 0x3B,
-	},
-	.temp_out_h			= {
-		.reg			= 0x41,
-	},
-	.gyro_xout_h			= {
-		.reg			= 0x43,
-	},
-	.ext_sens_data_00		= {
-		.reg			= 0x49,
-	},
-	.i2c_slv0_do			= {
-		.reg			= 0x63,
-	},
-	.i2c_slv4_do			= {
-		.reg			= 0x33,
-	},
-	.i2c_mst_odr_config		= {
-		.bank			= -1,
-	},
-	.i2c_mst_delay_ctrl		= {
-		.reg			= 0x67,
-	},
-	.signal_path_reset		= {
-		.reg			= 0x68,
-	},
-	.accel_intel_ctrl		= {
-		.reg			= 0x69,
-	},
-	.user_ctrl			= {
-		.reg			= 0x6A,
-	},
-	.pwr_mgmt_1			= {
-		.reg			= 0x6B,
-	},
-	.pwr_mgmt_2			= {
-		.reg			= 0x6C,
-	},
-	.fifo_count_h			= {
-		.reg			= 0x72,
-	},
-	.fifo_r_w			= {
-		.reg			= 0x74,
-	},
-	.who_am_i			= {
-		.reg			= 0x75,
-	},
-};
-
-static const struct nvi_hal_bit nvi_hal_bit_6050 = {
-	.smplrt_div_n[DEV_ACCEL]	= 8,
-	.i2c_mst_int_en			= 0,
-	.dmp_int_en			= 1,
-	.pll_rdy_en			= 7,
-	.wom_int_en			= 6,
-	.reg_wof_en			= 3,
-	.raw_data_0_rdy_en		= 0,
-	.raw_data_1_rdy_en		= 0,
-	.raw_data_2_rdy_en		= 0,
-	.raw_data_3_rdy_en		= 0,
-	.fifo_overflow_en		= 4,
-	.fifo_wm_en			= 6,
-	.bit_int_enable_max		= 8,
-	.slv_fifo_en[0]			= 0,
-	.slv_fifo_en[1]			= 1,
-	.slv_fifo_en[2]			= 2,
-	.slv_fifo_en[3]			= 13,
-	.temp_fifo_en			= 7,
-	.gyro_x_fifo_en			= 6,
-	.gyro_y_fifo_en			= 5,
-	.gyro_z_fifo_en			= 4,
-	.accel_fifo_en			= 3,
-	.bit_fifo_en_max		= 16,
-};
-
-static unsigned int (*fifo_read_6050[])(struct nvi_state *st,
-					unsigned int buf_i, s64 ts) = {
-	nvi_fifo_read_accel,
-	nvi_fifo_read_temp,
-	nvi_fifo_read_anglvel,
-};
-
-static const struct nvi_hal nvi_hal_6050 = {
-	.part				= MPU6050,
-	.regs_n				= 118,
-	.reg_bank_n			= 1,
-	.fifo_size			= 1024,
-	.lpa_tbl			= nvi_lpa_delay_us_tbl_6050,
-	.lpa_tbl_n		       = ARRAY_SIZE(nvi_lpa_delay_us_tbl_6050),
-	.smplrt[DEV_ACCEL]		= &smplrt_6050,
-	.smplrt[DEV_ANGLVEL]		= &smplrt_6050,
-	.smplrt[DEV_TEMP]		= &smplrt_6050,
-	.smplrt[DEV_AUX]		= &smplrt_6050,
-	.dev[DEV_ACCEL]			= &nvi_hal_6050_accel,
-	.dev[DEV_ANGLVEL]		= &nvi_hal_6050_anglvel,
-	.dev[DEV_TEMP]			= &nvi_hal_6050_temp,
-	.reg				= &nvi_hal_reg_6050,
-	.bit				= &nvi_hal_bit_6050,
-	.fifo_read_n			= ARRAY_SIZE(fifo_read_6050),
-	.fifo_read			= fifo_read_6050,
-	.init				= inv_get_silicon_rev_mpu6050,
-};
-
-static const unsigned long nvi_lpa_delay_us_tbl_6500[] = {
-	4096000,/* 4096ms */
-	2048000,/* 2048ms */
-	1024000,/* 1024ms */
-	512000,	/* 512ms */
-	256000,	/* 256ms */
-	128000,	/* 128ms */
-	64000,	/* 64ms */
-	32000,	/* 32ms */
-	16000,	/* 16ms */
-	8000,	/* 8ms */
-	4000,	/* 4ms */
-	/* 2000, 2ms */
-};
-
-static const struct nvi_hal_dev nvi_hal_6500_accel = {
-	.version			= 3,
-	.selftest_scale			= 2,
-	.rr				= nvi_rr_accel,
-	.milliamp			= {
-		.ival			= 0,
-		.fval			= 500000000, /* NVS_FLOAT_NANO */
-	},
-};
-
-static const struct nvi_hal_dev nvi_hal_6500_temp = {
-	.version			= 2,
-	.rr				= nvi_rr_temp,
-	.scale				= {
-		.ival			= 0,
-		.fval			= 334082700, /* NVS_FLOAT_NANO */
-	},
-	.offset				= {
-		.ival			= 0,
-		.fval			= 137625600, /* NVS_FLOAT_NANO */
-	},
-	.milliamp			= {
-		.ival			= 3,
-		.fval			= 700000000, /* NVS_FLOAT_NANO */
-	},
-};
-
-static const struct nvi_hal_reg nvi_hal_reg_6500 = {
-	.a_offset_h[AXIS_X]		= {
-		.reg			= 0x77,
-	},
-	.a_offset_h[AXIS_Y]		= {
-		.reg			= 0x7A,
-	},
-	.a_offset_h[AXIS_Z]		= {
-		.reg			= 0x7D,
-	},
-	.xg_offset_h			= {
-		.reg			= 0x13,
-	},
-	.smplrt_div[DEV_ACCEL]		= {
-		.reg			= 0x19,
-	},
-	.gyro_config1			= {
-		.reg			= 0x1A,
-	},
-	.gyro_config2			= {
-		.reg			= 0x1B,
-	},
-	.accel_config			= {
-		.reg			= 0x1C,
-	},
-	.accel_config2			= {
-		.reg			= 0x1D,
-	},
-	.lp_config			= {
-		.reg			= 0x1E,
-	},
-	.fifo_en			= {
-		.reg			= 0x23,
-		.dflt			= 0x4000,
-	},
-	.i2c_mst_ctrl			= {
-		.reg			= 0x24,
-	},
-	.i2c_slv0_addr			= {
-		.reg			= 0x25,
-	},
-	.i2c_slv0_reg			= {
-		.reg			= 0x26,
-	},
-	.i2c_slv0_ctrl			= {
-		.reg			= 0x27,
-	},
-	.i2c_slv4_ctrl			= {
-		.reg			= 0x34,
-	},
-	.i2c_slv4_di			= {
-		.reg			= 0x35,
-	},
-	.i2c_mst_status			= {
-		.reg			= 0x36,
-	},
-	.int_pin_cfg			= {
-		.reg			= 0x37,
-	},
-	.int_enable			= {
-		.reg			= 0x38,
-	},
-	.int_status			= {
-		.reg			= 0x3A,
-	},
-	.accel_xout_h			= {
-		.reg			= 0x3B,
-	},
-	.temp_out_h			= {
-		.reg			= 0x41,
-	},
-	.gyro_xout_h			= {
-		.reg			= 0x43,
-	},
-	.ext_sens_data_00		= {
-		.reg			= 0x49,
-	},
-	.i2c_slv0_do			= {
-		.reg			= 0x63,
-	},
-	.i2c_slv4_do			= {
-		.reg			= 0x33,
-	},
-	.i2c_mst_odr_config		= {
-		.bank			= -1,
-	},
-	.i2c_mst_delay_ctrl		= {
-		.reg			= 0x67,
-	},
-	.signal_path_reset		= {
-		.reg			= 0x68,
-	},
-	.accel_intel_ctrl		= {
-		.reg			= 0x69,
-	},
-	.user_ctrl			= {
-		.reg			= 0x6A,
-	},
-	.pwr_mgmt_1			= {
-		.reg			= 0x6B,
-	},
-	.pwr_mgmt_2			= {
-		.reg			= 0x6C,
-	},
-	.fifo_count_h			= {
-		.reg			= 0x72,
-	},
-	.fifo_r_w			= {
-		.reg			= 0x74,
-	},
-	.who_am_i			= {
-		.reg			= 0x75,
-	},
-};
-
-static const struct nvi_hal nvi_hal_6500 = {
-	.part				= MPU6500,
-	.regs_n				= 128,
-	.reg_bank_n			= 1,
-	.fifo_size			= 4096,
-	.lpa_tbl			= nvi_lpa_delay_us_tbl_6500,
-	.lpa_tbl_n		       = ARRAY_SIZE(nvi_lpa_delay_us_tbl_6500),
-	.smplrt[DEV_ACCEL]		= &smplrt_6050,
-	.smplrt[DEV_ANGLVEL]		= &smplrt_6050,
-	.smplrt[DEV_TEMP]		= &smplrt_6050,
-	.smplrt[DEV_AUX]		= &smplrt_6050,
-	.dev[DEV_ACCEL]			= &nvi_hal_6500_accel,
-	.dev[DEV_ANGLVEL]		= &nvi_hal_6050_anglvel,
-	.dev[DEV_TEMP]			= &nvi_hal_6500_temp,
-	.reg				= &nvi_hal_reg_6500,
-	.bit				= &nvi_hal_bit_6050,
-	.fifo_read_n			= ARRAY_SIZE(fifo_read_6050),
-	.fifo_read			= fifo_read_6050,
-	.init				= inv_get_silicon_rev_mpu6500,
-};
-
-static const struct nvi_hal nvi_hal_6515 = {
-	.part				= MPU6515,
-	.regs_n				= 128,
-	.reg_bank_n			= 1,
-	.fifo_size			= 4096,
-	.lpa_tbl			= nvi_lpa_delay_us_tbl_6500,
-	.lpa_tbl_n		       = ARRAY_SIZE(nvi_lpa_delay_us_tbl_6500),
-	.smplrt[DEV_ACCEL]		= &smplrt_6050,
-	.smplrt[DEV_ANGLVEL]		= &smplrt_6050,
-	.smplrt[DEV_TEMP]		= &smplrt_6050,
-	.smplrt[DEV_AUX]		= &smplrt_6050,
-	.dev[DEV_ACCEL]			= &nvi_hal_6500_accel,
-	.dev[DEV_ANGLVEL]		= &nvi_hal_6050_anglvel,
-	.dev[DEV_TEMP]			= &nvi_hal_6500_temp,
-	.reg				= &nvi_hal_reg_6500,
-	.bit				= &nvi_hal_bit_6050,
-	.fifo_read_n			= ARRAY_SIZE(fifo_read_6050),
-	.fifo_read			= fifo_read_6050,
-	.init				= inv_get_silicon_rev_mpu6500,
-};
-
-static const unsigned int smplrt_20628_accel_dd[] = {
-	DEV_ACCEL,
-	DEV_AUX,
-};
-
-static const struct nvi_smplrt smplrt_20628_accel = {
-	.dev				= DEV_ACCEL,
-	.delay_us_min			= 10000,
-	.delay_us_max			= 256000,
-	.delay_us_dflt			= 100000,
-	.dev_delays_n			= ARRAY_SIZE(smplrt_20628_accel_dd),
-	.dev_delays			= smplrt_20628_accel_dd,
-	.base_hz			= 1125,
-	.lpf_wr				= nvi_wr_accel_config,
-};
-
-static const unsigned int smplrt_20628_anglvel_dd[] = {
-	DEV_ANGLVEL,
-	DEV_TEMP,
-};
-
-static const struct nvi_smplrt smplrt_20628_anglvel = {
-	.dev				= DEV_ANGLVEL,
-	.delay_us_min			= 10000,
-	.delay_us_max			= 256000,
-	.delay_us_dflt			= 100000,
-	.dev_delays_n			= ARRAY_SIZE(smplrt_20628_anglvel_dd),
-	.dev_delays			= smplrt_20628_anglvel_dd,
-	.base_hz			= 1125,
-	.lpf_wr				= nvi_wr_gyro_config,
-};
-
-static const unsigned int smplrt_20628_aux_dd[] = {
-	DEV_AUX,
-};
-
-static const struct nvi_smplrt smplrt_20628_aux = {
-	.dev				= DEV_AUX,
-	.delay_us_min			= 10000,
-	.delay_us_max			= 256000,
-	.delay_us_dflt			= 100000,
-	.dev_delays_n			= ARRAY_SIZE(smplrt_20628_aux_dd),
-	.dev_delays			= smplrt_20628_aux_dd,
-	.base_hz			= 1125,
-	.lpf_wr				= nvi_wr_gyro_config,
-};
-
-static const struct nvi_hal_reg nvi_hal_reg_20628 = {
-/* register bank 0 */
-	.lp_config			= {
-		.bank			= 0,
-		.reg			= 0x05,
-		.dflt			= 0x70,
-	},
-	.fifo_en			= {
-		.bank			= 0,
-		.reg			= 0x66,
-	},
-	.i2c_mst_status			= {
-		.bank			= 0,
-		.reg			= 0x17,
-	},
-	.int_pin_cfg			= {
-		.bank			= 0,
-		.reg			= 0x0F,
-	},
-	.int_enable			= {
-		.bank			= 0,
-		.reg			= 0x10,
-	},
-	.int_status			= {
-		.bank			= 0,
-		.reg			= 0x19,
-	},
-	.accel_xout_h			= {
-		.bank			= 0,
-		.reg			= 0x2D,
-	},
-	.temp_out_h			= {
-		.bank			= 0,
-		.reg			= 0x39,
-	},
-	.gyro_xout_h			= {
-		.bank			= 0,
-		.reg			= 0x33,
-	},
-	.ext_sens_data_00		= {
-		.bank			= 0,
-		.reg			= 0x3B,
-	},
-	.signal_path_reset		= {
-		.bank			= 0,
-		.reg			= 0x04,
-	},
-	.user_ctrl			= {
-		.bank			= 0,
-		.reg			= 0x03,
-	},
-	.pwr_mgmt_1			= {
-		.bank			= 0,
-		.reg			= 0x06,
-		.dflt			= 0x01,
-	},
-	.pwr_mgmt_2			= {
-		.bank			= 0,
-		.reg			= 0x07,
-		.dflt			= 0x40,
-	},
-	.fifo_count_h			= {
-		.bank			= 0,
-		.reg			= 0x70,
-	},
-	.fifo_r_w			= {
-		.bank			= 0,
-		.reg			= 0x72,
-	},
-	.who_am_i			= {
-		.bank			= 0,
-		.reg			= 0x00,
-	},
-	.reg_bank_sel			= {
-		.bank			= 0,
-		.reg			= 0x7F,
-	},
-/* register bank 1 */
-	.self_test_x_gyro		= {
-		.bank			= 1,
-		.reg			= 0x02,
-	},
-	.self_test_y_gyro		= {
-		.bank			= 1,
-		.reg			= 0x03,
-	},
-	.self_test_z_gyro		= {
-		.bank			= 1,
-		.reg			= 0x04,
-	},
-	.self_test_x_accel		= {
-		.bank			= 1,
-		.reg			= 0x0E,
-	},
-	.self_test_y_accel		= {
-		.bank			= 1,
-		.reg			= 0x0F,
-	},
-	.self_test_z_accel		= {
-		.bank			= 1,
-		.reg			= 0x10,
-	},
-	.a_offset_h[AXIS_X]		= {
-		.bank			= 1,
-		.reg			= 0x14,
-	},
-	.a_offset_h[AXIS_Y]		= {
-		.bank			= 1,
-		.reg			= 0x17,
-	},
-	.a_offset_h[AXIS_Z]		= {
-		.bank			= 1,
-		.reg			= 0x1A,
-	},
-/* register bank 2 */
-	.smplrt_div[DEV_ANGLVEL]	= {
-		.bank			= 2,
-		.reg			= 0x00,
-	},
-	.gyro_config1			= {
-		.bank			= 2,
-		.reg			= 0x01,
-		.dflt			= 0x01,
-	},
-	.gyro_config2			= {
-		.bank			= 2,
-		.reg			= 0x02,
-	},
-	.xg_offset_h			= {
-		.bank			= 2,
-		.reg			= 0x03,
-	},
-	.smplrt_div[DEV_ACCEL]		= {
-		.bank			= 2,
-		.reg			= 0x10,
-	},
-	.accel_intel_ctrl		= {
-		.bank			= 2,
-		.reg			= 0x12,
-	},
-	.accel_config			= {
-		.bank			= 2,
-		.reg			= 0x14,
-	},
-	.accel_config2			= {
-		.bank			= 2,
-		.reg			= 0x15,
-	},
-/* register bank 3 */
-	.i2c_mst_odr_config		= {
-		.bank			= 3,
-		.reg			= 0x00,
-	},
-	.i2c_mst_ctrl			= {
-		.bank			= 3,
-		.reg			= 0x01,
-	},
-	.i2c_mst_delay_ctrl		= {
-		.bank			= 3,
-		.reg			= 0x02,
-	},
-	.i2c_slv0_addr			= {
-		.bank			= 3,
-		.reg			= 0x03,
-	},
-	.i2c_slv0_reg			= {
-		.bank			= 3,
-		.reg			= 0x04,
-	},
-	.i2c_slv0_ctrl			= {
-		.bank			= 3,
-		.reg			= 0x05,
-	},
-	.i2c_slv0_do			= {
-		.bank			= 3,
-		.reg			= 0x06,
-	},
-	.i2c_slv4_ctrl			= {
-		.bank			= 3,
-		.reg			= 0x15,
-	},
-	.i2c_slv4_do			= {
-		.bank			= 3,
-		.reg			= 0x16,
-	},
-	.i2c_slv4_di			= {
-		.bank			= 3,
-		.reg			= 0x17,
-	},
-};
-
-static const struct nvi_hal_bit nvi_hal_bit_20628 = {
-	.smplrt_div_n[DEV_ACCEL]	= 12,
-	.smplrt_div_n[DEV_ANGLVEL]	= 8,
-	.i2c_mst_int_en			= 0,
-	.dmp_int_en			= 1,
-	.pll_rdy_en			= 2,
-	.wom_int_en			= 3,
-	.reg_wof_en			= 7,
-	.raw_data_0_rdy_en		= 8,
-	.raw_data_1_rdy_en		= 9,
-	.raw_data_2_rdy_en		= 10,
-	.raw_data_3_rdy_en		= 11,
-	.fifo_overflow_en		= 16,
-	.fifo_wm_en			= 24,
-	.bit_int_enable_max		= 32,
-	.slv_fifo_en[0]			= 0,
-	.slv_fifo_en[1]			= 1,
-	.slv_fifo_en[2]			= 2,
-	.slv_fifo_en[3]			= 3,
-	.temp_fifo_en			= 8,
-	.gyro_x_fifo_en			= 9,
-	.gyro_y_fifo_en			= 10,
-	.gyro_z_fifo_en			= 11,
-	.accel_fifo_en			= 12,
-	.bit_fifo_en_max		= 16,
-};
-
-static unsigned int (*fifo_read_20628[])(struct nvi_state *st,
-					 unsigned int buf_i, s64 ts) = {
-	nvi_fifo_read_accel,
-	nvi_fifo_read_anglvel,
-	nvi_fifo_read_temp,
-};
-
-static void nvi_por2rc_20628(struct nvi_state *st)
+static int nvi_id2hal(struct nvi_state *st, u8 hw_id)
 {
-	st->rc.lp_config = 0x40;
-	st->rc.pwr_mgmt_1 = 0x41;
-	st->rc.gyro_config1 = 0x01;
-	st->rc.accel_config = 0x01;
+	int i;
+
+	for (i = 1; i < (int)ARRAY_SIZE(nvi_id_hals); i++) {
+		if (nvi_id_hals[i].hw_id == hw_id) {
+			st->hal = nvi_id_hals[i].hal;
+			return i;
+		}
+	}
+
+	return -ENODEV;
 }
 
-static const struct nvi_hal nvi_hal_20628 = {
-	.part				= ICM20628,
-	.regs_n				= 128,
-	.reg_bank_n			= 4,
-	.fifo_size			= 4096,
-	.lpa_tbl			= nvi_lpa_delay_us_tbl_6500,
-	.lpa_tbl_n		       = ARRAY_SIZE(nvi_lpa_delay_us_tbl_6500),
-	.smplrt[DEV_ACCEL]		= &smplrt_20628_accel,
-	.smplrt[DEV_ANGLVEL]		= &smplrt_20628_anglvel,
-	.smplrt[DEV_TEMP]		= &smplrt_20628_anglvel,
-	.smplrt[DEV_AUX]		= &smplrt_20628_accel,
-	.dev[DEV_ACCEL]			= &nvi_hal_6500_accel,
-	.dev[DEV_ANGLVEL]		= &nvi_hal_6050_anglvel,
-	.dev[DEV_TEMP]			= &nvi_hal_6500_temp,
-	.reg				= &nvi_hal_reg_20628,
-	.bit				= &nvi_hal_bit_20628,
-	.fifo_read_n			= ARRAY_SIZE(fifo_read_20628),
-	.fifo_read			= fifo_read_20628,
-	.por2rc				= nvi_por2rc_20628,
-	.init				= inv_icm_init,
-};
+static int nvi_id_dev(struct nvi_state *st,
+		      const struct i2c_device_id *i2c_dev_id)
+{
+	u8 hw_id = NVI_HW_ID_AUTO;
+	unsigned int i = i2c_dev_id->driver_data;
+	unsigned int dev;
+	int src;
+	int ret;
 
-struct sensor_cfg nvi_cfg_dflt[] = {
+	BUG_ON(NVI_NDX_N != ARRAY_SIZE(nvi_i2c_device_id) - 1);
+	BUG_ON(NVI_NDX_N != ARRAY_SIZE(nvi_id_hals));
+	st->hal = nvi_id_hals[i].hal;
+	if (i == NVI_NDX_AUTO) {
+		nvi_pm_wr(st, __func__, 0, 0, 0);
+		ret = nvi_i2c_rd(st, &st->hal->reg->who_am_i, &hw_id);
+		if (ret) {
+			dev_err(&st->i2c->dev, "%s AUTO ID FAILED\n",
+				__func__);
+			return -ENODEV;
+		}
+
+		ret = nvi_id2hal(st, hw_id);
+		if (ret < 0) {
+			st->hal = &nvi_hal_20628;
+			/* cause a master reset by disabling regulators */
+			nvs_vregs_disable(&st->i2c->dev, st->vreg,
+					  ARRAY_SIZE(nvi_vregs));
+			ret = nvi_pm_wr(st, __func__, 0, 0, 0);
+			ret = nvi_i2c_rd(st, &st->hal->reg->who_am_i, &hw_id);
+			if (ret) {
+				dev_err(&st->i2c->dev, "%s AUTO ID FAILED\n",
+					__func__);
+				return -ENODEV;
+			}
+
+			ret = nvi_id2hal(st, hw_id);
+			if (ret < 0) {
+				dev_err(&st->i2c->dev,
+					"%s hw_id=%x AUTO ID FAILED\n",
+					__func__, hw_id);
+				return -ENODEV;
+			}
+		}
+
+		i = ret;
+	} else {
+		/* cause a master reset by disabling regulators */
+		nvs_vregs_disable(&st->i2c->dev, st->vreg,
+				  ARRAY_SIZE(nvi_vregs));
+		nvi_pm_wr(st, __func__, 0, 0, 0);
+	}
+
+	/* populate the rest of st->snsr[dev].cfg */
+	for (dev = 0; dev < DEV_N; dev++) {
+		st->snsr[dev].cfg.part = nvi_id_hals[i].name;
+		st->snsr[dev].cfg.version = st->hal->dev[dev]->version;
+		st->snsr[dev].cfg.milliamp.ival =
+					      st->hal->dev[dev]->milliamp.ival;
+		st->snsr[dev].cfg.milliamp.fval =
+					      st->hal->dev[dev]->milliamp.fval;
+	}
+
+	ret = nvs_vregs_sts(st->vreg, ARRAY_SIZE(nvi_vregs));
+	if (ret < 0)
+		/* regulators aren't supported so manually do master reset */
+		nvi_wr_pm1(st, __func__, BIT_H_RESET);
+	for (i = 0; i < AXIS_N; i++) {
+		st->rom_offset[DEV_ACC][i] = (s16)st->rc.accel_offset[i];
+		st->rom_offset[DEV_GYR][i] = (s16)st->rc.gyro_offset[i];
+		st->dev_offset[DEV_ACC][i] = 0;
+		st->dev_offset[DEV_GYR][i] = 0;
+	}
+
+	BUG_ON(SRC_N < st->hal->src_n);
+	if (st->hal->fn->init)
+		ret = st->hal->fn->init(st);
+	else
+		ret = 0;
+	/* set sensor period limits after st->hal->fn->init executes */
+	for (dev = 0; dev < DEV_N; dev++) {
+		src = st->hal->dev[dev]->src;
+		if (src < 0)
+			continue;
+
+		if (SENSOR_FLAG_ONE_SHOT_MODE == (st->snsr[dev].cfg.flags &
+						  REPORTING_MODE_MASK))
+			continue;
+
+		BUG_ON(src >= st->hal->src_n);
+		st->snsr[dev].cfg.delay_us_min = st->src[src].period_us_min;
+		st->snsr[dev].cfg.delay_us_max = st->src[src].period_us_max;
+	}
+
+	if (hw_id == NVI_HW_ID_AUTO)
+		dev_info(&st->i2c->dev, "%s: USING DEVICE TREE: %s\n",
+			 __func__, i2c_dev_id->name);
+	else
+		dev_info(&st->i2c->dev, "%s: FOUND HW ID=%x  USING: %s\n",
+			 __func__, hw_id, st->snsr[0].cfg.part);
+	return ret;
+}
+
+static struct sensor_cfg nvi_cfg_dflt[] = {
 	{
 		.name			= "accelerometer",
-		.snsr_id		= DEV_ACCEL,
+		.snsr_id		= DEV_ACC,
 		.kbuf_sz		= KBUF_SZ,
-		.snsr_data_n		= 7,
+		.snsr_data_n		= 14,
 		.ch_n			= AXIS_N,
-		.ch_sz			= -2,
+		.ch_sz			= -4,
 		.vendor			= NVI_VENDOR,
-		.matrix			= { 1, 0, 0, 0, 1, 0, 0, 0, 1 },
 		.float_significance	= NVS_FLOAT_NANO,
 		.ch_n_max		= AXIS_N,
+		.thresh_hi		= -1, /* LP */
 	},
 	{
 		.name			= "gyroscope",
-		.snsr_id		= DEV_ANGLVEL,
+		.snsr_id		= DEV_GYR,
 		.kbuf_sz		= KBUF_SZ,
-		.snsr_data_n		= 7,
+		.snsr_data_n		= 14,
 		.ch_n			= AXIS_N,
-		.ch_sz			= -2,
+		.ch_sz			= -4,
 		.vendor			= NVI_VENDOR,
-		.matrix			= { 1, 0, 0, 0, 1, 0, 0, 0, 1 },
+		.max_range		= {
+			.ival		= 3,
+		},
 		.float_significance	= NVS_FLOAT_NANO,
 		.ch_n_max		= AXIS_N,
 	},
@@ -4090,368 +3992,325 @@ struct sensor_cfg nvi_cfg_dflt[] = {
 		.ch_n			= 1,
 		.ch_sz			= -2,
 		.vendor			= NVI_VENDOR,
+		.flags			= SENSOR_FLAG_ON_CHANGE_MODE,
 		.float_significance	= NVS_FLOAT_NANO,
+	},
+	{
+		.name			= "significant_motion",
+		.snsr_id		= DEV_SM,
+		.ch_n			= 1,
+		.ch_sz			= 1,
+		.vendor			= NVI_VENDOR,
+		.delay_us_min		= -1,
+		/* delay_us_max is ignored by NVS since this is a one-shot
+		 * sensor so we use it as a third threshold parameter
+		 */
+		.delay_us_max		= 200, /* SMD_DELAY2_THLD */
+		.flags			= SENSOR_FLAG_ONE_SHOT_MODE |
+					  SENSOR_FLAG_WAKE_UP,
+		.thresh_lo		= 1500, /* SMD_MOT_THLD */
+		.thresh_hi		= 600, /* SMD_DELAY_THLD */
+	},
+	{
+		.name			= "step_detector",
+		.snsr_id		= DEV_STP,
+		.ch_n			= 1,
+		.ch_sz			= 1,
+		.vendor			= NVI_VENDOR,
+		.delay_us_min		= -1,
+		.flags			= SENSOR_FLAG_ONE_SHOT_MODE,
+	},
+	{
+		.name			= "quaternion",
+		.snsr_id		= SENSOR_TYPE_ORIENTATION,
+		.kbuf_sz		= KBUF_SZ,
+		.ch_n			= AXIS_N,
+		.ch_sz			= -4,
+		.vendor			= NVI_VENDOR,
+		.delay_us_min		= 10000,
+		.delay_us_max		= 255000,
+	},
+	{
+		.name			= "geomagnetic_rotation_vector",
+		.snsr_id		= DEV_GMR,
+		.kbuf_sz		= KBUF_SZ,
+		.ch_n			= 4,
+		.ch_sz			= -4,
+		.vendor			= NVI_VENDOR,
+		.delay_us_min		= 10000,
+		.delay_us_max		= 255000,
+	},
+	{
+		.name			= "gyroscope_uncalibrated",
+		.snsr_id		= DEV_GYU,
+		.kbuf_sz		= KBUF_SZ,
+		.ch_n			= AXIS_N,
+		.ch_sz			= -2,
+		.vendor			= NVI_VENDOR,
+		.max_range		= {
+			.ival		= 3,
+		},
+		.delay_us_min		= 10000,
+		.delay_us_max		= 255000,
+		.float_significance	= NVS_FLOAT_NANO,
+		.ch_n_max		= AXIS_N,
 	},
 };
 
-static void nvi_init_config(struct nvi_state *st)
-{
-	unsigned int i;
-
-	memcpy(st->cfg, nvi_cfg_dflt, sizeof(st->cfg));
-	st->hal = &nvi_hal_6050;
-	for (i = 0; i < DEV_N_AUX; i++) {
-		st->enabled[i] = 0;
-		st->delay_us[i] = 0;
-	}
-	st->master_enable = (1 << EN_STDBY);
-	st->chip_config.lpa_delay_us = 0; /* disabled */
-	st->chip_config.gyro_start_delay_ns = GYRO_STARTUP_DELAY_NS;
-	st->chip_config.bypass_timeout_ms = NVI_BYPASS_TIMEOUT_MS;
-	st->chip_config.temp_fifo_en = 0;
-	st->chip_config.fifo_thr = FIFO_THRESHOLD;
-
-	st->chip_config.fsr = INV_FSR_2000DPS;
-	st->chip_config.lpf = INV_FS_02G;
-}
-
-static int nvi_id_hal(struct nvi_state *st, u8 dev_id)
-{
-	const char *part_name;
-	unsigned int i;
-
-	switch (dev_id) {
-	case MPU6050_ID:
-		st->hal = &nvi_hal_6050;
-		part_name = NVI_NAME_MPU6050;
-		break;
-
-	case MPU6500_ID:
-		st->hal = &nvi_hal_6500;
-		part_name = NVI_NAME_MPU6500;
-		break;
-
-	case MPU9250_ID:
-		st->hal = &nvi_hal_6500;
-		part_name = NVI_NAME_MPU9250;
-		break;
-
-	case MPU6515_ID:
-		st->hal = &nvi_hal_6515;
-		part_name = NVI_NAME_MPU6515;
-		break;
-
-	case MPU9350_ID:
-		st->hal = &nvi_hal_6515;
-		part_name = NVI_NAME_MPU9350;
-		break;
-
-	case ICM20628_ID:
-		st->hal = &nvi_hal_20628;
-		part_name = NVI_NAME_ICM20628;
-		break;
-
-	case ICM20630_ID:
-		st->hal = &nvi_hal_20628;
-		part_name = NVI_NAME_ICM20630;
-		break;
-
-	case ICM20632_ID:
-		st->hal = &nvi_hal_20628;
-		part_name = NVI_NAME_ICM20632;
-		break;
-
-	default:
-		return -ENODEV;
-	}
-
-	/* populate st->cfg based on max_range setting */
-	nvi_max_range(st, DEV_ACCEL, INV_FS_02G);
-	nvi_max_range(st, DEV_ANGLVEL, INV_FSR_2000DPS);
-	nvi_max_range(st, DEV_TEMP, 0);
-	/* populate the rest of st->cfg */
-	for (i = 0; i < DEV_N; i++) {
-		st->cfg[i].part = part_name;
-		st->cfg[i].version = st->hal->dev[i]->version;
-		st->cfg[i].milliamp.ival = st->hal->dev[i]->milliamp.ival;
-		st->cfg[i].milliamp.fval = st->hal->dev[i]->milliamp.fval;
-		st->cfg[i].delay_us_min = st->hal->smplrt[i]->delay_us_min;
-		st->cfg[i].delay_us_max = st->hal->smplrt[i]->delay_us_max;
-	}
-	return 0;
-}
-
-static int nvi_id_dev(struct nvi_state *st, const char *name)
-{
-	u8 dev_id;
-	unsigned int i;
-	int ret;
-
-	if (!strcmp(name, "mpu6xxx"))
-		dev_id = 0xFF;
-	else if (!strcmp(name, "mpu6050"))
-		dev_id = MPU6050_ID;
-	else if (!strcmp(name, "mpu6500"))
-		dev_id = MPU6500_ID;
-	else if (!strcmp(name, "mpu6515"))
-		dev_id = MPU6515_ID;
-	else if (!strcmp(name, "mpu9150"))
-		dev_id = MPU6050_ID;
-	else if (!strcmp(name, "mpu9250"))
-		dev_id = MPU9250_ID;
-	else if (!strcmp(name, "mpu9350"))
-		dev_id = MPU9350_ID;
-	else if (!strcmp(name, "icm20628"))
-		dev_id = ICM20628_ID;
-	else if (!strcmp(name, "icm20630"))
-		dev_id = ICM20630_ID;
-	else if (!strcmp(name, "icm20632"))
-		dev_id = ICM20632_ID;
-	else
-		return -ENODEV;
-
-	if (dev_id == 0xFF) {
-		st->hal = &nvi_hal_6050;
-		nvi_pm_wr(st, 0, 0, 0);
-		ret = nvi_i2c_read(st, st->i2c_addr,
-				   nvi_hal_reg_6050.who_am_i.reg, 1, &dev_id);
-		if (ret) {
-			dev_err(&st->i2c->dev, "%s AUTO ID FAILED\n",
-				__func__);
-			return -ENODEV;
-		}
-
-		ret = nvi_id_hal(st, dev_id);
-		if (ret) {
-			st->hal = &nvi_hal_20628;
-			/* cause a master reset by disabling regulators */
-			nvs_vregs_disable(&st->i2c->dev, st->vreg,
-					  ARRAY_SIZE(nvi_vregs));
-			ret = nvi_pm_wr(st, 0, 0, 0);
-			ret = nvi_i2c_read(st, st->i2c_addr,
-					   nvi_hal_reg_20628.who_am_i.reg,
-					   1, &dev_id);
-			if (ret) {
-				dev_err(&st->i2c->dev, "%s AUTO ID FAILED\n",
-					__func__);
-				return -ENODEV;
-			}
-
-			ret = nvi_id_hal(st, dev_id);
-			if (ret) {
-				dev_err(&st->i2c->dev, "%s AUTO ID FAILED\n",
-					__func__);
-				return -ENODEV;
-			}
-		}
-	} else {
-		nvi_id_hal(st, dev_id);
-		/* cause a master reset by disabling regulators */
-		nvs_vregs_disable(&st->i2c->dev, st->vreg,
-				  ARRAY_SIZE(nvi_vregs));
-		nvi_pm_wr(st, 0, 0, 0);
-	}
-	ret = nvs_vregs_sts(st->vreg, ARRAY_SIZE(nvi_vregs));
-	if (ret < 0)
-		/* regulators aren't supported so manually do master reset */
-		nvi_wr_pwr_mgmt_1(st, BIT_H_RESET);
-	ret = st->hal->init(st);
-	for (i = 0; i < AXIS_N; i++) {
-		st->rom_accel_offset[i] = (s16)st->rc.accel_offset[i];
-		st->rom_gyro_offset[i] = (s16)st->rc.gyro_offset[i];
-		st->input_accel_offset[i] = 0;
-		st->input_gyro_offset[i] = 0;
-	}
-	dev_info(&st->i2c->dev, "%s: DT=%s ID=%x USING: %s\n",
-		 __func__, name, dev_id, st->cfg[0].part);
-	return ret;
-}
-
-static int nvi_id_i2c(struct nvi_state *st, const struct i2c_device_id *id)
-{
-	int i;
-	int ret;
-
-	for (i = 0; i < ARRAY_SIZE(nvi_i2c_addrs); i++) {
-		if (st->i2c->addr == nvi_i2c_addrs[i])
-			break;
-	}
-
-	if (i < ARRAY_SIZE(nvi_i2c_addrs)) {
-		st->i2c_addr = st->i2c->addr;
-		ret = nvi_id_dev(st, id->name);
-	} else {
-		for (i = 0; i < ARRAY_SIZE(nvi_i2c_addrs); i++) {
-			st->i2c_addr = nvi_i2c_addrs[i];
-			ret = nvi_id_dev(st, NVI_NAME);
-			if (!ret)
-				break;
-		}
-	}
-	return ret;
-}
-
-static int nvi_of_dt(struct nvi_state *st, struct device_node *dn)
+/* device tree parameters before HAL initialized */
+static int nvi_of_dt_pre(struct nvi_state *st, struct device_node *dn)
 {
 	u32 tmp;
-	int ret;
+	char str[64];
+	unsigned int i;
 
-	/* just test if global disable */
-	ret = nvs_of_dt(dn, NULL, NULL);
-	if (ret == -ENODEV)
-		return -ENODEV;
+	for (i = 0; i < ARRAY_SIZE(nvi_cfg_dflt); i++)
+		memcpy(&st->snsr[i].cfg, &nvi_cfg_dflt[i],
+		       sizeof(st->snsr[i].cfg));
+	st->snsr[DEV_AUX].cfg.name = "auxiliary";
+	st->en_msk = (1 << EN_STDBY);
+	st->bypass_timeout_ms = NVI_BYPASS_TIMEOUT_MS;
+	if (!dn)
+		return -EINVAL;
 
-	/* device specific parameters */
-	if (!of_property_read_u32(dn, "invensense,standby_en", &tmp)) {
+	/* driver specific parameters */
+	if (!of_property_read_u32(dn, "standby_en", &tmp)) {
 		if (tmp)
-			st->master_enable |= (1 << EN_STDBY);
+			st->en_msk |= (1 << EN_STDBY);
 		else
-			st->master_enable &= ~(1 << EN_STDBY);
+			st->en_msk &= ~(1 << EN_STDBY);
 	}
-	of_property_read_u32(dn, "invensense,lpa_delay_us",
-			     &st->chip_config.lpa_delay_us);
-	if (st->chip_config.lpa_delay_us)
-		st->master_enable |= (1 << EN_LPA);
-	else
-		st->master_enable &= ~(1 << EN_LPA);
-	of_property_read_u32(dn, "invensense,gyro_start_delay_ns",
-			     (u32 *)&st->chip_config.gyro_start_delay_ns);
-	of_property_read_u32(dn, "invensense,bypass_timeout_ms",
-			     &st->chip_config.bypass_timeout_ms);
-	of_property_read_u32(dn, "invensense,temp_fifo_en",
-			     &st->chip_config.temp_fifo_en);
-	of_property_read_u32(dn, "invensense,fifo_threshold",
-			     &st->chip_config.fifo_thr);
-	if (!of_property_read_u32(dn, "invensense,fsr", &tmp))
-		st->chip_config.fsr = tmp;
-	if (!of_property_read_u32(dn, "invensense,lpf", &tmp))
-		st->chip_config.lpf = tmp;
+	of_property_read_u32(dn, "bypass_timeout_ms", &st->bypass_timeout_ms);
+	for (i = 0; i < DEV_N_AUX; i++) {
+		snprintf(str, sizeof(str), "%s_push_delay_ns",
+			 st->snsr[i].cfg.name);
+		if (!of_property_read_u32(dn, str, &tmp))
+			st->snsr[i].push_delay_ns = (s64)tmp;
+	}
+
 	return 0;
 }
 
-static int nvi_probe(struct i2c_client *client,
-		     const struct i2c_device_id *id)
+/* device tree parameters after HAL initialized */
+static void nvi_of_dt_post(struct nvi_state *st, struct device_node *dn)
 {
-	struct nvi_state *st;
+	u32 tmp;
+	char str[64];
+	unsigned int msk;
+	unsigned int i;
+	unsigned int j;
+
+	/* sensor specific parameters */
+	for (i = 0; i < DEV_N; i++)
+		nvs_of_dt(dn, &st->snsr[i].cfg, NULL);
+
+	/* nvs_of_dt doesn't allow REPORTING_MODE_MASK bits to change so we
+	 * allow for it here so that we can configure whether batch sysfs nodes
+	 * are populated to be used to configure significant motion parameters
+	 * in realtime.
+	 */
+	if (!of_property_read_u32(dn, "significant_motion_flags", &tmp)) {
+		msk = SENSOR_FLAG_READONLY_MASK & ~REPORTING_MODE_MASK;
+		tmp &= ~msk;
+		st->snsr[DEV_SM].cfg.flags &= msk;
+		st->snsr[DEV_SM].cfg.flags |= tmp;
+	}
+	for (i = 0; i < DEV_N; i++) {
+		tmp = 0;
+		for (j = 0; j < 9; j++)
+			tmp |= st->snsr[i].cfg.matrix[j];
+		if (tmp) {
+			/* sensor has a matrix */
+			snprintf(str, sizeof(str), "%s_matrix_enable",
+				 st->snsr[i].cfg.name);
+			if (!of_property_read_u32(dn, str, &tmp)) {
+				/* matrix override */
+				if (tmp)
+					/* apply matrix within kernel */
+					st->snsr[i].matrix = true;
+				else
+					/* HAL/fusion will handle matrix */
+					st->snsr[i].matrix = false;
+			}
+		}
+	}
+
+	/* sensor overrides that enable the DMP.
+	 * If the sensor is specific to the DMP and this override is
+	 * disable, then the virtual sensor is removed.
+	 */
+	if (st->hal->dmp) {
+		st->dmp_dev_msk = st->hal->dmp->dev_msk;
+		st->dmp_en_msk = st->hal->dmp->en_msk;
+		for (i = 0; i < DEV_N_AUX; i++) {
+			snprintf(str, sizeof(str), "%s_dmp_en",
+				 st->snsr[i].cfg.name);
+			if (!of_property_read_u32(dn, str, &tmp)) {
+				if (tmp) {
+					msk = 1 << i;
+					if (MSK_DEV_DMP & msk)
+						st->dmp_dev_msk |= msk;
+					st->dmp_en_msk |= msk;
+				} else {
+					msk = ~(1 << i);
+					if (MSK_DEV_DMP & (1 << i))
+						st->dmp_dev_msk &= msk;
+					st->dmp_en_msk &= msk;
+				}
+			}
+		}
+	}
+}
+
+static int nvi_init(struct nvi_state *st,
+		    const struct i2c_device_id *i2c_dev_id)
+{
 	struct mpu_platform_data *pdata;
+	signed char matrix[9];
 	unsigned int i;
 	unsigned int n;
 	int ret;
 
-	dev_info(&client->dev, "%s %s\n", __func__, id->name);
+	nvi_of_dt_pre(st, st->i2c->dev.of_node);
+	nvi_pm_init(st);
+	ret = nvi_id_dev(st, i2c_dev_id);
+	if (ret)
+		return ret;
+
+	if (st->i2c->dev.of_node) {
+		nvi_of_dt_post(st, st->i2c->dev.of_node);
+	} else {
+		pdata = dev_get_platdata(&st->i2c->dev);
+		if (pdata) {
+			memcpy(&st->snsr[DEV_ACC].cfg.matrix,
+			       &pdata->orientation,
+			       sizeof(st->snsr[DEV_ACC].cfg.matrix));
+			memcpy(&st->snsr[DEV_GYR].cfg.matrix,
+			       &pdata->orientation,
+			       sizeof(st->snsr[DEV_GYR].cfg.matrix));
+		} else {
+			dev_err(&st->i2c->dev, "%s dev_get_platdata ERR\n",
+				__func__);
+			return -ENODEV;
+		}
+	}
+
+	if (st->en_msk & (1 << FW_LOADED))
+		ret = 0;
+	else
+		ret = nvi_dmp_fw(st);
+	if (ret) {
+		/* remove DMP dependent sensors */
+		n = MSK_DEV_DMP;
+	} else {
+		dev_info(&st->i2c->dev, "%s DMP FW loaded\n", __func__);
+		/* remove DMP dependent sensors not supported by this DMP */
+		n = MSK_DEV_DMP ^ st->dmp_dev_msk;
+	}
+	if (n) {
+		for (i = 0; i < DEV_N; i++) {
+			if (n & (1 << i))
+				st->snsr[i].cfg.snsr_id = -1;
+		}
+	}
+
+	nvi_nvs_fn.sts = &st->sts;
+	nvi_nvs_fn.errs = &st->errs;
+	st->nvs = nvs_iio();
+	if (st->nvs == NULL)
+		return -ENODEV;
+
+	n = 0;
+	for (i = 0; i < DEV_N; i++) {
+		if (st->snsr[i].matrix) {
+			/* matrix handled at kernel so remove from NVS */
+			memcpy(matrix, st->snsr[i].cfg.matrix, sizeof(matrix));
+			memset(st->snsr[i].cfg.matrix, 0,
+			       sizeof(st->snsr[i].cfg.matrix));
+		}
+		ret = st->nvs->probe(&st->snsr[i].nvs_st, st, &st->i2c->dev,
+				     &nvi_nvs_fn, &st->snsr[i].cfg);
+		if (!ret) {
+			st->snsr[i].cfg.snsr_id = i;
+			if (st->snsr[i].matrix)
+				memcpy(st->snsr[i].cfg.matrix, matrix,
+				       sizeof(st->snsr[i].cfg.matrix));
+			nvi_max_range(st, i, st->snsr[i].cfg.max_range.ival);
+			n++;
+		}
+	}
+	if (!n)
+		return -ENODEV;
+
+	/* restore SENSOR_FLAG_ONE_SHOT_MODE for significant motion in case it
+	 * was cleared to allow realtime calibration with batch.
+	 */
+	st->snsr[DEV_SM].cfg.flags &= ~REPORTING_MODE_MASK;
+	st->snsr[DEV_SM].cfg.flags |= SENSOR_FLAG_ONE_SHOT_MODE;
+	ret = request_threaded_irq(st->i2c->irq, nvi_handler, nvi_thread,
+				   IRQF_TRIGGER_RISING, NVI_NAME, st);
+	if (ret) {
+		dev_err(&st->i2c->dev, "%s req_threaded_irq ERR %d\n",
+			__func__, ret);
+		return -ENOMEM;
+	}
+
+	nvi_pm(st, __func__, NVI_PM_AUTO);
+	nvi_rc_clr(st, __func__);
+	st->rc_dis = false; /* enable register cache after initialization */
+	nvi_state_local = st;
+	return 0;
+}
+
+static void nvi_dmp_fw_load_worker(struct work_struct *work)
+{
+	struct nvi_pdata *pd = container_of(work, struct nvi_pdata,
+					    fw_load_work);
+	struct nvi_state *st = &pd->st;
+	int ret;
+
+	ret = nvi_init(st, pd->i2c_dev_id);
+	if (ret) {
+		dev_err(&st->i2c->dev, "%s ERR %d\n", __func__, ret);
+		nvi_remove(st->i2c);
+	}
+	dev_info(&st->i2c->dev, "%s done\n", __func__);
+}
+
+static int nvi_probe(struct i2c_client *client,
+		     const struct i2c_device_id *i2c_dev_id)
+{
+	struct nvi_pdata *pd;
+	struct nvi_state *st;
+	int ret;
+
+	dev_info(&client->dev, "%s %s\n", __func__, i2c_dev_id->name);
 	if (!client->irq) {
 		dev_err(&client->dev, "%s ERR: no interrupt\n", __func__);
 		return -ENODEV;
 	}
 
-	st = devm_kzalloc(&client->dev, sizeof(*st), GFP_KERNEL);
-	if (st == NULL) {
-		dev_err(&client->dev, "%s devm_kzalloc ERR\n", __func__);
+	/* just test if global disable */
+	ret = nvs_of_dt(client->dev.of_node, NULL, NULL);
+	if (ret == -ENODEV) {
+		dev_info(&client->dev, "%s DT disabled\n", __func__);
+		return -ENODEV;
+	}
+
+	pd = devm_kzalloc(&client->dev, sizeof(*pd), GFP_KERNEL);
+	if (pd == NULL)
 		return -ENOMEM;
-	}
 
-	i2c_set_clientdata(client, st);
+	st = &pd->st;
+	i2c_set_clientdata(client, pd);
+	st->rc_dis = true; /* disable register cache during initialization */
 	st->i2c = client;
-	nvi_init_config(st);
-	if (client->dev.of_node) {
-		ret = nvi_of_dt(st, client->dev.of_node);
-		if (ret) {
-			if (ret == -ENODEV) {
-				dev_info(&client->dev, "%s DT disabled\n",
-					 __func__);
-			} else {
-				dev_err(&client->dev, "%s _of_dt ERR\n",
-					__func__);
-				ret = -ENODEV;
-			}
-			goto nvi_probe_err;
-		}
-	} else {
-		pdata = (struct mpu_platform_data *)
-						dev_get_platdata(&client->dev);
-		if (pdata) {
-			memcpy(&st->cfg[DEV_ACCEL].matrix,
-			       &pdata->orientation, sizeof(st->cfg[0].matrix));
-			memcpy(&st->cfg[DEV_ANGLVEL].matrix,
-			       &pdata->orientation, sizeof(st->cfg[0].matrix));
-		} else {
-			dev_err(&client->dev, "%s dev_get_platdata ERR\n",
-				__func__);
-			ret = -EINVAL;
-			goto nvi_probe_err;
-		}
-	}
-
-	nvi_pm_init(st);
-	ret = nvi_id_i2c(st, id);
-	if (ret) {
-		dev_err(&client->dev, "%s ERR: nvi_id_i2c\n", __func__);
-		goto nvi_probe_err;
-	}
-
-	nvi_fn_dev.sts = &st->sts;
-	nvi_fn_dev.errs = &st->errs;
-	st->nvs = nvs_iio();
-	if (st->nvs == NULL) {
-		ret = -ENODEV;
-		goto nvi_probe_err;
-	}
-
-	n = 0;
-	for (i = 0; i < DEV_N; i++) {
-		nvs_of_dt(client->dev.of_node, &st->cfg[i], NULL);
-		ret = st->nvs->probe(&st->nvs_st[i], st, &client->dev,
-				     &nvi_fn_dev, &st->cfg[i]);
-		if (!ret) {
-			n++;
-			if (st->cfg[i].snsr_id == SENSOR_TYPE_TEMPERATURE)
-				/* SENSOR_TYPE_TEMPERATURE is only used to tell
-				 * NVS what type of sensor it is since this is
-				 * an unknown sensor name.  snsr_id can now be
-				 * changed to DEV_TEMP for any future NVS calls
-				 */
-				st->cfg[i].snsr_id = DEV_TEMP;
-		}
-	}
-	if (!n) {
-		dev_err(&client->dev, "%s nvs_probe ERR\n", __func__);
-		ret = -ENODEV;
-		goto nvi_probe_err;
-	}
-
-	ret = request_threaded_irq(st->i2c->irq,
-				   nvi_irq_handler, nvi_irq_thread,
-				   IRQF_TRIGGER_RISING, NVI_NAME, st);
-	if (ret) {
-		dev_err(&client->dev, "%s req_threaded_irq ERR %d\n",
-			__func__, ret);
-		ret = -ENOMEM;
-		goto nvi_probe_err;
-	}
-
-	nvi_pm(st, NVI_PM_AUTO);
-	nvi_state_local = st;
-	dev_info(&client->dev, "%s done\n", __func__);
+	pd->i2c_dev_id = i2c_dev_id;
+	/* Init fw load worker thread */
+	INIT_WORK(&pd->fw_load_work, nvi_dmp_fw_load_worker);
+	schedule_work(&pd->fw_load_work);
 	return 0;
-
-nvi_probe_err:
-	dev_err(&client->dev, "%s ERR %d\n", __func__, ret);
-	nvi_remove(client);
-	return ret;
 }
-
-static struct i2c_device_id nvi_i2c_device_id[] = {
-	{ NVI_NAME, 0 },
-	{ "mpu6050", 0 },
-	{ "mpu6500", 0 },
-	{ "mpu6515", 0 },
-	{ "mpu9150", 0 },
-	{ "mpu9250", 0 },
-	{ "mpu9350", 0 },
-	{ "icm20628", 0 },
-	{ "icm20632", 0 },
-	{}
-};
 
 MODULE_DEVICE_TABLE(i2c, nvi_i2c_device_id);
 
@@ -4464,13 +4323,14 @@ static const struct of_device_id nvi_of_match[] = {
 	{ .compatible = "invensense,mpu9250", },
 	{ .compatible = "invensense,mpu9350", },
 	{ .compatible = "invensense,icm20628", },
+	{ .compatible = "invensense,icm20630", },
 	{ .compatible = "invensense,icm20632", },
 	{}
 };
 
 MODULE_DEVICE_TABLE(of, nvi_of_match);
 
-static struct i2c_driver nvi_driver = {
+static struct i2c_driver nvi_i2c_driver = {
 	.class				= I2C_CLASS_HWMON,
 	.probe				= nvi_probe,
 	.remove				= nvi_remove,
@@ -4484,7 +4344,7 @@ static struct i2c_driver nvi_driver = {
 	.id_table			= nvi_i2c_device_id,
 };
 
-module_i2c_driver(nvi_driver);
+module_i2c_driver(nvi_i2c_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("NVidiaInvensense driver");

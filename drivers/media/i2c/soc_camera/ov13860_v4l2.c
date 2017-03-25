@@ -1,7 +1,7 @@
 /*
  * ov13860.c - ov13860 sensor driver
  *
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -330,15 +330,23 @@ static int ov13860_power_on(struct camera_common_data *s_data)
 	if (err)
 		goto ov13860_iovdd_fail;
 
+	if (pw->dvdd)
+		err = regulator_enable(pw->dvdd);
+	if (err)
+		goto ov13860_dvdd_fail;
+
 	usleep_range(10, 20);
 	if (pw->pwdn_gpio)
 		gpio_set_value(pw->pwdn_gpio, 1);
 	if (pw->reset_gpio)
 		gpio_set_value(pw->reset_gpio, 1);
 
-	usleep_range(1000, 2000);
+	usleep_range(2000, 3000);
 	pw->state = SWITCH_ON;
 	return 0;
+
+ov13860_dvdd_fail:
+	regulator_disable(pw->iovdd);
 
 ov13860_iovdd_fail:
 	regulator_disable(pw->avdd);
@@ -374,6 +382,8 @@ static int ov13860_power_off(struct camera_common_data *s_data)
 	if (pw->pwdn_gpio)
 		gpio_set_value(pw->pwdn_gpio, 0);
 
+	if (pw->dvdd)
+		regulator_disable(pw->dvdd);
 	if (pw->iovdd)
 		regulator_disable(pw->iovdd);
 	if (pw->avdd)
@@ -513,6 +523,8 @@ static struct v4l2_subdev_video_ops ov13860_subdev_video_ops = {
 	.try_mbus_fmt	= camera_common_try_fmt,
 	.enum_mbus_fmt	= camera_common_enum_fmt,
 	.g_mbus_config	= camera_common_g_mbus_config,
+	.enum_framesizes	= camera_common_enum_framesizes,
+	.enum_frameintervals	= camera_common_enum_frameintervals,
 };
 
 static struct v4l2_subdev_core_ops ov13860_subdev_core_ops = {
@@ -1047,6 +1059,8 @@ static struct camera_common_pdata *ov13860_parse_dt(struct i2c_client *client)
 	struct device_node *np = client->dev.of_node;
 	struct camera_common_pdata *board_priv_pdata;
 	const struct of_device_id *match;
+	int gpio;
+	int err;
 
 	match = of_match_device(ov13860_of_match, &client->dev);
 	if (!match) {
@@ -1061,9 +1075,26 @@ static struct camera_common_pdata *ov13860_parse_dt(struct i2c_client *client)
 		return NULL;
 	}
 
-	of_property_read_string(np, "mclk", &board_priv_pdata->mclk_name);
-	board_priv_pdata->pwdn_gpio = of_get_named_gpio(np, "pwdn-gpios", 0);
-	board_priv_pdata->reset_gpio = of_get_named_gpio(np, "reset-gpios", 0);
+	err = of_property_read_string(np, "mclk",
+				      &board_priv_pdata->mclk_name);
+	if (err) {
+		dev_err(&client->dev, "mclk not in DT\n");
+		goto error;
+	}
+
+	gpio = of_get_named_gpio(np, "pwdn-gpios", 0);
+	if (gpio < 0) {
+		dev_dbg(&client->dev, "pwdn gpios not in DT\n");
+		gpio = 0;
+	}
+	board_priv_pdata->pwdn_gpio = (unsigned int)gpio;
+
+	gpio = of_get_named_gpio(np, "reset-gpios", 0);
+	if (gpio < 0) {
+		dev_dbg(&client->dev, "reset gpios not in DT\n");
+		gpio = 0;
+	}
+	board_priv_pdata->reset_gpio = (unsigned int)gpio;
 
 	of_property_read_string(np, "avdd-reg",
 			&board_priv_pdata->regulators.avdd);
@@ -1077,6 +1108,10 @@ static struct camera_common_pdata *ov13860_parse_dt(struct i2c_client *client)
 	board_priv_pdata->has_eeprom = of_property_read_bool(np, "has-eeprom");
 
 	return board_priv_pdata;
+
+error:
+	devm_kfree(&client->dev, board_priv_pdata);
+	return NULL;
 }
 
 static int ov13860_probe(struct i2c_client *client,
@@ -1140,11 +1175,13 @@ static int ov13860_probe(struct i2c_client *client,
 	common_data->ctrl_handler	= &priv->ctrl_handler;
 	common_data->i2c_client		= client;
 	common_data->frmfmt		= &ov13860_frmfmt[0];
+	common_data->color_fmts		= ov13860_color_fmts;
 	common_data->colorfmt		= camera_common_find_datafmt(
 					  OV13860_DEFAULT_DATAFMT);
 	common_data->power		= &priv->power;
 	common_data->priv		= (void *)priv;
 	common_data->numfmts		= ARRAY_SIZE(ov13860_frmfmt);
+	common_data->num_color_fmts	= ARRAY_SIZE(ov13860_color_fmts);
 	common_data->def_mode		= OV13860_DEFAULT_MODE;
 	common_data->def_width		= OV13860_DEFAULT_WIDTH;
 	common_data->def_height		= OV13860_DEFAULT_HEIGHT;

@@ -22,7 +22,7 @@
 #define ACR_COMPLETION_TIMEOUT_MS 10000 /*in msec */
 
 /*chip specific defines*/
-#define MAX_SUPPORTED_LSFM 2 /*PMU, FECS, GPCCS*/
+#define MAX_SUPPORTED_LSFM 3 /*PMU, FECS, GPCCS*/
 #define LSF_UCODE_DATA_ALIGNMENT 4096
 
 #define GM20B_PMU_UCODE_IMAGE "gpmu_ucode_image.bin"
@@ -51,8 +51,10 @@
  * Defines a common Light Secure Falcon identifier.
  */
 #define LSF_FALCON_ID_PMU       (0)
+#define LSF_FALCON_ID_RESERVED  (1)
 #define LSF_FALCON_ID_FECS      (2)
 #define LSF_FALCON_ID_GPCCS     (3)
+#define LSF_FALCON_ID_END       (4)
 #define LSF_FALCON_ID_INVALID   (0xFFFFFFFF)
 
 /*!
@@ -76,6 +78,8 @@
 #define NV_FLCN_ACR_LSF_FLAG_LOAD_CODE_AT_0_TRUE        1
 #define NV_FLCN_ACR_LSF_FLAG_DMACTL_REQ_CTX_FALSE       0
 #define NV_FLCN_ACR_LSF_FLAG_DMACTL_REQ_CTX_TRUE        4
+#define NV_FLCN_ACR_LSF_FLAG_FORCE_PRIV_LOAD_TRUE       8
+#define NV_FLCN_ACR_LSF_FLAG_FORCE_PRIV_LOAD_FALSE      0
 
 /*!
  * Light Secure WPR Content Alignments
@@ -199,6 +203,8 @@ struct flcn_bl_dmem_desc {
 	u32    code_entry_point;
 	u32    data_dma_base;
 	u32    data_size;
+	u32    code_dma_base1;
+	u32    data_dma_base1;
 };
 
 /*!
@@ -215,6 +221,9 @@ struct loader_config {
 	u32 overlay_dma_base;  /*<! upper 32-bits of the 40-bit dma address*/
 	u32 argc;
 	u32 argv;
+	u32 code_dma_base1;		/*<! upper 7 bits of 47-bit dma address*/
+	u32 data_dma_base1;		/*<! upper 7 bits of 47-bit dma address*/
+	u32 overlay_dma_base1;	/*<! upper 7 bits of the 47-bit dma address*/
 };
 
 /*!
@@ -373,8 +382,7 @@ struct acr_fw_header {
 };
 
 struct acr_gm20b {
-	u64 ucode_blob_start;
-	u32 ucode_blob_size;
+	struct mem_desc ucode_blob;
 	struct bin_hdr *bl_bin_hdr;
 	struct hsflcn_bl_desc *pmu_hsbl_desc;
 	struct bin_hdr *hsbin_hdr;

@@ -137,6 +137,10 @@ struct usb_hub *usb_hub_to_struct_hub(struct usb_device *hdev)
 
 static int usb_device_supports_lpm(struct usb_device *udev)
 {
+	/* Some devices have trouble with LPM */
+	if (udev->quirks & USB_QUIRK_NO_LPM)
+		return 0;
+
 	/* USB 2.1 (and greater) devices indicate LPM support through
 	 * their USB 2.0 Extended Capabilities BOS descriptor.
 	 */
@@ -2177,7 +2181,9 @@ static void xotg_hnp_polling_work(struct work_struct *work)
 			/* OTG MESSAGE: report errors here,
 			 * customize to match your product.
 			 */
-			dev_err(&udev->dev, "can't set HNP mode %d\n", ret);
+			dev_err(&udev->dev,
+			"No response from Device. can not set HNP mode %d\n",
+									 ret);
 			bus->b_hnp_enable = 0;
 		} else {
 			bus->b_hnp_enable = 1;
@@ -2217,6 +2223,7 @@ static void xotg_hnp_polling_work(struct work_struct *work)
 static int usb_enumerate_device_otg(struct usb_device *udev)
 {
 	int err = 0;
+	struct usb_hcd *hcd = bus_to_hcd(udev->bus);
 
 #ifdef	CONFIG_USB_OTG
 	bool otgv13 = false;
@@ -2329,12 +2336,15 @@ static int usb_enumerate_device_otg(struct usb_device *udev)
 		"quirks=%x, is_b_host=%d\n", udev->quirks,
 			udev->bus->is_b_host);
 
-	if ((udev->quirks & USB_QUIRK_OTG_COMPLIANCE) &&
-		(udev->bus->is_b_host || otgv13)) {
-		dev_info(&udev->dev, "quick HNP set for PET\n");
-		udev->bus->otgv13_hnp = 1;
-		schedule_delayed_work(&udev->bus->hnp_polling_work,
-			msecs_to_jiffies(70));
+	if (udev->quirks & USB_QUIRK_OTG_COMPLIANCE) {
+		usb_phy_notify_otg_test_device(hcd->phy);
+
+		if (udev->bus->is_b_host || otgv13) {
+			dev_info(&udev->dev, "quick HNP set for PET\n");
+			udev->bus->otgv13_hnp = 1;
+			schedule_delayed_work(&udev->bus->hnp_polling_work,
+				msecs_to_jiffies(70));
+		}
 	}
 
 	if (!is_targeted(udev)) {
@@ -3409,10 +3419,10 @@ int usb_port_resume(struct usb_device *udev, pm_message_t msg)
 		dev_dbg(hub->intfdev, "can't resume port %d, status %d\n",
 				port1, status);
 	} else {
-		/* drive resume for at least 20 msec */
+		/* drive resume for USB_RESUME_TIMEOUT msec */
 		dev_dbg(&udev->dev, "usb %sresume\n",
 				(PMSG_IS_AUTO(msg) ? "auto-" : ""));
-		msleep(25);
+		msleep(USB_RESUME_TIMEOUT);
 
 		/* Virtual root hubs can trigger on GET_PORT_STATUS to
 		 * stop resume signaling.  Then finish the resume
@@ -3971,6 +3981,9 @@ void usb_enable_lpm(struct usb_device *udev)
 			udev->state < USB_STATE_DEFAULT)
 		return;
 
+	if (!(udev->quirks & USB_QUIRK_ENABLE_U1U2))
+		return;
+
 	udev->lpm_disable_count--;
 	hcd = bus_to_hcd(udev->bus);
 	/* Double check that we can both enable and disable LPM.
@@ -4418,6 +4431,8 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 		goto fail;
 	}
 
+	usb_detect_quirks(udev);
+
 	if (udev->wusb == 0 && le16_to_cpu(udev->descriptor.bcdUSB) >= 0x0201) {
 		retval = usb_get_bos_descriptor(udev);
 		if (!retval) {
@@ -4660,7 +4675,6 @@ static void hub_port_connect_change(struct usb_hub *hub, int port1,
 		if (status < 0)
 			goto loop;
 
-		usb_detect_quirks(udev);
 		if (udev->quirks & USB_QUIRK_DELAY_INIT)
 			msleep(1000);
 

@@ -22,11 +22,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <soc/tegra/tegra_bpmp.h>
-#include "../../../arch/arm/mach-tegra/iomap.h"
 #include "bpmp.h"
-
-#define DO_ACK			(1 << 0)
-#define RING_DOORBELL		(1 << 1)
 
 /* FIXME: reduce this to 1 sec (WAR for linsim irq bug) */
 #ifdef CONFIG_ARCH_TEGRA_18x_SOC
@@ -42,68 +38,6 @@ static struct completion completion[NR_THREAD_CH];
 int connected;
 static DEFINE_SPINLOCK(lock);
 
-/*
- * How the token bits are interpretted
- *
- * SL_SIGL (b00): slave ch in signalled state
- * SL_QUED (b01): slave ch is in queue
- * MA_FREE (b10): master ch is free
- * MA_ACKD (b11): master ch is acked
- *
- * Ideally, the slave should only set bits while the
- * master do only clear them. But there is an exception -
- * see bpmp_ack_master()
- */
-#define CH_MASK(ch)	(0x3 << ((ch) * 2))
-#define SL_SIGL(ch)	(0x0 << ((ch) * 2))
-#define SL_QUED(ch)	(0x1 << ((ch) * 2))
-#define MA_FREE(ch)	(0x2 << ((ch) * 2))
-#define MA_ACKD(ch)	(0x3 << ((ch) * 2))
-
-static u32 bpmp_ch_sta(int ch)
-{
-	return bpmp_mail_token() & CH_MASK(ch);
-}
-
-static bool bpmp_master_free(int ch)
-{
-	return bpmp_ch_sta(ch) == MA_FREE(ch);
-}
-
-static bool bpmp_slave_signalled(int ch)
-{
-	return bpmp_ch_sta(ch) == SL_SIGL(ch);
-}
-
-static bool bpmp_master_acked(int ch)
-{
-	return bpmp_ch_sta(ch) == MA_ACKD(ch);
-}
-
-static void bpmp_signal_slave(int ch)
-{
-	bpmp_mail_token_clr(CH_MASK(ch));
-}
-
-static void bpmp_ack_master(int ch, int flags)
-{
-	bpmp_mail_token_set(MA_ACKD(ch));
-
-	/*
-	 * We have to violate the bit modification rule while
-	 * moving from SL_QUED to MA_FREE (DO_ACK not set) so that
-	 * the channel won't be in ACKD state forever.
-	 */
-	if (!(flags & DO_ACK))
-		bpmp_mail_token_clr(MA_ACKD(ch) ^ MA_FREE(ch));
-}
-
-/* MA_ACKD to MA_FREE */
-static void bpmp_free_master(int ch)
-{
-	bpmp_mail_token_clr(MA_ACKD(ch) ^ MA_FREE(ch));
-}
-
 uint32_t tegra_bpmp_mail_readl(int ch, int offset)
 {
 	u32 *data = (u32 *)(channel_area[ch].ib->data + offset);
@@ -111,26 +45,14 @@ uint32_t tegra_bpmp_mail_readl(int ch, int offset)
 }
 EXPORT_SYMBOL(tegra_bpmp_mail_readl);
 
-void tegra_bpmp_mail_return_data(int ch, int code, void *data, int sz)
+int tegra_bpmp_read_data(unsigned int ch, void *data, size_t sz)
 {
-	struct mb_data *p;
-	int flags;
-
-	if (sz > MSG_DATA_SZ) {
-		WARN_ON(1);
-		return;
-	}
-
-	p = channel_area[ch].ob;
-	p->code = code;
-	memcpy(p->data, data, sz);
-
-	flags = channel_area[ch].ib->flags;
-	bpmp_ack_master(ch, flags);
-	if (flags & RING_DOORBELL)
-		bpmp_ring_doorbell();
+	if (!data || sz > MSG_DATA_SZ || ch >= NR_CHANNELS)
+		return -EINVAL;
+	memcpy(data, channel_area[ch].ib->data, sz);
+	return 0;
 }
-EXPORT_SYMBOL(tegra_bpmp_mail_return_data);
+EXPORT_SYMBOL(tegra_bpmp_read_data);
 
 void tegra_bpmp_mail_return(int ch, int code, int v)
 {
@@ -146,7 +68,7 @@ static struct completion *bpmp_completion_obj(int ch)
 
 static void bpmp_signal_thread(int ch)
 {
-	struct mb_data *p = channel_area[ch].ib;
+	struct mb_data *p = channel_area[ch].ob;
 	struct completion *w;
 
 	if (!(p->flags & RING_DOORBELL))
@@ -206,7 +128,7 @@ static int bpmp_wait_master_free(int ch)
 
 static void __bpmp_write_ch(int ch, int mrq, int flags, void *data, int sz)
 {
-	struct mb_data *p = channel_area[ch].ib;
+	struct mb_data *p = channel_area[ch].ob;
 
 	p->code = mrq;
 	p->flags = flags;
@@ -259,7 +181,7 @@ static int bpmp_write_threaded_ch(int *ch, int mrq, void *data, int sz)
 
 static int __bpmp_read_ch(int ch, void *data, int sz)
 {
-	struct mb_data *p = channel_area[ch].ob;
+	struct mb_data *p = channel_area[ch].ib;
 	if (data)
 		memcpy(data, p->data, sz);
 	bpmp_free_master(ch);
@@ -300,11 +222,24 @@ static int bpmp_wait_ack(int ch)
 	return -ETIMEDOUT;
 }
 
+static int bpmp_valid_txfer(void *ob_data, int ob_sz, void *ib_data, int ib_sz)
+{
+	return ob_sz >= 0 &&
+			ob_sz <= MSG_DATA_SZ &&
+			ib_sz >= 0 &&
+			ib_sz <= MSG_DATA_SZ &&
+			(!ob_sz || ob_data) &&
+			(!ib_sz || ib_data);
+}
+
 int tegra_bpmp_send(int mrq, void *data, int sz)
 {
 	unsigned long flags;
 	int ch;
 	int r;
+
+	if (!bpmp_valid_txfer(data, sz, NULL, 0))
+		return -EINVAL;
 
 	if (!connected)
 		return -ENODEV;
@@ -327,6 +262,9 @@ int tegra_bpmp_send_receive_atomic(int mrq, void *ob_data, int ob_sz,
 {
 	int ch;
 	int r;
+
+	if (!bpmp_valid_txfer(ob_data, ob_sz, ib_data, ib_sz))
+		return -EINVAL;
 
 	if (!connected)
 		return -ENODEV;
@@ -353,6 +291,9 @@ int tegra_bpmp_send_receive(int mrq, void *ob_data, int ob_sz,
 	int ch;
 	int r;
 
+	if (!bpmp_valid_txfer(ob_data, ob_sz, ib_data, ib_sz))
+		return -EINVAL;
+
 	if (!connected)
 		return -ENODEV;
 
@@ -370,6 +311,11 @@ int tegra_bpmp_send_receive(int mrq, void *ob_data, int ob_sz,
 }
 EXPORT_SYMBOL(tegra_bpmp_send_receive);
 
+int tegra_bpmp_running(void)
+{
+	return connected;
+}
+
 static void bpmp_init_completion(void)
 {
 	int i;
@@ -377,29 +323,38 @@ static void bpmp_init_completion(void)
 		init_completion(completion + i);
 }
 
-int bpmp_mail_init(struct platform_device *pdev)
+static int mail_inited;
+
+int bpmp_mail_init(void)
 {
 	int r;
 
-	bpmp_init_completion();
-	r = bpmp_init_irq(pdev);
+	if (mail_inited)
+		return 0;
+
+	mail_inited = 1;
+
+	r = bpmp_mail_init_prepare();
 	if (r) {
-		dev_err(&pdev->dev, "irq init failed (%d)\n", r);
+		pr_err("bpmp: mail init prepare failed (%d)\n", r);
+		return r;
+	}
+
+	bpmp_init_completion();
+
+	r = bpmp_init_irq();
+	if (r) {
+		pr_err("bpmp: irq init failed (%d)\n", r);
 		return r;
 	}
 
 	r = bpmp_mailman_init();
 	if (r) {
-		dev_err(&pdev->dev, "mailman init failed (%d)\n", r);
+		pr_err("bpmp: mailman init failed (%d)\n", r);
 		return r;
 	}
 
 	r = bpmp_connect();
-	dev_info(&pdev->dev, "bpmp_connect returned %d\n", r);
+	pr_info("bpmp: connect returned %d\n", r);
 	return r;
-}
-
-void tegra_bpmp_init_early(void)
-{
-	bpmp_connect();
 }

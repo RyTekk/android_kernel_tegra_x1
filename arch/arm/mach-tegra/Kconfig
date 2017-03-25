@@ -69,7 +69,6 @@ config ARCH_TEGRA_3x_SOC
 config ARCH_TEGRA_12x_SOC
 	bool "Tegra 12x family SOC"
 	select ARCH_TEGRA_HAS_DUAL_CPU_CLUSTERS if !ARM64
-	select ARCH_TEGRA_HAS_PCIE
 	select CPU_V7
 	select ARM_L1_CACHE_SHIFT_6
 	select ARM_ARCH_TIMER
@@ -96,6 +95,7 @@ config ARCH_TEGRA_12x_SOC
 	select SOC_BUS
 	select THERMAL
 	select PM_GENERIC_DOMAINS if PM
+	select RESET_CONTROLLER
 	select PINCTRL
 	select PINCTRL_TEGRA124
 	select PADCTRL
@@ -106,6 +106,7 @@ config ARCH_TEGRA_12x_SOC
 	select REGULATOR_TEGRA_DFLL_BYPASS if !ARCH_TEGRA_13x_SOC
 	select HAVE_ARM_ARCH_TIMER
 	select ARCH_HAS_PASR if STAGING
+	select SKIP_LATE_PASR_SETUP
 	select POWER_SUPPLY
 	select TEGRA_ISOMGR
 	select TEGRA_ISOMGR_SYSFS
@@ -137,9 +138,6 @@ config ARCH_TEGRA_HAS_DUAL_CPU_CLUSTERS
 	bool
 
 config ARCH_TEGRA_HAS_SYMMETRIC_CPU_PWR_GATE
-	bool
-
-config ARCH_TEGRA_HAS_PCIE
 	bool
 
 config ARCH_TEGRA_HAS_SATA
@@ -439,15 +437,15 @@ config TEGRA_XHCI_ENABLE_CDP_PORT
 	 of xhci controller.
 
 config TEGRA_CPU_FREQ_GOVERNOR_KERNEL_START
-	bool "Initialize CPU governor to a performance after DVFS initialization"
+	bool "Start scaling CPU rate to maximum after DVFS initialization"
 	default 0
 	help
 	  During a boot up, once DVFS is initialized, there is a period of
-	  time in which the frequency could adjusted higher before the userspace
-	  configures the governor by using a more performance governor for
-	  a faster boot up. Selecting this option will make the system to choose
-	  a performance governor once the DVFS initialization is complete. Userspace
-	  or init script can override the governor chosen here.
+	  time in which the frequency could be adjusted higher for faster boot.
+	  Selecting this option will make the system to set maximum possible
+	  rate once the DVFS initialization is complete. This top rate persists
+	  if default USERSPACE governor is retained, or it will be scaled down
+	  if/when governor is reloaded from user space.
 
 config TEGRA_DYNAMIC_PWRDET
 	bool "Enable dynamic activation of IO level auto-detection"
@@ -521,13 +519,6 @@ config TEGRA_PLLM_RESTRICTED
 	  capable of dividing maximum PLLM frequency at minimum voltage. When
 	  disabled, PLLM is used as a clock source with no restrictions (which
 	  may effectively increase lower limit for core voltage).
-
-config TEGRA_WDT_RECOVERY
-	bool "Enable suspend/resume watchdog recovery mechanism"
-	default n
-	help
-	  Enables watchdog recovery mechanism to protect against
-	  suspend/resume hangs.
 
 config TEGRA_LP2_CPU_TIMER
 	bool
@@ -710,12 +701,6 @@ config TEGRA_NVDUMPER
 	  You can dump RAM with nvflash tool in dirty boot status.
 	  usage: nvflash --dumpram [phy. RAM offset] [length] <filename>
 
-config TEGRA_ARBITRATION_EMEM_INTR
-	bool "Enable the ARBITRATION_EMEM interrupt in the MC"
-	help
-	  Enable this to allow the kernel to track arbitration conflicts
-	  in the memory controller.
-
 config TEGRA_CORE_EDP_LIMITS
 	bool "Enforce electrical design limits on core rail"
 	depends on TEGRA_SILICON_PLATFORM
@@ -801,14 +786,6 @@ config TEGRA_USE_SIMON
 	default y
 	help
 	  Enable Tegra silicon state monitoring, grading, and notification.
-
-config AID_FUSE
-	bool "Support AID fuse reads"
-	default n if (ARCH_TEGRA_12x_SOC && !ARCH_TEGRA_13x_SOC)
-	default y
-	help
-	  When enabled, allows sysfs reads of the AID fuse, which contains
-	  the chip family ID and a chip-unique Tegra ID. Supported on t132.
 
 config BOARD_HAS_PWR_INT_WAKE_SOURCE
 	bool "Enable PMC PWR INT wake source(WAKE18)"

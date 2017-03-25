@@ -189,9 +189,6 @@ static __initdata struct tegra_clk_init_table vcm30_t124_clk_init_table[] = {
 	{ "sdmmc2",		"pll_p",	48000000,	false},
 	{ "gk20a.gbus",		NULL,		600000000,	false},
 
-	{ "cclk_lp",		"pll_p",	408000000,	false},
-	{ "cpu_lp",		"cclk_lp",	408000000,	false},
-
 	{ NULL,			NULL,		0,		0},
 };
 
@@ -487,9 +484,7 @@ void __init tegra_vcm30_t124_usb_init(void)
  * clk_get and clk_enable to work properly
  */
 static struct of_dev_auxdata tegra_vcm30_t124_auxdata_lookup[] __initdata = {
-	T124_I2C_OF_DEV_AUXDATA,
-
-	OF_DEV_AUXDATA("nvidia,tegra124-vi", TEGRA_VI_BASE, "vi.0", NULL),
+	OF_DEV_AUXDATA("nvidia,tegra124-vi", TEGRA_VI_BASE, "vi", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra124-isp", TEGRA_ISP_BASE, "isp.0", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra124-isp", TEGRA_ISPB_BASE, "isp.1", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra124-tsec", TEGRA_TSEC_BASE, "tsec", NULL),
@@ -642,9 +637,10 @@ void __init tegra_vcm30_t124_reserve(void)
 {
 	/* 2560*1600*4*2 = 32768000 = 31.250*1M = 32M bytes */
 #if defined(CONFIG_NVMAP_CONVERT_CARVEOUT_TO_IOVMM)
-	tegra_reserve4(0, 32 * SZ_1M, 32 * SZ_1M, 64 * SZ_1M);
+	/* 2560*1440*4*2 = 29491200 = 28.125*1M = 29M bytes */
+	tegra_reserve4(0, 0, 0, 64 * SZ_1M);
 #else
-	tegra_reserve4(SZ_256M, 32 * SZ_1M, 32 * SZ_1M, 64 * SZ_1M);
+	tegra_reserve4(SZ_256M, 0, 0, 64 * SZ_1M);
 #endif
 }
 

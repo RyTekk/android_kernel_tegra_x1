@@ -58,7 +58,7 @@ static void lock_device(struct nvhost_job *job, bool lock)
 		nvhost_opcode_release_mlock(pdata->modulemutexes[0]);
 
 	/* No need to do anything if we have a channel/engine */
-	if (nvhost_get_channel_policy() == MAP_CHANNEL_ON_OPEN)
+	if (pdata->resource_policy == RESOURCE_PER_DEVICE)
 		return;
 
 	/* If we have a hardware mlock, use it. */
@@ -166,6 +166,7 @@ static void add_sync_waits(struct nvhost_channel *ch, int fd)
 
 static void push_waits(struct nvhost_job *job)
 {
+	struct nvhost_device_data *pdata = platform_get_drvdata(job->ch->dev);
 	struct nvhost_syncpt *sp = &nvhost_get_host(job->ch->dev)->syncpt;
 	struct nvhost_channel *ch = job->ch;
 	int i;
@@ -173,11 +174,10 @@ static void push_waits(struct nvhost_job *job)
 	for (i = 0; i < job->num_waitchk; i++) {
 		struct nvhost_waitchk *wait = &job->waitchk[i];
 
-		/* skip pushing waits if we allow them (map-at-submit mode)
+		/* skip pushing waits if we allow them (map-at-open mode)
 		 * and userspace wants to push a wait to some explicit
 		 * position */
-		if (nvhost_get_channel_policy() == MAP_CHANNEL_ON_OPEN &&
-		    wait->mem)
+		if (pdata->resource_policy == RESOURCE_PER_DEVICE && wait->mem)
 			continue;
 
 		/* Skip pushing wait if it has already been expired */
@@ -192,7 +192,7 @@ static void push_waits(struct nvhost_job *job)
 				wait->syncpt_id, wait->thresh));
 	}
 
-	if (nvhost_get_channel_policy() == MAP_CHANNEL_ON_OPEN)
+	if (pdata->resource_policy == RESOURCE_PER_DEVICE)
 		return;
 
 	for (i = 0; i < job->num_gathers; i++) {
@@ -218,8 +218,9 @@ static inline u32 gather_count(u32 word)
 
 static void submit_gathers(struct nvhost_job *job)
 {
-	int i;
+	struct nvhost_device_data *pdata = platform_get_drvdata(job->ch->dev);
 	void *cpuva = NULL;
+	int i;
 
 	/* push user gathers */
 	for (i = 0 ; i < job->num_gathers; i++) {
@@ -227,7 +228,7 @@ static void submit_gathers(struct nvhost_job *job)
 		u32 op1;
 		u32 op2;
 
-		if (nvhost_get_channel_policy() == MAP_CHANNEL_ON_OPEN)
+		if (pdata->resource_policy == RESOURCE_PER_DEVICE)
 			add_sync_waits(job->ch, g->pre_fence);
 
 		if (g->class_id)
@@ -291,11 +292,9 @@ static int host1x_channel_submit(struct nvhost_job *job)
 {
 	struct nvhost_channel *ch = job->ch;
 	struct nvhost_syncpt *sp = &nvhost_get_host(job->ch->dev)->syncpt;
-	u32 user_syncpt_incrs;
 	u32 prev_max = 0;
 	int err, i;
 	void *completed_waiters[job->num_syncpts];
-	struct nvhost_job_syncpt *hwctx_sp = job->sp + job->hwctx_syncpt_idx;
 
 	host1x_channel_prio_check(job);
 
@@ -314,7 +313,7 @@ static int host1x_channel_submit(struct nvhost_job *job)
 	}
 
 	/* before error checks, return current max */
-	prev_max = hwctx_sp->fence = nvhost_syncpt_read_max(sp, hwctx_sp->id);
+	prev_max = job->sp->fence = nvhost_syncpt_read_max(sp, job->sp->id);
 
 	/* get submit lock */
 	err = mutex_lock_interruptible(&ch->submitlock);
@@ -352,14 +351,9 @@ static int host1x_channel_submit(struct nvhost_job *job)
 	push_waits(job);
 	lock_device(job, true);
 
-	/* submit_ctxsave() and submit_ctxrestore() use the channel syncpt */
-	user_syncpt_incrs = hwctx_sp->incrs;
-
 	/* determine fences for all syncpoints */
 	for (i = 0; i < job->num_syncpts; ++i) {
-		u32 incrs = (i == job->hwctx_syncpt_idx) ?
-			user_syncpt_incrs :
-			job->sp[i].incrs;
+		u32 incrs = job->sp[i].incrs;
 
 		/* create a valid max for client managed syncpoints */
 		if (nvhost_syncpt_client_managed(sp, job->sp[i].id)) {
@@ -376,6 +370,7 @@ static int host1x_channel_submit(struct nvhost_job *job)
 			nvhost_syncpt_incr_max(sp, job->sp[i].id, incrs);
 
 		/* mark syncpoint used by this channel */
+		nvhost_syncpt_get_ref(sp, job->sp[i].id);
 		nvhost_syncpt_mark_used(sp, ch->chid, job->sp[i].id);
 	}
 
@@ -393,7 +388,7 @@ static int host1x_channel_submit(struct nvhost_job *job)
 	nvhost_cdma_end(&ch->cdma, job);
 
 	trace_nvhost_channel_submitted(ch->dev->name, prev_max,
-		hwctx_sp->fence);
+		job->sp->fence);
 
 	for (i = 0; i < job->num_syncpts; ++i) {
 		/* schedule a submit complete interrupt */
@@ -420,7 +415,6 @@ static int t124_channel_init_gather_filter(struct nvhost_channel *ch)
 {
 
 	struct platform_device *pdev = ch->dev;
-	void __iomem *regs = ch->aperture;
 	struct nvhost_master *master = nvhost_get_host(pdev);
 	int err;
 
@@ -433,8 +427,8 @@ static int t124_channel_init_gather_filter(struct nvhost_channel *ch)
 		return err;
 	}
 
-	writel(host1x_channel_channelctrl_kernel_filter_gbuffer_f(1),
-	       regs + host1x_channel_channelctrl_r());
+	host1x_channel_writel(ch, host1x_channel_channelctrl_r(),
+		host1x_channel_channelctrl_kernel_filter_gbuffer_f(1));
 	nvhost_module_idle(nvhost_get_parent(pdev));
 
 	return 0;

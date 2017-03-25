@@ -2,7 +2,7 @@
 /*
  * drivers/video/tegra/dc/sor.h
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -20,12 +20,18 @@
 
 #include <linux/tegra-soc.h>
 #include <linux/clk/tegra.h>
+#include <soc/tegra/tegra_bpmp.h>
 
 enum {
 	TRAINING_PATTERN_DISABLE = 0,
 	TRAINING_PATTERN_1 = 1,
 	TRAINING_PATTERN_2 = 2,
 	TRAINING_PATTERN_3 = 3,
+	TRAINING_PATTERN_D102 = 4,
+	TRAINING_PATTERN_SBLERRRATE = 5,
+	TRAINING_PATTERN_PRBS7 = 6,
+	TRAINING_PATTERN_CSTM = 7,
+	TRAINING_PATTERN_HBR2_COMPLIANCE = 8,
 };
 
 enum tegra_dc_sor_protocol {
@@ -86,6 +92,7 @@ struct tegra_dc_sor_data {
 	struct tegra_dc	*dc;
 
 	void __iomem	*base;
+	int instance; /* SOR0 or SOR1 */
 	struct resource	*res;
 	struct resource	*base_res;
 	struct clk	*sor_clk;
@@ -204,23 +211,25 @@ static inline void tegra_sor_write_field(struct tegra_dc_sor_data *sor,
 
 static inline void tegra_sor_clk_enable(struct tegra_dc_sor_data *sor)
 {
-	clk_prepare_enable(sor->sor_clk);
+	if (tegra_platform_is_silicon() || tegra_bpmp_running())
+		clk_prepare_enable(sor->sor_clk);
 }
 
 static inline void tegra_sor_clk_disable(struct tegra_dc_sor_data *sor)
 {
-	clk_disable_unprepare(sor->sor_clk);
+	if (tegra_platform_is_silicon() || tegra_bpmp_running())
+		clk_disable_unprepare(sor->sor_clk);
 }
 
 static inline void tegra_sor_safe_clk_enable(struct tegra_dc_sor_data *sor)
 {
-	if (tegra_platform_is_silicon())
+	if (tegra_platform_is_silicon() || tegra_bpmp_running())
 		clk_prepare_enable(sor->safe_clk);
 }
 
 static inline void tegra_sor_safe_clk_disable(struct tegra_dc_sor_data *sor)
 {
-	if (tegra_platform_is_silicon())
+	if (tegra_platform_is_silicon() || tegra_bpmp_running())
 		clk_disable_unprepare(sor->safe_clk);
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -51,6 +51,18 @@ static inline void hwmbox_writel(u32 val, u32 reg)
 	writel(val, nvadsp_drv_data->base_regs[AMISC] + reg);
 }
 
+
+#define PRINT_HWMBOX(x) \
+	dev_info(&nvadsp_pdev->dev, "%s: 0x%x\n", #x, hwmbox_readl(x))
+
+void dump_mailbox_regs(void)
+{
+	dev_info(&nvadsp_pdev->dev, "dumping hwmailbox registers ...\n");
+	PRINT_HWMBOX(RECV_HWMBOX);
+	PRINT_HWMBOX(SEND_HWMBOX);
+	dev_info(&nvadsp_pdev->dev, "end of dump ....\n");
+}
+
 static void hwmboxq_init(struct hwmbox_queue *queue)
 {
 	queue->head = 0;
@@ -97,6 +109,20 @@ static status_t hwmboxq_enqueue(struct hwmbox_queue *queue,
 	INIT_COMPLETION(queue->comp);
  out:
 	return ret;
+}
+
+void reset_hwmbox_queue(void)
+{
+	struct hwmbox_queue *queue = &nvadsp_drv_data->hwmbox_send_queue;
+	spinlock_t *lock = &queue->lock;
+	unsigned long flags;
+
+	spin_lock_irqsave(lock, flags);
+	queue->count = 0;
+	queue->tail = 0;
+	queue->head = 0;
+	is_hwmbox_busy = false;
+	spin_unlock_irqrestore(lock, flags);
 }
 
 status_t nvadsp_hwmbox_send_data(uint16_t mid, uint32_t data, uint32_t flags)

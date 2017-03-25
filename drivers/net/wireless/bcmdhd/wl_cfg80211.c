@@ -68,7 +68,6 @@
 #include <wl_cfg80211.h>
 #include <wl_cfgp2p.h>
 #include <wl_android.h>
-#include <wl_cfgvendor.h>
 #ifdef WL_NAN
 #include <wl_cfgnan.h>
 #endif /* WL_NAN */
@@ -77,6 +76,9 @@
 #include <dhd_wlfc.h>
 #endif
 
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT)
+#include <wl_cfgvendor.h>
+#endif /* (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT) */
 #ifdef WL11U
 #if !defined(WL_ENABLE_P2P_IF) && !defined(WL_CFG80211_P2P_DEV_IF)
 #error You should enable 'WL_ENABLE_P2P_IF' or 'WL_CFG80211_P2P_DEV_IF' \
@@ -96,6 +98,8 @@ static struct device *cfg80211_parent_dev = NULL;
 /* g_bcm_cfg should be static. Do not change */
 static struct bcm_cfg80211 *g_bcm_cfg = NULL;
 u32 wl_dbg_level = WL_DBG_ERR;
+
+extern int op_mode;
 
 #ifdef WLAIBSS_MCHAN
 #define IBSS_IF_NAME "ibss%d"
@@ -1191,8 +1195,9 @@ wl_validate_wps_ie(char *wps_ie, s32 wps_ie_len, bool *pbc)
 			WL_DBG(("  attr WPS_ID_CONFIG_METHODS: %x\n", HTON16(val)));
 		} else if (subelt_id == WPS_ID_DEVICE_NAME) {
 			char devname[100];
-			memcpy(devname, subel, subelt_len);
-			devname[subelt_len] = '\0';
+			size_t namelen = MIN(subelt_len, sizeof(devname)-1);
+			memcpy(devname, subel, namelen);
+			devname[namelen] = '\0';
 			WL_DBG(("  attr WPS_ID_DEVICE_NAME: %s (len %u)\n",
 				devname, subelt_len));
 		} else if (subelt_id == WPS_ID_DEVICE_PWD_ID) {
@@ -1566,8 +1571,11 @@ if (bcmdhd_prop_txstatus_vsdb) {
 			if (mode != WL_MODE_AP)
 				wldev_iovar_setint(new_ndev, "buf_key_b4_m4", 1);
 
-			WL_ERR((" virtual interface(%s) is "
+			DHD_NV_INFO((" virtual interface(%s) is "
 				"created net attach done\n", cfg->p2p->vir_ifname));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+			TEGRA_SYSFS_HISTOGRAM_STAT_INC(ago_start);
+#endif
 			if (mode == WL_MODE_AP)
 				wl_set_drv_status(cfg, CONNECTED, new_ndev);
 #ifdef SUPPORT_AP_POWERSAVE
@@ -4387,7 +4395,7 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 	err = wldev_iovar_setbuf_bsscfg(dev, "join", ext_join_params, join_params_size,
 		cfg->ioctl_buf, WLC_IOCTL_MAXLEN, bssidx, &cfg->ioctl_buf_sync);
 
-	WL_ERR(("Connectting with" MACDBG " channel (%d) ssid \"%s\", len (%d)\n\n",
+	DHD_NV_INFO(("Connectting with " MACDBG " channel (%d) ssid \"%s\", len (%d)\n\n",
 		MAC2STRDBG((u8*)(&ext_join_params->assoc.bssid)), cfg->channel,
 		ext_join_params->ssid.SSID, ext_join_params->ssid.SSID_len));
 
@@ -4446,7 +4454,13 @@ wl_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *dev,
 #ifdef CUSTOM_SET_CPUCORE
 	dhd_pub_t *dhd = (dhd_pub_t *)(cfg->pub);
 #endif /* CUSTOM_SET_CPUCORE */
-	WL_ERR(("Reason %d\n", reason_code));
+	DHD_NV_INFO(("Reason %d\n", reason_code));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+	if (bcmdhd_stat.rssi < -67)
+		TEGRA_SYSFS_HISTOGRAM_STAT_INC(disconnect_rssi_low);
+	else
+		TEGRA_SYSFS_HISTOGRAM_STAT_INC(disconnect_rssi_high);
+#endif
 	RETURN_EIO_IF_NOT_UP(cfg);
 	act = *(bool *) wl_read_prof(cfg, dev, WL_PROF_ACT);
 	curbssid = wl_read_prof(cfg, dev, WL_PROF_BSSID);
@@ -4462,12 +4476,10 @@ wl_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *dev,
 		/*
 		* Cancel ongoing scan to sync up with sme state machine of cfg80211.
 		*/
-#if !defined(ESCAN_RESULT_PATCH)
 		/* Let scan aborted by F/W */
 		if (cfg->scan_request) {
 			wl_notify_escan_complete(cfg, dev, true, true);
 		}
-#endif /* ESCAN_RESULT_PATCH */
 		wl_clr_drv_status(cfg, CONNECTING, dev);
 		wl_set_drv_status(cfg, DISCONNECTING, dev);
 		scbval.val = reason_code;
@@ -6235,7 +6247,7 @@ wl_cfg80211_mgmt_tx(struct wiphy *wiphy, bcm_struct_cfgdev *cfgdev,
 				sizeof(scb_val_t), true);
 			if (err < 0)
 				WL_ERR(("WLC_SCB_DEAUTHENTICATE_FOR_REASON error %d\n", err));
-			WL_ERR(("Disconnect STA : %s scb_val.val %d\n",
+			DHD_NV_INFO(("Disconnect STA : %s scb_val.val %d\n",
 				bcm_ether_ntoa((const struct ether_addr *)mgmt->da, eabuf),
 				scb_val.val));
 
@@ -6362,6 +6374,7 @@ wl_cfg80211_change_bss(struct wiphy *wiphy,
 	return 0;
 }
 
+extern u32 restrict_bw_20;
 static s32
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0))
 wl_cfg80211_set_channel(struct wiphy *wiphy, struct net_device *dev,
@@ -6423,17 +6436,24 @@ wl_cfg80211_set_channel(struct wiphy *wiphy, struct net_device *dev,
 				if (err) {
 					WL_ERR(("error get mimo_bw_cap (%d)\n", err));
 				}
-				if (bw_cap != WLC_N_BW_20ALL)
-					bw = WL_CHANSPEC_BW_40;
+				if (bw_cap != WLC_N_BW_20ALL) {
+					if (restrict_bw_20)
+						bw = WL_CHANSPEC_BW_20;
+					else
+						bw = WL_CHANSPEC_BW_40;
+				}
 			}
 		} else {
-			if (WL_BW_CAP_80MHZ(cfg->ioctl_buf[0]))
-				bw = WL_CHANSPEC_BW_80;
-			else if (WL_BW_CAP_40MHZ(cfg->ioctl_buf[0]))
-				bw = WL_CHANSPEC_BW_40;
-			else
+			if (restrict_bw_20)
 				bw = WL_CHANSPEC_BW_20;
-
+			else {
+				if (WL_BW_CAP_80MHZ(cfg->ioctl_buf[0]))
+					bw = WL_CHANSPEC_BW_80;
+				else if (WL_BW_CAP_40MHZ(cfg->ioctl_buf[0]))
+					bw = WL_CHANSPEC_BW_40;
+				else
+					bw = WL_CHANSPEC_BW_20;
+			}
 		}
 
 	} else if (chan->band == IEEE80211_BAND_2GHZ)
@@ -6456,8 +6476,17 @@ wl_cfg80211_set_channel(struct wiphy *wiphy, struct net_device *dev,
 						   to 5, 10, 20 ,40 ,80, 160, 80+80 MHz
 						   respectively. In below case, 0x1000 = 2
 						   which is for 20 MHz */
-						if((chanspec & 0x3800) == 0x1000)
+						if ((chanspec & 0x3800) == WL_CHANSPEC_BW_20) {
 							bw = WL_CHANSPEC_BW_20;
+						} else if ((chanspec & 0x3800) == WL_CHANSPEC_BW_40) {
+							bw = WL_CHANSPEC_BW_40;
+						} else if ((chanspec & 0x3800) == WL_CHANSPEC_BW_80) {
+							bw = WL_CHANSPEC_BW_80;
+						} else if ((chanspec & 0x3800) == WL_CHANSPEC_BW_160) {
+							bw = WL_CHANSPEC_BW_160;
+						} else if ((chanspec & 0x3800) == WL_CHANSPEC_BW_8080) {
+							bw = WL_CHANSPEC_BW_8080;
+						}
 					}
 				} else {
 					/* In 2.4 GHz supported bw is 20 MHz */
@@ -8421,7 +8450,8 @@ static s32 wl_setup_wiphy(struct wireless_dev *wdev, struct device *sdiofunc_dev
 	 * probe response frame in case of SoftAP mode,
 	 * AP_PROBE_RESP_OFFLOAD flag is set to wiphy->flags variable.
 	 */
-	if (dhd_get_fw_mode(dhd->info) == DHD_FLAG_HOSTAP_MODE) {
+	if ((!op_mode && dhd_get_fw_mode(dhd->info) == DHD_FLAG_HOSTAP_MODE) ||
+	    (op_mode == DHD_FLAG_HOSTAP_MODE)) {
 		wdev->wiphy->flags |= WIPHY_FLAG_AP_PROBE_RESP_OFFLOAD;
 		wdev->wiphy->probe_resp_offload = 0;
 	}
@@ -8458,11 +8488,14 @@ static s32 wl_setup_wiphy(struct wireless_dev *wdev, struct device *sdiofunc_dev
 #endif
 	wiphy_apply_custom_regulatory(wdev->wiphy, &brcm_regdom);
 
-	WL_DBG(("Registering Vendor80211)\n"));
-	err = cfgvendor_attach(wdev->wiphy);
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT)
+	WL_ERR(("Registering Vendor80211\n"));
+	err = wl_cfgvendor_attach(wdev->wiphy, dhd);
 	if (unlikely(err < 0)) {
 		WL_ERR(("Couldn not attach vendor commands (%d)\n", err));
 	}
+#endif /* (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT) */
+
 
 	/* Now we can register wiphy with cfg80211 module */
 	err = wiphy_register(wdev->wiphy);
@@ -8489,7 +8522,9 @@ static void wl_free_wdev(struct bcm_cfg80211 *cfg)
 	}
 	wiphy = wdev->wiphy;
 
-	cfgvendor_detach(wdev->wiphy);
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT)
+	wl_cfgvendor_detach(wdev->wiphy);
+#endif /* if (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT) */
 
 	wiphy_unregister(wdev->wiphy);
 	wdev->wiphy->dev.parent = NULL;
@@ -8736,8 +8771,10 @@ wl_notify_connect_status_ap(struct bcm_cfg80211 *cfg, struct net_device *ndev,
 		return 0;
 	}
 
-	if (event == WLC_E_DISASSOC_IND || event == WLC_E_DEAUTH_IND || event == WLC_E_DEAUTH) {
-		WL_ERR(("event %s(%d) status %d reason %d\n",
+	if (event == WLC_E_DISASSOC_IND || event == WLC_E_DEAUTH_IND || event == WLC_E_DEAUTH ||
+		event == WLC_E_ASSOC || event == WLC_E_ASSOC_IND || event == WLC_E_REASSOC ||
+		event == WLC_E_REASSOC_IND) {
+		DHD_NV_INFO(("event %s(%d) status %d reason %d\n",
 		bcmevent_get_name(event), event, ntoh32(e->status), reason));
 	}
 
@@ -9005,12 +9042,12 @@ wl_notify_connect_status(struct bcm_cfg80211 *cfg, bcm_struct_cfgdev *cfgdev,
 			act = true;
 			if (!wl_get_drv_status(cfg, DISCONNECTING, ndev) ||
 			    wl_get_drv_status(cfg, CONNECTING, ndev)) {
-					printk("wl_bss_connect_done succeeded with " MACDBG "\n",
+					DHD_NV_INFO(("wl_bss_connect_done succeeded with " MACDBG "\n",
 						MAC2STRDBG((u8*)(&e->addr)));
 					wl_bss_connect_done(cfg, ndev, e, data, true);
 					WL_DBG(("joined in BSS network \"%s\"\n",
 					((struct wlc_ssid *)
-					 wl_read_prof(cfg, ndev, WL_PROF_SSID))->SSID));
+					 wl_read_prof(cfg, ndev, WL_PROF_SSID))->SSID)));
 				}
 			wl_update_prof(cfg, ndev, e, &act, WL_PROF_ACT);
 			wl_update_prof(cfg, ndev, NULL, (void *)&e->addr, WL_PROF_BSSID);
@@ -9024,10 +9061,8 @@ wl_notify_connect_status(struct bcm_cfg80211 *cfg, bcm_struct_cfgdev *cfgdev,
 			}
 #endif /* P2PLISTEN_AP_SAMECHN */
 
-#ifdef ESCAN_RESULT_ABORT
 			if (cfg->scan_request)
 				wl_notify_escan_complete(cfg, ndev, true, true);
-#endif
 			if (wl_get_drv_status(cfg, CONNECTED, ndev)) {
 				scb_val_t scbval;
 				u8 *curbssid = wl_read_prof(cfg, ndev, WL_PROF_BSSID);
@@ -9037,10 +9072,15 @@ wl_notify_connect_status(struct bcm_cfg80211 *cfg, bcm_struct_cfgdev *cfgdev,
 				/* WLAN_REASON_UNSPECIFIED is used for hang up event in Android */
 				reason = (reason == WLAN_REASON_UNSPECIFIED)? 0 : reason;
 
-				printk("link down if %s may call cfg80211_disconnected. "
+				DHD_NV_INFO(("link down if %s may call cfg80211_disconnected. "
 					"event : %d, reason=%d from " MACDBG "\n",
 					ndev->name, event, ntoh32(e->reason),
-					MAC2STRDBG((u8*)(&e->addr)));
+					MAC2STRDBG((u8*)(&e->addr))));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+				if (ntoh32(e->reason) == 15) {
+					TEGRA_SYSFS_HISTOGRAM_STAT_INC(connect_fail_reason_15);
+				}
+#endif
 				if (!cfg->roam_offload &&
 					memcmp(curbssid, &e->addr, ETHER_ADDR_LEN) != 0) {
 					WL_ERR(("BSSID of event is not the connected BSSID"
@@ -9629,6 +9669,25 @@ wl_bss_connect_done(struct bcm_cfg80211 *cfg, struct net_device *ndev,
 			WL_INFORM(("Report connect result - connection succeeded\n"));
 		else
 			WL_ERR(("Report connect result - connection failed\n"));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+		if (completed) {
+			TEGRA_SYSFS_HISTOGRAM_STAT_INC(connect_success);
+			if ((cfg->channel >= 1) && (cfg->channel <= 14)) {
+				TEGRA_SYSFS_HISTOGRAM_STAT_INC
+					(connect_on_2g_channel);
+			} else if (cfg->channel > 14) {
+				TEGRA_SYSFS_HISTOGRAM_STAT_INC
+					(connect_on_5g_channel);
+			}
+			tegra_sysfs_histogram_stat_set_channel(cfg->channel);
+			if (bcmdhd_stat.channel_stat)
+				TEGRA_SYSFS_HISTOGRAM_STAT_INC
+					(channel_stat->connect_count);
+		} else {
+			TEGRA_SYSFS_HISTOGRAM_STAT_INC(connect_fail);
+			tegra_sysfs_histogram_stat_set_channel(-1);
+		}
+#endif
 	}
 #ifdef CONFIG_TCPACK_FASTTX
 	if (wl_get_chan_isvht80(ndev, dhd))
@@ -10180,9 +10239,9 @@ wl_notify_sched_scan_results(struct bcm_cfg80211 *cfg, struct net_device *ndev,
 			 * scan request in the form of cfg80211_scan_request. For timebeing, create
 			 * cfg80211_scan_request one out of the received PNO event.
 			 */
+			ssid[i].ssid_len = MIN(DOT11_MAX_SSID_LEN, netinfo->pfnsubnet.SSID_len);
 			memcpy(ssid[i].ssid, netinfo->pfnsubnet.SSID,
-				netinfo->pfnsubnet.SSID_len);
-			ssid[i].ssid_len = netinfo->pfnsubnet.SSID_len;
+			       ssid[i].ssid_len);
 			request->n_ssids++;
 
 			channel_req = netinfo->pfnsubnet.channel;
@@ -11390,7 +11449,10 @@ static void wl_dealloc_netinfo(struct work_struct *work)
 {
 	struct net_info *_net_info, *next;
 	struct bcm_cfg80211 *cfg = container_of(work, struct bcm_cfg80211, dealloc_work);
-	down_interruptible(&cfg->net_wdev_sema);
+
+	if (down_interruptible(&cfg->net_wdev_sema))
+		return;
+
 	down_write(&cfg->netif_sem);
 	list_for_each_entry_safe(_net_info, next, &cfg->dealloc_list, list) {
 		list_del(&_net_info->list);

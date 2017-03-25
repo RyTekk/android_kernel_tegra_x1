@@ -1,7 +1,7 @@
 /*
  * arch/arm/mach-tegra/tegra12x_la.c
  *
- * Copyright (C) 2013-2014, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (C) 2013-2015, NVIDIA CORPORATION. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -19,10 +19,9 @@
 
 #include <asm/io.h>
 
-#include <mach/latency_allowance.h>
-#include <mach/tegra_emc.h>
-
-#include <tegra/mc.h>
+#include <linux/platform/tegra/latency_allowance.h>
+#include <linux/platform/tegra/tegra_emc.h>
+#include <linux/platform/tegra/mc.h>
 
 #include "la_priv.h"
 #include <linux/platform/tegra/clock.h>
@@ -409,7 +408,7 @@ static void program_ptsa(void)
 	writel(p->usbx_ptsa_max, T12X_MC_RA(USBX_PTSA_MAX_0));
 
 	writel(p->usbd_ptsa_min, T12X_MC_RA(USBD_PTSA_MIN_0));
-	writel(p->usbd_ptsa_min, T12X_MC_RA(USBD_PTSA_MAX_0));
+	writel(p->usbd_ptsa_max, T12X_MC_RA(USBD_PTSA_MAX_0));
 
 	writel(p->ftop_ptsa_min, T12X_MC_RA(FTOP_PTSA_MIN_0));
 	writel(p->ftop_ptsa_max, T12X_MC_RA(FTOP_PTSA_MAX_0));
@@ -478,7 +477,7 @@ static void save_ptsa(void)
 	p->r0_dis_ptsa_max = readl(T12X_MC_RA(R0_DIS_PTSA_MAX_0));
 
 	p->r0_disb_ptsa_min = readl(T12X_MC_RA(R0_DISB_PTSA_MIN_0));
-	p->r0_disb_ptsa_min = readl(T12X_MC_RA(R0_DISB_PTSA_MAX_0));
+	p->r0_disb_ptsa_max = readl(T12X_MC_RA(R0_DISB_PTSA_MAX_0));
 
 	p->vd_ptsa_min = readl(T12X_MC_RA(VD_PTSA_MIN_0));
 	p->vd_ptsa_max = readl(T12X_MC_RA(VD_PTSA_MAX_0));
@@ -490,7 +489,7 @@ static void save_ptsa(void)
 	p->gk_ptsa_max = readl(T12X_MC_RA(GK_PTSA_MAX_0));
 
 	p->vicpc_ptsa_min = readl(T12X_MC_RA(VICPC_PTSA_MIN_0));
-	p->vicpc_ptsa_min = readl(T12X_MC_RA(VICPC_PTSA_MAX_0));
+	p->vicpc_ptsa_max = readl(T12X_MC_RA(VICPC_PTSA_MAX_0));
 
 	p->apb_ptsa_min = readl(T12X_MC_RA(APB_PTSA_MIN_0));
 	p->apb_ptsa_max = readl(T12X_MC_RA(APB_PTSA_MAX_0));
@@ -1019,10 +1018,11 @@ static unsigned int t12x_min_la(struct dc_to_la_params *disp_params)
 	return T12X_LA_FP_TO_REAL(min_la_fp);
 }
 
-static int t12x_set_disp_la(enum tegra_la_id id,
-				unsigned long emc_freq_hz,
-				unsigned int bw_mbps,
-				struct dc_to_la_params disp_params)
+static int t12x_handle_disp_la(enum tegra_la_id id,
+			       unsigned long emc_freq_hz,
+			       unsigned int bw_mbps,
+			       struct dc_to_la_params disp_params,
+			       int write_la)
 {
 	int idx = 0;
 	struct la_client_info *ci = NULL;
@@ -1096,8 +1096,25 @@ static int t12x_set_disp_la(enum tegra_la_id id,
 	if (la_to_set < t12x_min_la(&disp_params))
 		return -1;
 
-	program_la(ci, la_to_set);
+	if (write_la)
+		program_la(ci, la_to_set);
 	return 0;
+}
+
+static int t12x_set_disp_la(enum tegra_la_id id,
+			    unsigned long emc_freq_hz,
+			    unsigned int bw_mbps,
+			    struct dc_to_la_params disp_params)
+{
+	return t12x_handle_disp_la(id, emc_freq_hz, bw_mbps, disp_params, 1);
+}
+
+static int t12x_check_disp_la(enum tegra_la_id id,
+			      unsigned long emc_freq_hz,
+			      unsigned int bw_mbps,
+			      struct dc_to_la_params disp_params)
+{
+	return t12x_handle_disp_la(id, emc_freq_hz, bw_mbps, disp_params, 0);
 }
 
 void tegra_la_get_t12x_specific(struct la_chip_specific *cs_la)
@@ -1124,6 +1141,7 @@ void tegra_la_get_t12x_specific(struct la_chip_specific *cs_la)
 	cs_la->update_camera_ptsa_rate = t12x_update_camera_ptsa_rate;
 	cs_la->set_la = t12x_set_la;
 	cs_la->set_disp_la = t12x_set_disp_la;
+	cs_la->check_disp_la = t12x_check_disp_la;
 	cs_la->save_ptsa = save_ptsa;
 	cs_la->program_ptsa = program_ptsa;
 	cs_la->suspend = la_suspend;

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2015, NVIDIA Corporation.  All rights reserved.
+ * Copyright (c) 2015-2016, NVIDIA Corporation.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -33,11 +33,15 @@
 #define IMX230_IOCTL_SET_HDR_COARSE_TIME	_IOW('o', 8, struct imx230_hdr)
 #define IMX230_IOCTL_SET_POWER			_IOW('o', 20, __u32)
 
-#ifdef IMX230_EEPROM_PRESENT
+#define IMX230_EEPROM_PRESENT		(1)
+
+/* IMX230 module has AT24C128C 16KB eeprom
+ * with a page size of 64 bytes */
+#if IMX230_EEPROM_PRESENT
 #define IMX230_EEPROM_ADDRESS		0x50
-#define IMX230_EEPROM_SIZE		1024
+#define IMX230_EEPROM_SIZE		16384
 #define IMX230_EEPROM_STR_SIZE		(IMX230_EEPROM_SIZE * 2)
-#define IMX230_EEPROM_BLOCK_SIZE	(1 << 8)
+#define IMX230_EEPROM_BLOCK_SIZE	(64)
 #define IMX230_EEPROM_NUM_BLOCKS \
 	 (IMX230_EEPROM_SIZE / IMX230_EEPROM_BLOCK_SIZE)
 #endif /* if IMX230_EEPROM_PRESENT */
@@ -73,6 +77,23 @@
 #define IMX230_GAIN_SHORT_ADDR_MSB		0x0216
 #define IMX230_GAIN_SHORT_ADDR_LSB		0x0217
 #define IMX230_GROUP_HOLD_ADDR			0x0104
+
+#define IMX230_MASK_CORRUPT_FRAME_ADDR		0x0105
+#define IMX230_MASK_CORRUPT_FRAME_TRANSMIT	0
+#define IMX230_MASK_CORRUPT_FRAME_MASK		1
+
+#define IMX230_CROP_X_START_ADDR_MSB	0x0344
+#define IMX230_CROP_X_START_ADDR_LSB	0x0345
+#define IMX230_CROP_Y_START_ADDR_MSB	0x0346
+#define IMX230_CROP_Y_START_ADDR_LSB	0x0347
+#define IMX230_CROP_X_END_ADDR_MSB	0x0348
+#define IMX230_CROP_X_END_ADDR_LSB	0x0349
+#define IMX230_CROP_Y_END_ADDR_MSB	0x034A
+#define IMX230_CROP_Y_END_ADDR_LSB	0x034B
+#define IMX230_CROP_X_OUTPUT_SIZE_MSB	0x034C
+#define IMX230_CROP_X_OUTPUT_SIZE_LSB	0x034D
+#define IMX230_CROP_Y_OUTPUT_SIZE_MSB	0x034E
+#define IMX230_CROP_Y_OUTPUT_SIZE_LSB	0x034F
 
 struct imx230_mode {
 	__u32 xres;

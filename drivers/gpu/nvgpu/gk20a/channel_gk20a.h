@@ -1,7 +1,7 @@
 /*
  * GK20A graphics channel
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -77,17 +77,16 @@ struct channel_gk20a_job {
 	struct list_head list;
 };
 
-struct channel_gk20a_timeout {
-	struct delayed_work wq;
-	struct mutex lock;
-	bool initialized;
-	struct channel_gk20a_job *job;
-};
-
 struct channel_gk20a_poll_events {
 	struct mutex lock;
 	bool events_enabled;
 	int num_pending_events;
+};
+
+struct channel_gk20a_clean_up {
+	struct mutex lock;
+	bool scheduled;
+	struct delayed_work wq;
 };
 
 /* this is the priv element of struct nvhost_channel */
@@ -113,8 +112,7 @@ struct channel_gk20a {
 	struct list_head ch_entry; /* channel's entry in TSG */
 
 	struct list_head jobs;
-	struct mutex jobs_lock;
-	struct mutex submit_lock;
+	spinlock_t jobs_lock;
 
 	struct vm_gk20a *vm;
 
@@ -141,13 +139,13 @@ struct channel_gk20a {
 	u32 timeout_accumulated_ms;
 	u32 timeout_gpfifo_get;
 
-	struct channel_gk20a_timeout timeout;
+	struct channel_gk20a_clean_up clean_up;
 
 	bool cmds_pending;
 	struct {
-		/* These fences should be accessed with submit_lock held. */
 		struct gk20a_fence *pre_fence;
 		struct gk20a_fence *post_fence;
+		struct mutex fence_lock;
 	} last_submit;
 
 	void (*remove_support)(struct channel_gk20a *);
@@ -158,6 +156,9 @@ struct channel_gk20a {
 	struct dma_buf *cyclestate_buffer_handler;
 	struct mutex cyclestate_buffer_mutex;
 	} cyclestate;
+
+	struct mutex cs_client_mutex;
+	struct gk20a_cs_snapshot_client *cs_client;
 #endif
 	struct mutex dbg_s_lock;
 	struct list_head dbg_s_list;
@@ -169,7 +170,9 @@ struct channel_gk20a {
 	struct dma_buf *error_notifier_ref;
 	struct nvgpu_notification *error_notifier;
 	void *error_notifier_va;
+	struct mutex error_notifier_mutex;
 
+	struct mutex sync_lock;
 	struct gk20a_channel_sync *sync;
 
 #ifdef CONFIG_TEGRA_GR_VIRTUALIZATION
@@ -199,10 +202,8 @@ void gk20a_channel_close(struct channel_gk20a *ch);
 
 bool gk20a_channel_update_and_check_timeout(struct channel_gk20a *ch,
 					    u32 timeout_delta_ms);
-void gk20a_disable_channel(struct channel_gk20a *ch,
-			   bool wait_for_finish,
-			   unsigned long finish_timeout);
-void gk20a_channel_abort(struct channel_gk20a *ch);
+void gk20a_disable_channel(struct channel_gk20a *ch);
+void gk20a_channel_abort(struct channel_gk20a *ch, bool channel_preempt);
 int gk20a_channel_finish(struct channel_gk20a *ch, unsigned long timeout);
 void gk20a_set_error_notifier(struct channel_gk20a *ch, __u32 error);
 void gk20a_channel_semaphore_wakeup(struct gk20a *g);
@@ -243,6 +244,9 @@ struct channel_gk20a *gk20a_open_new_channel_with_cb(struct gk20a *g,
 		void *update_fn_data);
 void channel_gk20a_unbind(struct channel_gk20a *ch_gk20a);
 
+void gk20a_channel_cancel_job_clean_up(struct channel_gk20a *c,
+				bool wait_for_completion);
+
 int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
 				struct nvgpu_gpfifo *gpfifo,
 				struct nvgpu_submit_gpfifo_args *args,
@@ -260,7 +264,6 @@ void channel_gk20a_disable(struct channel_gk20a *ch);
 int channel_gk20a_alloc_inst(struct gk20a *g, struct channel_gk20a *ch);
 void channel_gk20a_free_inst(struct gk20a *g, struct channel_gk20a *ch);
 int channel_gk20a_setup_ramfc(struct channel_gk20a *c,
-			u64 gpfifo_base, u32 gpfifo_entries);
+			u64 gpfifo_base, u32 gpfifo_entries, u32 flags);
 void channel_gk20a_enable(struct channel_gk20a *ch);
-void gk20a_channel_timeout_restart_all_channels(struct gk20a *g);
 #endif /* CHANNEL_GK20A_H */

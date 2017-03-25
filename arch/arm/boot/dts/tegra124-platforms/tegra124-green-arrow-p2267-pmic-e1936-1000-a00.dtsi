@@ -210,8 +210,8 @@
 
 					palmas_smps9: smps9 {
 						regulator-name = "vdd-snsr";
-						regulator-min-microvolt = <2900000>;
-						regulator-max-microvolt = <2900000>;
+						regulator-min-microvolt = <2800000>;
+						regulator-max-microvolt = <2800000>;
 						regulator-always-on;
 						regulator-boot-on;
 						ti,roof-floor = <PALMAS_EXT_CONTROL_NSLEEP>;
@@ -219,6 +219,10 @@
 							c1 {
 								regulator-consumer-supply = "vddio_sd_slot";
 								regulator-consumer-device = "sdhci-tegra.3";
+							};
+							c2 {
+								regulator-consumer-supply = "vddio_sd_slot";
+								regulator-consumer-device = "sdhci-tegra.2";
 							};
 						};
 					};
@@ -345,8 +349,6 @@
 				ti,ir-comp-resister-ohm = <1>;
 				ti,pre-charge-current-limit-milliamp = <256>;
 				ti,thermal-regulation-threshold-degc = <120>;
-				ti,soc-range = <50 60 70 80 85 90 95 101>;
-				ti,input-voltage-soc-limit = <4200 4280 4360 4440 4520 4600 4680 4760>;
 			};
 
 			usb0_vbus: vbus {

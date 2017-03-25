@@ -41,6 +41,13 @@
 
 	/* chosen */
 
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "grenada";
+		};
+	};
+
 	memory@80000000 {
 		device_type = "memory";
 		reg = < 0x0 0x80000000 0x0 0x40000000 >;
@@ -1230,5 +1237,11 @@
 		reg-io-width = <4>;
 		smsc,irq-active-high;
 		smsc,irq-push-pull;
+	};
+
+	pwm_regulators {
+		gpu_ovr_reg: pwm-regulator@1 {
+			/delete-property/ enable-gpio;
+		};
 	};
 };

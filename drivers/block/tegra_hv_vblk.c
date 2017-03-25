@@ -102,10 +102,11 @@ struct vblk_dev {
 	uint32_t devnum;
 	sector_t cur_sector;
 	uint32_t cur_nsect;
-	char *cur_buffer;
+	void *cur_buffer;
 	enum cmd_mode cur_transfer_cmd;
 	uint8_t serial_number;
 	uint8_t total_frame;
+	struct req_iterator iter;
 	uint max_sectors_per_frame;
 	struct ivc_blk_request cur_ivc_req;
 	struct request *req;
@@ -129,7 +130,7 @@ static int vblk_send_config_cmd(struct vblk_dev *vblkdev)
 		while (tegra_hv_ivc_channel_notified(vblkdev->ivck) != 0) {
 			if (i++ > IVC_RESET_RETRIES) {
 				dev_err(vblkdev->device, "ivc reset timeout\n");
-				return 1;
+				return -EIO;
 			}
 			schedule_timeout(1);
 		}
@@ -138,7 +139,7 @@ static int vblk_send_config_cmd(struct vblk_dev *vblkdev)
 		tegra_hv_ivc_write_get_next_frame(vblkdev->ivck);
 	if (IS_ERR(ivc_blk_req)) {
 		dev_err(vblkdev->device, "no empty frame for write\n");
-		return 1;
+		return -EIO;
 	}
 
 	ivc_blk_req->cmd = R_CONFIG;
@@ -150,7 +151,7 @@ static int vblk_send_config_cmd(struct vblk_dev *vblkdev)
 
 	if (tegra_hv_ivc_write_advance(vblkdev->ivck)) {
 		dev_err(vblkdev->device, "ivc write failed\n");
-		return 1;
+		return -EIO;
 	}
 
 	return 0;
@@ -166,10 +167,15 @@ static int vblk_get_configinfo(struct vblk_dev *vblkdev)
 	len = tegra_hv_ivc_read(vblkdev->ivck, (void *)&(vblkdev->config),
 		sizeof(struct virtual_storage_configinfo));
 	if (len != sizeof(struct virtual_storage_configinfo))
-		return 1;
+		return -EIO;
 
 	if (vblkdev->config.cmd != R_CONFIG)
-		return 1;
+		return -EIO;
+
+	if (vblkdev->config.nsectors == 0) {
+		dev_err(vblkdev->device, "controller init failed\n");
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -198,17 +204,19 @@ static void vblk_fetch_request(struct vblk_dev *vblkdev)
 
 static int next_transfer(struct vblk_dev *vblkdev)
 {
+	struct bio_vec *bvec;
+	size_t size;
+	size_t total_size = 0;
 	struct ivc_blk_request *ivc_blk_req;
 
 	ivc_blk_req = (struct ivc_blk_request *)
 		tegra_hv_ivc_write_get_next_frame(vblkdev->ivck);
 	if (IS_ERR(ivc_blk_req)) {
 		dev_err(vblkdev->device, "can't get empty frame for write\n");
-		return 1;
+		return -EIO;
 	}
 
 	ivc_blk_req->cmd = vblkdev->cur_transfer_cmd;
-	vblkdev->serial_number++;
 
 	ivc_blk_req->sector_offset = vblkdev->cur_sector;
 	ivc_blk_req->sector_number = vblkdev->cur_nsect;
@@ -220,19 +228,28 @@ static int next_transfer(struct vblk_dev *vblkdev)
 		sizeof(struct ivc_blk_request));
 
 	if (vblkdev->cur_transfer_cmd == W_TRANSFER) {
-		memcpy((void *)ivc_blk_req + sizeof(struct ivc_blk_request),
-			vblkdev->cur_buffer,
-			vblkdev->config.hardsect_size*vblkdev->cur_nsect);
-
+		rq_for_each_segment(bvec, vblkdev->req, vblkdev->iter) {
+			size = bvec->bv_len;
+			vblkdev->cur_buffer  = page_address(bvec->bv_page) +
+						bvec->bv_offset;
+			memcpy((void *)ivc_blk_req +
+				sizeof(struct ivc_blk_request) + total_size,
+				vblkdev->cur_buffer , size);
+			total_size += size;
+			if (total_size == (vblkdev->cur_nsect *
+				vblkdev->config.hardsect_size))
+				goto exit;
+		}
+exit:
+		vblkdev->cur_sector = 0;
 		vblkdev->cur_buffer = NULL;
 	}
 
 	vblkdev->cur_sector = 0;
-	vblkdev->cur_nsect = 0;
 
 	if (tegra_hv_ivc_write_advance(vblkdev->ivck)) {
 		dev_err(vblkdev->device, "ivc write failed\n");
-		return 1;
+		return -EIO;
 	}
 
 	vblkdev->ready_to_receive = true;
@@ -244,12 +261,15 @@ static int get_data_from_io_server(struct vblk_dev *vblkdev)
 {
 	struct ivc_blk_result *ivc_blk_res;
 	int status = 0;
+	struct bio_vec *bvec;
+	size_t size;
+	size_t total_size = 0;
 
 	ivc_blk_res = (struct ivc_blk_result *)
 		tegra_hv_ivc_read_get_next_frame(vblkdev->ivck);
 	if (IS_ERR(ivc_blk_res)) {
 		dev_err(vblkdev->device, "ivc read failed\n");
-		return 1;
+		return -EIO;
 	}
 
 	status = ivc_blk_res->status;
@@ -262,49 +282,48 @@ static int get_data_from_io_server(struct vblk_dev *vblkdev)
 	}
 	if (!status) {
 		if (vblkdev->cur_ivc_req.cmd == R_TRANSFER) {
-			memcpy(vblkdev->cur_buffer,
-				(void *)ivc_blk_res +
-				sizeof(struct ivc_blk_result),
-				vblkdev->config.hardsect_size *
-				vblkdev->cur_ivc_req.sector_number);
-			if (vblkdev->cur_nsect)
-				vblkdev->cur_buffer +=
-					vblkdev->config.hardsect_size *
-					vblkdev->cur_ivc_req.sector_number;
-			else
-				vblkdev->cur_buffer = NULL;
+			rq_for_each_segment(bvec, vblkdev->req, vblkdev->iter) {
+				size = bvec->bv_len;
+				vblkdev->cur_buffer =
+					page_address(bvec->bv_page) +
+					bvec->bv_offset;
+				memcpy(vblkdev->cur_buffer ,
+					(void *)ivc_blk_res +
+					sizeof(struct ivc_blk_result) +
+					total_size,
+					size);
+
+				total_size += size;
+				if (total_size == (vblkdev->cur_nsect *
+					vblkdev->config.hardsect_size))
+					goto exit;
+			}
 		}
 	}
-
+exit:
 	if (tegra_hv_ivc_read_advance(vblkdev->ivck)) {
 		dev_err(vblkdev->device, "no empty frame for read\n");
-		return 1;
+		return -EIO;
 	}
 
 	return status;
-}
-
-static unsigned int rq_bio_count(struct request *rq)
-{
-	unsigned int n = 0;
-	struct bio_vec *bvec;
-	struct req_iterator iter;
-
-	rq_for_each_segment(bvec, rq, iter)
-		n++;
-
-	return n;
 }
 
 static int fetch_next_req(struct vblk_dev *vblkdev)
 {
 	vblk_fetch_request(vblkdev);
 	if (vblkdev->req == NULL)
-		return 1;
+		return -EINVAL;
 	else {
 		vblkdev->cur_transfer_cmd = rq_data_dir(vblkdev->req);
 		vblkdev->serial_number = 0;
-		vblkdev->total_frame = rq_bio_count(vblkdev->req);
+		vblkdev->total_frame = blk_rq_sectors(vblkdev->req) /
+					vblkdev->max_sectors_per_frame;
+		vblkdev->iter.i = 0;
+		vblkdev->iter.bio = NULL;
+		if (blk_rq_sectors(vblkdev->req) %
+			vblkdev->max_sectors_per_frame != 0)
+			vblkdev->total_frame++;
 
 		if (blk_rq_sectors(vblkdev->req) >
 			vblkdev->config.max_sectors_per_io) {
@@ -315,7 +334,7 @@ static int fetch_next_req(struct vblk_dev *vblkdev)
 			spin_lock(vblkdev->queue->queue_lock);
 			__blk_end_request_all(vblkdev->req, -EIO);
 			spin_unlock(vblkdev->queue->queue_lock);
-			return 1;
+			return -EINVAL;
 		}
 	}
 
@@ -324,9 +343,12 @@ static int fetch_next_req(struct vblk_dev *vblkdev)
 
 static void do_next_bio(struct vblk_dev *vblkdev)
 {
+	vblkdev->serial_number += 1;
 	vblkdev->cur_sector = blk_rq_pos(vblkdev->req);
-	vblkdev->cur_nsect = blk_rq_cur_sectors(vblkdev->req);
-	vblkdev->cur_buffer = vblkdev->req->buffer;
+	if (vblkdev->serial_number == vblkdev->total_frame)
+		vblkdev->cur_nsect = blk_rq_sectors(vblkdev->req);
+	else
+		vblkdev->cur_nsect = vblkdev->max_sectors_per_frame;
 
 	if (vblkdev->cur_nsect > vblkdev->max_sectors_per_frame) {
 		dev_err(vblkdev->device,
@@ -383,7 +405,9 @@ static void vblk_request_work(struct work_struct *ws)
 
 		if (vblkdev->ready_to_receive == false) {
 			spin_lock(vblkdev->queue->queue_lock);
-			if (!__blk_end_request_cur(vblkdev->req, 0)) {
+			if (!__blk_end_request(vblkdev->req, 0,
+				vblkdev->cur_nsect *
+				vblkdev->config.hardsect_size)) {
 				spin_unlock(vblkdev->queue->queue_lock);
 				if (fetch_next_req(vblkdev))
 					return;

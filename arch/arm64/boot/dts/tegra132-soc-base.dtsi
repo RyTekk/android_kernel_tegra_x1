@@ -17,6 +17,7 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/memory/tegra-swgroup.h>
+#include <dt-bindings/soc/nvidia,tegra132-powergate.h>
 #include "tegra132-platforms/tegra132-prods.dtsi"
 
 #include "denver.dtsi"
@@ -30,6 +31,118 @@
 	interrupt-parent = <&intc>;
 	#address-cells = <2>;
 	#size-cells = <2>;
+
+	mc_clk_pd: mc-clk-pd {
+		compatible = "nvidia,tegra132-mc-clk-pd";
+		#power-domain-cells = <0>;
+	};
+
+	nvavp_pd: nvavp-pd {
+		compatible = "nvidia,tegra132-nvavp-pd";
+		#power-domain-cells = <0>;
+		power-domains = <&mc_clk_pd>;
+	};
+
+	host1x_pd: host1x-pd {
+		compatible = "nvidia,tegra132-host1x-pd";
+		is_off;
+		host1x;
+		#power-domain-cells = <0>;
+		power-domains = <&mc_clk_pd>;
+	};
+
+	tsec_pd: tsec-pd {
+		compatible = "nvidia,tegra132-tsec-pd";
+		is_off;
+		#power-domain-cells = <0>;
+		power-domains = <&host1x_pd>;
+	};
+
+	vic03_pd: vic03-pd {
+		compatible = "nvidia,tegra132-vic03-pd";
+		is_off;
+		#power-domain-cells = <0>;
+		power-domains = <&host1x_pd>;
+		partition-id = <TEGRA_POWERGATE_VIC>;
+	};
+
+	msenc_pd: msenc-pd {
+		compatible = "nvidia,tegra132-msenc-pd";
+		is_off;
+		#power-domain-cells = <0>;
+		power-domains = <&host1x_pd>;
+		partition-id = <TEGRA_POWERGATE_MPE>;
+	};
+
+	gpu_pd: gpu-pd {
+		compatible = "nvidia,tegra132-gpu-pd";
+		is_off;
+		#power-domain-cells = <0>;
+		power-domains = <&host1x_pd>;
+		partition-id = <TEGRA_POWERGATE_GPU>;
+	};
+
+	ve_pd: ve-pd {
+		compatible = "nvidia,tegra132-ve-pd";
+		is_off;
+		#power-domain-cells = <0>;
+		power-domains = <&host1x_pd>;
+		partition-id = <TEGRA_POWERGATE_VE>;
+	};
+
+	vde_pd: vde-pd {
+		compatible = "nvidia,tegra132-vde-pd";
+		#power-domain-cells = <0>;
+		partition-id = <TEGRA_POWERGATE_VDEC>;
+	};
+
+	pcie_pd: pcie-pd {
+		compatible = "nvidia, tegra132-pcie-pd";
+		#power-domain-cells = <0>;
+		partition-id = <TEGRA_POWERGATE_PCIE>;
+	};
+
+	sata_pd: sata-pd {
+		compatible = "nvidia, tegra132-sata-pd";
+		#power-domain-cells = <0>;
+		partition-id = <TEGRA_POWERGATE_SATA>;
+	};
+
+	sor_pd: sor-pd {
+		compatible = "nvidia, tegra132-sor-pd";
+		#power-domain-cells = <0>;
+		partition-id = <TEGRA_POWERGATE_SOR>;
+	};
+
+	disa_pd: disa-pd {
+		compatible = "nvidia, tegra132-disa-pd";
+		#power-domain-cells = <0>;
+		partition-id = <TEGRA_POWERGATE_DISA>;
+	};
+
+	disb_pd: disb-pd {
+		compatible = "nvidia, tegra132-disb-pd";
+		#power-domain-cells = <0>;
+		partition-id = <TEGRA_POWERGATE_DISB>;
+	};
+
+	xusba_pd: xusba-pd {
+		compatible = "nvidia, tegra132-xusba-pd";
+		#power-domain-cells = <0>;
+		partition-id = <TEGRA_POWERGATE_XUSBA>;
+	};
+
+	xusbb_pd: xusbb-pd {
+		compatible = "nvidia, tegra132-xusbb-pd";
+		#power-domain-cells = <0>;
+		partition-id = <TEGRA_POWERGATE_XUSBB>;
+	};
+
+	xusbc_pd: xusbc-pd {
+		compatible = "nvidia, tegra132-xusbc-pd";
+		#power-domain-cells = <0>;
+		partition-id = <TEGRA_POWERGATE_XUSBC>;
+	};
 
 	mc {
 		compatible = "nvidia,tegra-mc";
@@ -83,6 +196,7 @@
 
 	se: se@70012000 {
 		compatible = "nvidia,tegra124-se";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x70012000 0x0 0x2000 /* SE base */
 			0x0 0x7000e400 0x0 0x400>; /* PMC base */
 		interrupts = <0 58 0x04>;
@@ -116,28 +230,25 @@
 			common_as: common {
 				iova-start = <0x0 0x80000000>;
 				iova-size = <0x0 0x7FF00000>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <0>;
 				gap-page = <1>;
 			};
 			ppcs_as: ppcs {
 				iova-start = <0x0 0x80000000>;
 				iova-size = <0x0 0x7FF00000>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <1>;
 				gap-page = <1>;
 			};
 			dc_as: dc {
 				iova-start = <0x0 0x00010000>;
 				iova-size = <0x0 0xFFFEFFFF>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
 			gpu_as: gpu {
 				iova-start = <0x0 0x00100000>;
 				iova-size = <0x0 0xFFEFFFFF>;
-				alignment = <0xFFFFF>;
+				alignment = <0x20000>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
@@ -150,8 +261,29 @@
 		#clock-cells = <1>;
 	};
 
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		iram: iram-carveout {
+			compatible = "nvidia,iram-carveout";
+			reg = <0x0 0x40001000 0x0 0x3F000>;
+			no-map;
+		};
+	};
+
+	tegra-carveouts {
+		compatible = "nvidia,carveouts";
+		iommus = <&smmu TEGRA_SWGROUP_HC>,
+			 <&smmu TEGRA_SWGROUP_AVPC>;
+		memory-region = <&iram>;
+		status = "okay";
+         };
+
 	apbdma: dma@60020000 {
 		compatible = "nvidia,tegra124-apbdma";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x60020000 0x0 0x1400>;
 		interrupts = <0 104 0x04
 			      0 105 0x04
@@ -636,6 +768,7 @@
 
 	hda@70030000 {
 		compatible = "nvidia,tegra30-hda";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x70030000 0x0 0x10000>;
 		interrupts = <0 81 0x04>;
 		status = "disabled";
@@ -643,6 +776,8 @@
 
 	host1x: host1x {
 		compatible = "nvidia,tegra124-host1x", "simple-bus";
+		power-domains = <&host1x_pd>;
+		wakeup-capable;
 		reg = <0x0 0x50000000 0x0 0x00034000>;
 		interrupts = <0 65 0x04   /* mpcore syncpt */
 			      0 67 0x04>; /* mpcore general */
@@ -660,6 +795,7 @@
 
 		vi {
 			compatible = "nvidia,tegra124-vi";
+			power-domains = <&ve_pd>;
 			reg = <0x54080000 0x00040000>;
 			interrupts = <0 69 0x04>;
 			iommus = <&smmu TEGRA_SWGROUP_VI>;
@@ -668,6 +804,7 @@
 
 		isp@54600000 {
 			compatible = "nvidia,tegra124-isp";
+			power-domains = <&ve_pd>;
 			reg = <0x54600000 0x00040000>;
 			interrupts = <0 71 0x04>;
 			iommus = <&smmu TEGRA_SWGROUP_ISP>,
@@ -676,6 +813,7 @@
 
 		isp@54680000 {
 			compatible = "nvidia,tegra124-isp";
+			power-domains = <&ve_pd>;
 			reg = <0x54680000 0x00040000>;
 			interrupts = <0 70 0x04>;
 			iommus = <&smmu TEGRA_SWGROUP_ISP>,
@@ -685,6 +823,7 @@
 
 		dc@54200000 {
 			compatible = "nvidia,tegra124-dc";
+			power-domains = <&mc_clk_pd>;
 			reg = <0x54200000 0x00040000>;
 			interrupts = <0 73 0x04>;
 			iommus = <&smmu TEGRA_SWGROUP_DC>,
@@ -698,6 +837,7 @@
 
 		dc@54240000 {
 			compatible = "nvidia,tegra124-dc";
+			power-domains = <&mc_clk_pd>;
 			reg = <0x54240000 0x00040000>;
 			interrupts = <0 74 0x04>;
 			iommus = <&smmu TEGRA_SWGROUP_DCB>;
@@ -724,6 +864,7 @@
 
 		vic {
 			compatible = "nvidia,tegra124-vic";
+			power-domains = <&vic03_pd>;
 			reg = <0x54340000 0x00040000>;
 			iommus = <&smmu TEGRA_SWGROUP_VIC>;
 			status = "disabled";
@@ -731,6 +872,7 @@
 
 		msenc {
 			compatible = "nvidia,tegra124-msenc";
+			power-domains = <&msenc_pd>;
 			reg = <0x544c0000 0x00040000>;
 			iommus = <&smmu TEGRA_SWGROUP_MSENC>;
 			status = "disabled";
@@ -738,6 +880,7 @@
 
 		tsec {
 			compatible = "nvidia,tegra124-tsec";
+			power-domains = <&tsec_pd>;
 			reg = <0x54500000 0x00040000>;
 			iommus = <&smmu TEGRA_SWGROUP_TSEC>;
 			status = "disabled";
@@ -758,6 +901,7 @@
 
 		nvavp {
 			compatible = "nvidia,tegra124-nvavp";
+			power-domains = <&nvavp_pd>;
 			interrupts = <0 4 0x04>; /* mailbox AVP IRQ */
 			reg = <0x60001000 0x0000e200>;
 			status = "disabled";
@@ -765,13 +909,17 @@
 	};
 
 	gk20a {
-		compatible = "nvidia,tegra124-gk20a";
+		compatible = "nvidia,tegra124-gk20a", "nvidia,gk20a";
+		power-domains = <&gpu_pd>;
 		nvidia,host1x = <&host1x>;
 		reg = <0x0 0x57000000 0x0 0x01000000>,
 		      <0x0 0x58000000 0x0 0x01000000>,
 		      <0x0 0x538F0000 0x0 0x00001000>;
-		interrupts = <0 157 0x04
-			      0 158 0x04>;
+		interrupts = <GIC_SPI 157 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 158 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "stall", "nonstall";
+		resets = <&tegra_car 184>;
+		reset-names = "gpu";
 		iommus = <&smmu TEGRA_SWGROUP_GPUB>;
 		access-vpr-phys;
 		status = "disabled";
@@ -779,6 +927,7 @@
 
 	xusb@70090000 {
 		compatible = "nvidia,tegra124-xhci";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x70090000 0x0 0x8000
 		       0x0 0x70098000 0x0 0x1000
 		       0x0 0x70099000 0x0 0x1000
@@ -799,6 +948,7 @@
 
 	pcie-controller {
 		compatible = "nvidia,tegra124-pcie";
+		power-domains = <&mc_clk_pd>;
 		device_type = "pci";
 		reg = <0x0 0x01003000 0x0 0x00000800   /* PADS registers */
 		       0x0 0x01003800 0x0 0x00000800   /* AFI registers */
@@ -870,6 +1020,7 @@
 
 	sdhci@700b0600 {
 		compatible = "nvidia,tegra124-sdhci";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x700b0600 0x0 0x200>;
 		interrupts = < 0 31 0x04 >;
 		iommus = <&smmu TEGRA_SWGROUP_SDMMC4A>;
@@ -877,6 +1028,7 @@
 	};
 	sdhci@700b0400 {
 		compatible = "nvidia,tegra124-sdhci";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x700b0400 0x0 0x200>;
 		interrupts = < 0 19 0x04 >;
 		iommus = <&smmu TEGRA_SWGROUP_SDMMC3A>;
@@ -884,6 +1036,7 @@
 	};
 	sdhci@700b0200 {
 		compatible = "nvidia,tegra124-sdhci";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x700b0200 0x0 0x200>;
 		interrupts = < 0 15 0x04 >;
 		iommus = <&smmu TEGRA_SWGROUP_SDMMC2A>;
@@ -891,6 +1044,7 @@
 	};
 	sdhci@700b0000 {
 		compatible = "nvidia,tegra124-sdhci";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x700b0000 0x0 0x200>;
 		interrupts = < 0 14 0x04 >;
 		iommus = <&smmu TEGRA_SWGROUP_SDMMC1A>;
@@ -1082,6 +1236,7 @@
 
 	otg: otg@7d000000 {
 		compatible = "nvidia,tegra132-otg";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x7d000000 0x0 0x4000>;
 		interrupts = <0 20 0x04>;
 		status = "disabled";
@@ -1130,6 +1285,7 @@
 			0x0 0x60005070 0x0 0x8>;	/* TMR7 registers */
 		interrupts = <0 123 0x04>;
 		nvidia,expiry-count = <4>;
+		nvidia,extend-watchdog-suspend;
 		status = "disabled";
 	};
 
@@ -1143,6 +1299,7 @@
 
 	ehci2: ehci@7d004000 {
 		compatible = "nvidia,tegra132-ehci";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x7d004000 0x0 0x4000>;
 		interrupts = <0 21 0x04>;
 		nvidia,has-hostpc;
@@ -1164,6 +1321,7 @@
 
 	ehci3: ehci@7d008000 {
 		compatible = "nvidia,tegra132-ehci";
+		power-domains = <&mc_clk_pd>;
 		reg = <0x0 0x7d008000 0x0 0x4000>;
 		interrupts = <0 97 0x04>;
 		nvidia,has-hostpc;
@@ -1342,12 +1500,5 @@
 			device_type = "throttle_dev";
 			depth = <80>;
 		};
-	};
-
-	tegra_carveouts {
-		compatible = "nvidia,carveouts";
-		iommus = <&smmu TEGRA_SWGROUP_HC>,
-			 <&smmu TEGRA_SWGROUP_AVPC>;
-		status = "okay";
 	};
 };

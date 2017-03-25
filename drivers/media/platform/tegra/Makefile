@@ -4,8 +4,12 @@ subdir-ccflags-$(CONFIG_ARM) := -Werror
 #
 # Makefile for the video capture/playback device drivers.
 #
+obj-$(CONFIG_ARCH_TEGRA_21x_SOC)	+= mipical/
 obj-y				+= cam_dev/
 obj-y				+= vi/
+obj-y				+= csi/
+obj-$(CONFIG_VIDEO_TEGRA_VI_TPG) += tpg/
+obj-$(CONFIG_VIDEO_CAMERA)	+= camera/
 ccflags-y	+= -Idrivers/video/tegra/camera
 ccflags-y	+= -Idrivers/video/tegra/host
 ccflags-y	+= -Idrivers/video/tegra/host/isp
@@ -39,10 +43,8 @@ obj-$(CONFIG_VIDEO_AD5820)	+= ad5820.o
 obj-$(CONFIG_VIDEO_AD5816)	+= ad5816.o
 obj-$(CONFIG_VIDEO_IMX091)	+= imx091.o nvc_utilities.o
 obj-$(CONFIG_VIDEO_IMX135)	+= imx135.o
-obj-$(CONFIG_VIDEO_IMX214)	+= imx214.o
 obj-$(CONFIG_VIDEO_IMX179)	+= imx179.o
 obj-$(CONFIG_VIDEO_IMX132)	+= imx132.o
-obj-$(CONFIG_VIDEO_IMX219)	+= imx219.o
 obj-$(CONFIG_VIDEO_IMX208)	+= imx208.o
 obj-$(CONFIG_VIDEO_AR0261)	+= ar0261.o
 obj-$(CONFIG_DEBUG_FS)		+= nvc_debugfs.o
@@ -50,6 +52,7 @@ obj-$(CONFIG_VIDEO_OV5693)	+= ov5693.o
 obj-$(CONFIG_VIDEO_AD5823)	+= ad5823.o
 obj-$(CONFIG_VIDEO_OV7695)	+= ov7695.o
 obj-$(CONFIG_VIDEO_MT9M114)	+= mt9m114.o
+obj-$(CONFIG_VIDEO_OV10823)	+= ov10823.o
 obj-$(CONFIG_VIDEO_CAMERA)	+= camera.o
 obj-$(CONFIG_VIDEO_CAMERA)	+= camera.o regmap_util.o
 obj-$(CONFIG_VIDEO_ISC)		+= auto/

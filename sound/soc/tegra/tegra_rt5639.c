@@ -1083,7 +1083,6 @@ static struct snd_soc_dai_link tegra_rt5639_dai[NUM_DAI_LINKS] = {
 		.cpu_dai_name = "tegra30-i2s.1",
 		.codec_dai_name = "rt5639-aif1",
 		.ops = &tegra_rt5639_ops,
-		.ignore_suspend = 1,
 		.ignore_pmdown_time = 1,
 
 		.no_pcm = 1,
@@ -1140,6 +1139,33 @@ static int tegra_rt5639_suspend_post(struct snd_soc_card *card)
 
 static int tegra_rt5639_resume_pre(struct snd_soc_card *card)
 {
+	struct tegra_rt5639 *machine = snd_soc_card_get_drvdata(card);
+	int i, suspend_allowed = 1;
+
+	/*In Voice Call we ignore suspend..so check for that*/
+	for (i = 0; i < machine->pcard->num_links; i++) {
+		if (machine->pcard->dai_link[i].ignore_suspend) {
+			suspend_allowed = 0;
+			break;
+		}
+	}
+
+	if (suspend_allowed) {
+		/*This may be required if dapm setbias level is not called in
+		some cases, may be due to a wrong dapm map*/
+		if (!machine->clock_enabled &&
+				machine->bias_level != SND_SOC_BIAS_OFF) {
+			machine->clock_enabled = 1;
+			tegra_asoc_utils_clk_enable(&machine->util_data);
+		}
+		/*TODO: Enable Audio Regulators*/
+	}
+
+	return 0;
+}
+
+static int tegra_rt5639_resume_post(struct snd_soc_card *card)
+{
 	int val;
 	struct snd_soc_jack_gpio *gpio = &tegra_rt5639_hp_jack_gpio;
 	struct tegra_rt5639 *machine = snd_soc_card_get_drvdata(card);
@@ -1162,14 +1188,6 @@ static int tegra_rt5639_resume_pre(struct snd_soc_card *card)
 			snd_soc_jack_report(gpio->jack, val, gpio->report);
 			enable_irq(gpio_to_irq(gpio->gpio));
 		}
-		/*This may be required if dapm setbias level is not called in
-		some cases, may be due to a wrong dapm map*/
-		if (!machine->clock_enabled &&
-				machine->bias_level != SND_SOC_BIAS_OFF) {
-			machine->clock_enabled = 1;
-			tegra_asoc_utils_clk_enable(&machine->util_data);
-		}
-		/*TODO: Enable Audio Regulators*/
 	}
 
 	return 0;
@@ -1214,6 +1232,7 @@ static struct snd_soc_card snd_soc_tegra_rt5639 = {
 	.suspend_post = tegra_rt5639_suspend_post,
 	.suspend_pre = tegra_rt5639_suspend_pre,
 	.resume_pre = tegra_rt5639_resume_pre,
+	.resume_post = tegra_rt5639_resume_post,
 	.set_bias_level = tegra_rt5639_set_bias_level,
 	.set_bias_level_post = tegra_rt5639_set_bias_level_post,
 	.controls = ardbeg_controls,
@@ -1512,6 +1531,56 @@ err_free_machine:
 	return ret;
 }
 
+void disable_rt5639_regulators(struct tegra_rt5639 *machine)
+{
+	if (machine->digital_reg) {
+		regulator_disable(machine->digital_reg);
+		regulator_put(machine->digital_reg);
+	}
+	if (machine->analog_reg) {
+		regulator_disable(machine->analog_reg);
+		regulator_put(machine->analog_reg);
+	}
+	if (machine->spk_reg)
+		regulator_put(machine->spk_reg);
+
+	if (machine->dmic_reg)
+		regulator_put(machine->dmic_reg);
+
+	if (machine->codec_reg) {
+		regulator_disable(machine->codec_reg);
+		regulator_put(machine->codec_reg);
+	}
+
+	return;
+}
+
+void tegra_rt5639_driver_shutdown(struct platform_device *pdev)
+{
+	struct snd_soc_card *card = platform_get_drvdata(pdev);
+	struct snd_soc_codec *codec;
+	struct tegra_rt5639 *machine = snd_soc_card_get_drvdata(card);
+	struct tegra_asoc_platform_data *pdata = machine->pdata;
+
+	if (machine->gpio_requested & GPIO_HP_DET)
+			snd_soc_jack_free_gpios(&tegra_rt5639_hp_jack,
+						1,
+						&tegra_rt5639_hp_jack_gpio);
+
+	codec = card->rtd[DAI_LINK_HIFI].codec;
+	rt5639_reset(codec);
+
+	if (gpio_is_valid(pdata->gpio_ldo1_en)) {
+		gpio_set_value(pdata->gpio_ldo1_en, 0);
+		gpio_free(pdata->gpio_ldo1_en);
+	}
+
+	disable_rt5639_regulators(machine);
+	kfree(machine);
+
+	return;
+}
+
 static int tegra_rt5639_driver_remove(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = platform_get_drvdata(pdev);
@@ -1531,24 +1600,7 @@ static int tegra_rt5639_driver_remove(struct platform_device *pdev)
 					1,
 					&tegra_rt5639_hp_jack_gpio);
 
-	if (machine->digital_reg) {
-		regulator_disable(machine->digital_reg);
-		regulator_put(machine->digital_reg);
-	}
-	if (machine->analog_reg) {
-		regulator_disable(machine->analog_reg);
-		regulator_put(machine->analog_reg);
-	}
-	if (machine->spk_reg)
-		regulator_put(machine->spk_reg);
-
-	if (machine->dmic_reg)
-		regulator_put(machine->dmic_reg);
-	if (machine->codec_reg) {
-		regulator_disable(machine->codec_reg);
-		regulator_put(machine->codec_reg);
-	}
-
+	disable_rt5639_regulators(machine);
 
 	tegra_asoc_utils_fini(&machine->util_data);
 
@@ -1579,6 +1631,7 @@ static struct platform_driver tegra_rt5639_driver = {
 	},
 	.probe = tegra_rt5639_driver_probe,
 	.remove = tegra_rt5639_driver_remove,
+	.shutdown = tegra_rt5639_driver_shutdown,
 };
 
 static int __init tegra_rt5639_modinit(void)

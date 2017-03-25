@@ -261,6 +261,7 @@ static void reg_fixed_voltage_shutdown(struct platform_device *pdev)
 		gpio_set_value_cansleep(config->gpio, !config->enable_high);
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int reg_fixed_voltage_suspend(struct device *dev)
 {
 	struct fixed_voltage_data *drvdata = dev_get_drvdata(dev);
@@ -294,6 +295,7 @@ static int reg_fixed_voltage_resume(struct device *dev)
 
 	return 0;
 }
+#endif
 
 static const struct dev_pm_ops reg_fixed_voltage_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(reg_fixed_voltage_suspend,
@@ -342,8 +344,8 @@ MODULE_DEVICE_TABLE(of, fixed_sync_of_match);
 #endif
 
 static const struct dev_pm_ops reg_fixed_sync_voltage_pm_ops = {
-	.suspend_late = reg_fixed_voltage_suspend,
-	.resume_early = reg_fixed_voltage_resume,
+	SET_SYSTEM_SLEEP_PM_OPS(reg_fixed_voltage_suspend,
+			reg_fixed_voltage_resume)
 };
 
 static struct platform_driver regulator_fixed_sync_voltage_driver = {

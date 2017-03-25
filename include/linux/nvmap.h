@@ -3,7 +3,7 @@
  *
  * structure declarations for nvmem and nvmap user-space ioctls
  *
- * Copyright (c) 2009-2015, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2009-2016, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -81,11 +81,15 @@ struct nvmap_platform_carveout {
 	struct device *cma_dev;
 	bool resize;
 	struct device *dma_dev;
+	struct device dev;
+	struct dma_declare_info *dma_info;
 	bool is_ivm;
 	int peer;
 	int vmid;
 	int can_alloc;
 	bool enable_static_dma_map;
+	bool disable_dynamic_dma_map;
+	bool init_done;	/* FIXME: remove once all caveouts use reserved-memory */
 };
 
 struct nvmap_platform_data {
@@ -120,7 +124,8 @@ enum {
 enum {
 	NVMAP_PAGES_UNRESERVE = 0,
 	NVMAP_PAGES_RESERVE,
-	NVMAP_INSERT_PAGES_ON_UNRESERVE
+	NVMAP_INSERT_PAGES_ON_UNRESERVE,
+	NVMAP_PAGES_PROT_AND_CLEAN,
 };
 
 struct nvmap_create_handle {

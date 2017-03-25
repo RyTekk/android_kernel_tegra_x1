@@ -1,7 +1,7 @@
 /*
  * drivers/platform/tegra/tegra21_emc_cc_r21012.c
  *
- * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -22,8 +22,8 @@
 /* Select v21021 versions of some functions. */
 #define __TEGRA_EMC_V21021
 
-#include <tegra/tegra21_emc.h>
-#include <tegra/mc-regs-t21x.h>
+#include <linux/platform/tegra/tegra21_emc.h>
+#include <linux/platform/tegra/mc-regs-t21x.h>
 
 #include "iomap.h"
 
@@ -39,16 +39,16 @@
  * The division portion of the average operation.
  */
 #define __AVERAGE_PTFV(dev)						\
-	next_timing->ptfv_list[PTFV_DQSOSC_MOVAVG_ ## dev ## _INDEX] =  \
-	next_timing->ptfv_list[PTFV_DQSOSC_MOVAVG_ ## dev ## _INDEX] /	\
-	next_timing->ptfv_list[PTFV_DVFS_SAMPLES_INDEX]
+	({ next_timing->ptfv_list[PTFV_DQSOSC_MOVAVG_ ## dev ## _INDEX] = \
+	   next_timing->ptfv_list[PTFV_DQSOSC_MOVAVG_ ## dev ## _INDEX] / \
+	   next_timing->ptfv_list[PTFV_DVFS_SAMPLES_INDEX]; })
 
 /*
  * Convert val to fixed point and add it to the temporary average.
  */
 #define __INCREMENT_PTFV(dev, val)					\
-	next_timing->ptfv_list[PTFV_DQSOSC_MOVAVG_ ## dev ## _INDEX] += \
-	((val) * MOVAVG_PRECISION_FACTOR)
+	({ next_timing->ptfv_list[PTFV_DQSOSC_MOVAVG_ ## dev ## _INDEX] += \
+	   ((val) * MOVAVG_PRECISION_FACTOR); })
 
 /*
  * Convert a moving average back to integral form and return the value.
@@ -75,8 +75,8 @@
 	} while (0)
 
 /* Access a particular average. */
-#define __MOVAVG(timing,dev)                      \
-    timing->ptfv_list[PTFV_DQSOSC_MOVAVG_ ## dev ## _INDEX]
+#define __MOVAVG(timing, dev)                      \
+	((timing)->ptfv_list[PTFV_DQSOSC_MOVAVG_ ## dev ## _INDEX])
 
 static u32 update_clock_tree_delay(struct tegra21_emc_table *last_timing,
 				   struct tegra21_emc_table *next_timing,
@@ -157,7 +157,7 @@ static u32 update_clock_tree_delay(struct tegra21_emc_table *last_timing,
 		__INCREMENT_PTFV(C0D0U0, cval);
 	else if (dvfs_update)
 		__AVERAGE_PTFV(C0D0U0);
-	else if(periodic_training_update)
+	else if (periodic_training_update)
 		__WEIGHTED_UPDATE_PTFV(C0D0U0, cval);
 
 	if (dvfs_update || periodic_training_update) {
@@ -225,7 +225,7 @@ static u32 update_clock_tree_delay(struct tegra21_emc_table *last_timing,
 			__INCREMENT_PTFV(C1D0U1, cval);
 		else if (dvfs_update)
 			__AVERAGE_PTFV(C1D0U1);
-		else if(periodic_training_update)
+		else if (periodic_training_update)
 			__WEIGHTED_UPDATE_PTFV(C1D0U1, cval);
 
 		if (dvfs_update || periodic_training_update) {
@@ -278,7 +278,8 @@ static u32 update_clock_tree_delay(struct tegra21_emc_table *last_timing,
 		/*
 		 * Dev1 LSB.
 		 */
-		mrr_req = (mrr_req & ~EMC_MRR_MA_MASK) | (18 << EMC_MRR_MA_SHIFT);
+		mrr_req = (mrr_req & ~EMC_MRR_MA_MASK) |
+			  (18 << EMC_MRR_MA_SHIFT);
 		emc_writel(mrr_req, EMC_MRR);
 
 		WARN(wait_for_update(EMC_EMC_STATUS,
@@ -333,7 +334,7 @@ static u32 update_clock_tree_delay(struct tegra21_emc_table *last_timing,
 		__INCREMENT_PTFV(C0D1U1, cval);
 	else if (dvfs_update)
 		__AVERAGE_PTFV(C0D1U1);
-	else if(periodic_training_update)
+	else if (periodic_training_update)
 		__WEIGHTED_UPDATE_PTFV(C0D1U1, cval);
 
 	if (dvfs_update || periodic_training_update) {
@@ -349,7 +350,7 @@ static u32 update_clock_tree_delay(struct tegra21_emc_table *last_timing,
 				__MOVAVG_AC(next_timing, C0D1U1);
 	}
 
-	if (channel_mode == DUAL_CHANNEL){
+	if (channel_mode == DUAL_CHANNEL) {
 		cval = (1000000 * actual_osc_clocks(last_timing->run_clocks)) /
 			(last_timing_rate_mhz * 2 * temp1_0);
 
@@ -360,7 +361,7 @@ static u32 update_clock_tree_delay(struct tegra21_emc_table *last_timing,
 		else if (periodic_training_update)
 			__WEIGHTED_UPDATE_PTFV(C1D1U0, cval);
 
-		if(dvfs_update || periodic_training_update) {
+		if (dvfs_update || periodic_training_update) {
 			tdel = next_timing->current_dram_clktree_c1d1u0 -
 				__MOVAVG_AC(next_timing, C1D1U0);
 			tmdel = (tdel < 0) ? -1 * tdel : tdel;
@@ -407,10 +408,8 @@ static u32 periodic_compensation_handler(u32 type, u32 dram_dev_num,
 					 struct tegra21_emc_table *next_timing)
 {
 #define __COPY_EMA(nt, lt, dev)						\
-	do {								\
-		__MOVAVG(nt, dev) = __MOVAVG(lt, dev) *			\
-			(nt)->ptfv_list[PTFV_DVFS_SAMPLES_INDEX];	\
-	} while (0)
+	({ __MOVAVG(nt, dev) = __MOVAVG(lt, dev) *			\
+	   (nt)->ptfv_list[PTFV_DVFS_SAMPLES_INDEX]; })
 
 	u32 i;
 	u32 adel = 0;
@@ -449,7 +448,7 @@ static u32 periodic_compensation_handler(u32 type, u32 dram_dev_num,
 			__MOVAVG(next_timing, C1D1U0) = 0;
 			__MOVAVG(next_timing, C1D1U1) = 0;
 
-			for (i = 0; i < samples; i++){
+			for (i = 0; i < samples; i++) {
 				start_periodic_compensation();
 				udelay(delay);
 
@@ -491,7 +490,7 @@ u32 __do_periodic_emc_compensation_r21021(
 {
 	u32 dram_dev_num;
 	u32 channel_mode;
-	u32 emc_cfg,emc_cfg_o;
+	u32 emc_cfg, emc_cfg_o;
 	u32 emc_dbg_o;
 	u32 del, i;
 	u32 list[] = {
@@ -1090,11 +1089,14 @@ void emc_set_clock_r21021(struct tegra21_emc_table *next_timing,
 					last_timing->burst_regs[EMC_W2P_INDEX];
 			}
 
-			if((last_timing->burst_regs[EMC_W2P_INDEX] ^ W2P_war) ||
-			   (last_timing->burst_regs[EMC_R2P_INDEX] ^ R2P_war) ||
-			   (last_timing->burst_regs[EMC_RP_INDEX] ^ RP_war) ||
-			   (last_timing->burst_regs[EMC_TRPAB_INDEX] ^
-			    TRPab_war)) {
+			if ((last_timing->burst_regs[EMC_W2P_INDEX] ^
+			     W2P_war) ||
+			    (last_timing->burst_regs[EMC_R2P_INDEX] ^
+			     R2P_war) ||
+			    (last_timing->burst_regs[EMC_RP_INDEX] ^
+			     RP_war) ||
+			    (last_timing->burst_regs[EMC_TRPAB_INDEX] ^
+			     TRPab_war)) {
 				emc_writel(RP_war, EMC_RP);
 				emc_writel(R2P_war, EMC_R2P);
 				emc_writel(W2P_war, EMC_W2P);
@@ -1472,7 +1474,7 @@ void emc_set_clock_r21021(struct tegra21_emc_table *next_timing,
 	 *   Ramp down.
 	 */
 	emc_cc_dbg(STEPS, "Step 11\n");
-        ccfifo_writel(0x0, EMC_CFG_SYNC,
+	ccfifo_writel(0x0, EMC_CFG_SYNC,
 		      dram_type == DRAM_TYPE_LPDDR4 ? 0 : ref_delay);
 
 	emc_dbg_active = emc_dbg | (EMC_DBG_WRITE_MUX_ACTIVE | /* Redundant. */
@@ -1707,7 +1709,7 @@ void emc_set_clock_r21021(struct tegra21_emc_table *next_timing,
 	 *   Restore ZCAL and ZCAL interval.
 	 */
 	emc_cc_dbg(STEPS, "Step 21\n");
-        if (save_restore_clkstop_pd || opt_zcal_en_cc) {
+	if (save_restore_clkstop_pd || opt_zcal_en_cc) {
 		ccfifo_writel(emc_dbg_o | EMC_DBG_WRITE_MUX_ACTIVE, EMC_DBG, 0);
 		if (opt_zcal_en_cc && dram_type != DRAM_TYPE_LPDDR4)
 			ccfifo_writel(next_timing->

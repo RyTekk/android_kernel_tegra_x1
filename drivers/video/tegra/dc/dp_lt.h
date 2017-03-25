@@ -63,6 +63,7 @@ struct tegra_dp_lt_data {
 	u32 pre_emphasis[4]; /* post cursor1 */
 	u32 post_cursor2[4];
 	u32 tx_pu;
+	u32 load_adj;
 	u32 n_lanes;
 	u32 link_bw;
 
@@ -70,15 +71,16 @@ struct tegra_dp_lt_data {
 	u32 ce_retry;
 };
 
+/* CTS approved list. Do not alter. */
 static const u8 tegra_dp_link_config_priority[][2] = {
 	/* link bandwidth, lane count */
 	{SOR_LINK_SPEED_G5_4, 4}, /* 21.6Gbps */
-	{SOR_LINK_SPEED_G5_4, 2}, /* 10.8Gbps */
 	{SOR_LINK_SPEED_G2_7, 4}, /* 10.8Gbps */
 	{SOR_LINK_SPEED_G1_62, 4}, /* 6.48Gbps */
-	{SOR_LINK_SPEED_G5_4, 1}, /* 5.4Gbps */
+	{SOR_LINK_SPEED_G5_4, 2}, /* 10.8Gbps */
 	{SOR_LINK_SPEED_G2_7, 2}, /* 5.4Gbps */
 	{SOR_LINK_SPEED_G1_62, 2}, /* 3.24Gbps */
+	{SOR_LINK_SPEED_G5_4, 1}, /* 5.4Gbps */
 	{SOR_LINK_SPEED_G2_7, 1}, /* 2.7Gbps */
 	{SOR_LINK_SPEED_G1_62, 1}, /* 1.62Gbps */
 };
@@ -266,19 +268,20 @@ static const u32 tegra_dp_tx_pu[][4][4] = {
 
 static inline int tegra_dp_is_max_vs(u32 pe, u32 vs)
 {
-	return (vs < (DRIVE_CURRENT_L3 - pe)) ? 0 : 1;
+	return vs >= DRIVE_CURRENT_L3;
 }
 
 static inline int tegra_dp_is_max_pe(u32 pe, u32 vs)
 {
-	return (pe < (PRE_EMPHASIS_L3 - vs)) ? 0 : 1;
+	return pe >= PRE_EMPHASIS_L3;
 }
 
 static inline int tegra_dp_is_max_pc(u32 pc)
 {
-	return (pc < POST_CURSOR2_L3) ? 0 : 1;
+	return pc >= POST_CURSOR2_L3;
 }
 
+void tegra_dp_update_link_config(struct tegra_dc_dp_data *dp);
 void tegra_dp_lt_init(struct tegra_dp_lt_data *lt_data,
 			struct tegra_dc_dp_data *dp);
 void tegra_dp_lt_set_pending_evt(struct tegra_dp_lt_data *lt_data);

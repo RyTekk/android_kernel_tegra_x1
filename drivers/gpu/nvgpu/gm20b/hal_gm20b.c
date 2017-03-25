@@ -32,6 +32,7 @@
 #include <linux/tegra-fuse.h>
 #include "regops_gm20b.h"
 #include "debug_gm20b.h"
+#include "cde_gm20b.h"
 
 #define FUSE_OPT_PRIV_SEC_DIS_0 0x264
 #define PRIV_SECURITY_DISABLE 0x01
@@ -91,6 +92,7 @@ int gm20b_init_hal(struct gk20a *g)
 	struct nvgpu_gpu_characteristics *c = &g->gpu_characteristics;
 
 	*gops = gm20b_ops;
+	gops->securegpccs = false;
 #ifdef CONFIG_TEGRA_ACR
 	if (tegra_platform_is_linsim()) {
 		gops->privsecurity = 1;
@@ -131,8 +133,8 @@ int gm20b_init_hal(struct gk20a *g)
 	gm20b_init_pmu_ops(gops);
 	gm20b_init_clk_ops(gops);
 	gm20b_init_regops(gops);
-	gk20a_init_tsg_ops(gops); /* TSG handlers for gm20b is same as gk20a */
 	gm20b_init_debug_ops(gops);
+	gm20b_init_cde_ops(gops);
 	gops->name = "gm20b";
 
 	c->twod_class = FERMI_TWOD_A;

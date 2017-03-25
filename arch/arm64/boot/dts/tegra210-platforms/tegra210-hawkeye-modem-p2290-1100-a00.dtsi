@@ -21,9 +21,6 @@
 / {
 	modem {
 		nvidia,regulator = "vdd";
-		pinctrl-names = "uart_boot_disable", "uart_boot_enable";
-		pinctrl-0 = <&modem_uart_boot_disable_state>;
-		pinctrl-1 = <&modem_uart_boot_enable_state>;
 	};
 };
 

@@ -337,6 +337,10 @@ void gk20a_debug_dump_device(struct platform_device *pdev)
 	};
 	struct gk20a *g;
 
+	/* In pre-silicon we don't need full spew on stuck syncpoint */
+	if (!tegra_platform_is_silicon())
+		return;
+
 	/* Dump the first device if no info is provided */
 	if (!pdev) {
 		if (!gk20a_device)
@@ -413,9 +417,6 @@ void gk20a_debug_init(struct platform_device *pdev)
 			pdev, &gk20a_gr_debug_fops);
 	debugfs_create_u32("trace_cmdbuf", S_IRUGO|S_IWUSR, platform->debugfs,
 			&gk20a_debug_trace_cmdbuf);
-
-	debugfs_create_u32("ch_wdt_timeout_ms", S_IRUGO|S_IWUSR,
-			platform->debugfs, &platform->ch_wdt_timeout_ms);
 
 #if defined(GK20A_DEBUG)
 	debugfs_create_u32("dbg_mask", S_IRUGO|S_IWUSR, platform->debugfs,

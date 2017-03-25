@@ -168,7 +168,6 @@ static int debug_shrinker_show(struct seq_file *s, void *unused)
 
 	down_read(&shrinker_rwsem);
 	list_for_each_entry(shrinker, &shrinker_list, list) {
-		char name[64];
 		int num_objs;
 
 		num_objs = shrinker->shrink(shrinker, &sc);
@@ -189,6 +188,16 @@ static const struct file_operations debug_shrinker_fops = {
         .llseek = seq_lseek,
         .release = single_release,
 };
+
+/* If zram is being used as swap, and zram is using zsmalloc allocator
+ * then there is a potential bug when reclaim happens from interrupt
+ * context
+ */
+static void adjust_scan_control(struct scan_control *sc)
+{
+	if (in_interrupt() && IS_ENABLED(ZSMALLOC) && total_swap_pages)
+		sc->may_swap = 0;
+}
 
 /*
  * Add a shrinker callback to be called from the vm
@@ -774,20 +783,15 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			 * could easily OOM just because too many pages are in
 			 * writeback and there is nothing else to reclaim.
 			 *
-			 * Check __GFP_IO, certainly because a loop driver
+			 * Require may_enter_fs to wait on writeback, because
+			 * fs may not have submitted IO yet. And a loop driver
 			 * thread might enter reclaim, and deadlock if it waits
 			 * on a page for which it is needed to do the write
 			 * (loop masks off __GFP_IO|__GFP_FS for this reason);
 			 * but more thought would probably show more reasons.
-			 *
-			 * Don't require __GFP_FS, since we're not going into
-			 * the FS, just waiting on its writeback completion.
-			 * Worryingly, ext4 gfs2 and xfs allocate pages with
-			 * grab_cache_page_write_begin(,,AOP_FLAG_NOFS), so
-			 * testing may_enter_fs here is liable to OOM on them.
 			 */
 			if (global_reclaim(sc) ||
-			    !PageReclaim(page) || !(sc->gfp_mask & __GFP_IO)) {
+			    !PageReclaim(page) || !may_enter_fs) {
 				/*
 				 * This is slightly racy - end_page_writeback()
 				 * might have just cleared PageReclaim, then
@@ -974,7 +978,7 @@ cull_mlocked:
 		if (PageSwapCache(page))
 			try_to_free_swap(page);
 		unlock_page(page);
-		putback_lru_page(page);
+		list_add(&page->lru, &ret_pages);
 		continue;
 
 activate_locked:
@@ -2468,6 +2472,8 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 		.gfp_mask = sc.gfp_mask,
 	};
 
+	adjust_scan_control(&sc);
+
 	/*
 	 * Do not enter reclaim if fatal signal was delivered while throttled.
 	 * 1 is returned so that the page allocator does not OOM kill at this
@@ -2551,6 +2557,7 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 		.gfp_mask = sc.gfp_mask,
 	};
 
+	adjust_scan_control(&sc);
 	/*
 	 * Unlike direct reclaim via alloc_pages(), memcg's reclaim doesn't
 	 * take care of from where we get pages. So the node where we start the
@@ -2741,6 +2748,7 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 	struct shrink_control shrink = {
 		.gfp_mask = sc.gfp_mask,
 	};
+	adjust_scan_control(&sc);
 loop_again:
 	sc.priority = DEF_PRIORITY;
 	sc.nr_reclaimed = 0;
@@ -3153,21 +3161,6 @@ void wakeup_kswapd(struct zone *zone, int order, enum zone_type classzone_idx)
 {
 	pg_data_t *pgdat;
 
-	/* Check whether ZRAM is disabled. */
-	if(!total_swap_pages) {
-		/* Avoid kswapd for HIGH MEMORY ZONE. */
-#if defined(CONFIG_HIGHMEM) && defined(CONFIG_ANDROID_LOW_MEMORY_KILLER)
-                if (classzone_idx == ZONE_HIGHMEM)
-                        return;
-#endif
-
-#if defined(CONFIG_ZONE_DMA32) && defined(CONFIG_ANDROID_LOW_MEMORY_KILLER)
-	/* Avoid Normal zone balancing when DMA32 zone exist. */
-		if (classzone_idx == ZONE_NORMAL)
-			return;
-#endif
-	}
-
 	if (!populated_zone(zone))
 		return;
 
@@ -3216,6 +3209,7 @@ unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
 	struct task_struct *p = current;
 	unsigned long nr_reclaimed;
 
+	adjust_scan_control(&sc);
 	p->flags |= PF_MEMALLOC;
 	lockdep_set_current_reclaim_state(sc.gfp_mask);
 	reclaim_state.reclaimed_slab = 0;

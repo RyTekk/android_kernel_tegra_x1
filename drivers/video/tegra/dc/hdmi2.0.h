@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/dc/hdmi2.0.h
  *
- * Copyright (c) 2014-2015, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION, All rights reserved.
  * Author: Animesh Kishore <ankishore@nvidia.com>
  *
  * This software is licensed under the terms of the GNU General Public
@@ -21,6 +21,7 @@
 #define HDMI_SCDC_MONITOR_TIMEOUT_MS	(5000)
 #define HDMI_EDID_MAX_LENGTH 512
 #define HDMI_HPD_DROP_TIMEOUT_MS	(1500)
+#define HDMI_HDR_INFOFRAME_STOP_TIMEOUT_MS	(2000)
 
 /* SCDC block */
 #define HDMI_SCDC_TMDS_CONFIG_OFFSET	(0x20)
@@ -33,12 +34,16 @@
 #define HDMI_SCDC_STATUS_FLAGS_SCRAMBLING_EN	(1)
 #define HDMI_SCDC_STATUS_FLAGS_SCRAMBLING_DIS	(0)
 
+#define YUV_MASK (FB_VMODE_Y420 | FB_VMODE_Y420_ONLY | \
+				FB_VMODE_Y422 | FB_VMODE_Y444)
+
 enum {
 	HDMI_INFOFRAME_TYPE_VENDOR = 0x81,
 	HDMI_INFOFRAME_TYPE_AVI = 0x82,
 	HDMI_INFOFRAME_TYPE_SPD = 0x83,
 	HDMI_INFOFRAME_TYPE_AUDIO = 0x84,
 	HDMI_INFOFRAME_TYPE_MPEG_SRC = 0x85,
+	HDMI_INFOFRAME_TYPE_HDR = 0x87,
 };
 
 enum {
@@ -47,6 +52,7 @@ enum {
 	HDMI_INFOFRAME_VS_SPD = 0x1,
 	HDMI_INFOFRAME_VS_AUDIO = 0x1,
 	HDMI_INFOFRAME_VS_MPEG_SRC = 0x1,
+	HDMI_INFOFRAME_VS_HDR = 0x1,
 };
 
 /* excluding checksum and header bytes */
@@ -56,6 +62,7 @@ enum {
 	HDMI_INFOFRAME_LEN_SPD = 25,
 	HDMI_INFOFRAME_LEN_AUDIO = 10,
 	HDMI_INFOFRAME_LEN_MPEG_SRC = 10,
+	HDMI_INFOFRAME_LEN_HDR = 26,
 };
 
 enum {
@@ -137,11 +144,11 @@ enum {
 };
 
 enum {
-	HDMI_AVI_IT_CONTENT_NONE = 0x0,
 	HDMI_AVI_IT_CONTENT_GRAPHICS = 0x0,
 	HDMI_AVI_IT_CONTENT_PHOTO = 0x1,
 	HDMI_AVI_IT_CONTENT_CINEMA = 0x2,
 	HDMI_AVI_IT_CONTENT_GAME = 0x3,
+	HDMI_AVI_IT_CONTENT_NONE = 0x4,
 };
 
 enum {
@@ -200,6 +207,114 @@ struct hdmi_avi_infoframe {
 	u32 right_bar_start_pixel_high_byte:8;
 
 	u32 reg_hole2:8;
+} __packed;
+
+struct hdmi_hdr_infoframe {
+	/* PB0 */
+	u32 csum:8;	/* checksum */
+
+	/* PB1 */
+	u32 eotf:3;	/* The EOTF requested by the source */
+	u32 res1:5;	/* reserved */
+
+	/* PB2 */
+	u32 static_metadata_id:3; /* The id of the following static metadata */
+	u32 res2:5;	/* reserved */
+
+	/* PB3-14 : Group 1 : Static Metadata*/
+	u32 display_primaries_x_0_lsb:8;
+	u32 display_primaries_x_0_msb:8;
+	u32 display_primaries_y_0_lsb:8;
+	u32 display_primaries_y_0_msb:8;
+	u32 reg_hole1:8;
+	u32 display_primaries_x_1_lsb:8;
+	u32 display_primaries_x_1_msb:8;
+	u32 display_primaries_y_1_lsb:8;
+	u32 display_primaries_y_1_msb:8;
+	u32 display_primaries_x_2_lsb:8;
+	u32 display_primaries_x_2_msb:8;
+	u32 display_primaries_y_2_lsb:8;
+	u32 reg_hole2:8;
+	u32 display_primaries_y_2_msb:8;
+
+	/* PB15-18 : Group 2 : Static Metadata*/
+	u32 white_point_x_lsb:8;
+	u32 white_point_x_msb:8;
+	u32 white_point_y_lsb:8;
+	u32 white_point_y_msb:8;
+
+	/* PB19-20 : Group 3 : Static Metadata*/
+	u32 max_display_mastering_luminance_lsb:8;
+	u32 max_display_mastering_luminance_msb:8;
+
+	u32 reg_hole3:8;
+
+	/* PB21-22 : Group 4 : Static Metadata*/
+	u32 min_display_mastering_luminance_lsb:8;
+	u32 min_display_mastering_luminance_msb:8;
+
+	/* PB23-24 : Group 5 : Static Metadata*/
+	u32 max_content_light_level_lsb:8;
+	u32 max_content_light_level_msb:8;
+
+	/* PB25-26 : Group 6 : Static Metadata*/
+	u32 max_frame_avg_light_level_lsb:8;
+	u32 min_frame_avg_light_level_msb:8;
+
+} __packed;
+
+enum {
+	HDMI_SPD_SI_UNKNOWN = 0x0,
+	HDMI_SPD_SI_DIGITAL_STB = 0x1,
+	HDMI_SPD_SI_DVD_PLAYER = 0x2,
+	HDMI_SPD_SI_DVHS = 0x3,
+	HDMI_SPD_SI_HDD_VIDEORECORDER = 0x4,
+	HDMI_SPD_SI_DVD = 0x5,
+	HDMI_SPD_SI_DSC = 0x6,
+	HDMI_SPD_SI_VIDEO_CD = 0x7,
+	HDMI_SPD_SI_GAME = 0x8,
+	HDMI_SPD_SI_PC_GENERAL = 0x9,
+	HDMI_SPD_SI_BLUERAY_DISC = 0xa,
+	HDMI_SPD_SI_SUPER_AUDIO_CD = 0xb,
+	HDMI_SPD_SI_HD_DVD = 0xc,
+	HDMI_SPD_SI_PMP = 0xd,
+	HDMI_SPD_SI_RESERVED = 0xFF,
+};
+
+struct hdmi_spd_infoframe {
+	/* PB0 */
+	u32 csum:8;	/* checksum */
+
+	/* PB1-8 : Vendor Name */
+	u32 vendor_name_char_1:8;
+	u32 vendor_name_char_2:8;
+	u32 vendor_name_char_3:8;
+	u32 vendor_name_char_4:8;
+	u32 vendor_name_char_5:8;
+	u32 vendor_name_char_6:8;
+	u32 vendor_name_char_7:8;
+	u32 vendor_name_char_8:8;
+
+	/* PB9-24 : Product Description */
+	u32 prod_desc_char_1:8;
+	u32 prod_desc_char_2:8;
+	u32 prod_desc_char_3:8;
+	u32 prod_desc_char_4:8;
+	u32 prod_desc_char_5:8;
+	u32 prod_desc_char_6:8;
+	u32 prod_desc_char_7:8;
+	u32 prod_desc_char_8:8;
+	u32 prod_desc_char_9:8;
+	u32 prod_desc_char_10:8;
+	u32 prod_desc_char_11:8;
+	u32 prod_desc_char_12:8;
+	u32 prod_desc_char_13:8;
+	u32 prod_desc_char_14:8;
+	u32 prod_desc_char_15:8;
+	u32 prod_desc_char_16:8;
+
+	/* PB25 : Source Information */
+	u32 source_information:8;
 } __packed;
 
 enum {
@@ -285,6 +400,8 @@ struct tegra_hdmi {
 	struct tegra_hdmi_out *pdata;
 	struct tegra_dc_sor_data *sor;
 	struct hdmi_avi_infoframe avi;
+	struct hdmi_hdr_infoframe hdr;
+	struct hdmi_spd_infoframe spd;
 	bool enabled;
 	atomic_t clock_refcount;
 
@@ -304,12 +421,9 @@ struct tegra_hdmi {
 	struct i2c_client *scdc_i2c_client;
 	struct delayed_work scdc_work;
 
+	struct i2c_client *ddcci_i2c_client;
+
 	struct hdmi_audio_infoframe audio;
-	bool null_sample_inject;
-	u32 audio_freq;
-	struct clk *hda_clk;
-	struct clk *hda2codec_clk;
-	struct clk *hda2hdmi_clk;
 #ifdef CONFIG_SWITCH
 	struct switch_dev hpd_switch;
 	struct switch_dev audio_switch;
@@ -328,8 +442,9 @@ struct tegra_hdmi {
 	int ddc_refcount;
 	struct mutex ddc_refcount_lock;
 	bool device_shutdown;
-	atomic_t suspended;
 	int plug_state;
+	atomic_t suspended;
+	struct delayed_work hdr_worker;
 };
 
 #define HDMI_ELD_BUF 96
@@ -357,5 +472,16 @@ enum {
 	TEGRA_HDMI_BPP_36 = 6,
 	TEGRA_HDMI_BPP_48 = 7,
 };
+
+void tegra_hdmi_get(struct tegra_dc *dc);
+void tegra_hdmi_put(struct tegra_dc *dc);
+void tegra_hdmi_infoframe_pkt_write(struct tegra_hdmi *hdmi,
+						u32 header_reg, u8 pkt_type,
+						u8 pkt_vs, u8 pkt_len,
+						void *reg_payload,
+						u32 reg_payload_len,
+						bool sw_checksum);
+u32 tegra_hdmi_get_cea_modedb_size(struct tegra_hdmi *hdmi);
+void tegra_hdmi_set_avi_infoframe(struct tegra_dc *dc);
 
 #endif

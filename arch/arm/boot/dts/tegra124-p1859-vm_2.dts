@@ -41,6 +41,13 @@
 	compatible = "nvidia,p1859", "nvidia,tegra124";
 	nvidia,dtsfilename = __FILE__;
 
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "p1859";
+		};
+	};
+
 	serial@70006000 {
 		iommus = <&smmu TEGRA_SWGROUP_PPCS2>;
 		status = "disabled";
@@ -258,21 +265,19 @@
 			gpu_as: gpu {
 				iova-start = <0x0 0x00100000>;
 				iova-size = <0x0 0x3FEFFFFF>;
-				alignment = <0xFFFFF>;
+				alignment = <0x20000>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
 			host1x_as: host1x {
 				iova-start = <0x0 0x40100000>;
 				iova-size = <0x0 0x3FEFFFFF>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
 			nvavp_as: nvavp {
 				iova-start = <0x0 0xE8000000>;
 				iova-size = <0x0 0xDFFFFFF>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
@@ -408,16 +413,20 @@
 		nvidia,tegra_dvfs_gpu_enable = <0>;
 	};
 
-	tegra_carveouts {
-		compatible = "nvidia,carveouts";
+	reserved-memory {
+		ivm0: carveout0 {
+			compatible = "nvidia,ivm_carveout";
+                        reg = <0x0 0x70c00000 0x0 0x04c00000>;
+			ivm = <&tegra_hv 0>;
+			alloc = <1>;
+			no-map;
+		};
+	};
+
+	tegra-carveouts {
 		iommus = <&smmu TEGRA_SWGROUP_HC>;
 		status = "okay";
-		ivm_carveouts {
-			carveout0 {
-				ivm = <&tegra_hv 0>;
-				alloc = <1>;
-			};
-		};
+		memory-region = <&iram &ivm0>;
 	};
 
 	avp-virt {

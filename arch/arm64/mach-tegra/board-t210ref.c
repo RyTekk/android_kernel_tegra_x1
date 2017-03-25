@@ -1,7 +1,7 @@
  /*
  * arch/arm64/mach-tegra/board-t210ref.c
  *
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -69,6 +69,7 @@
 #include <linux/tegra_nvadsp.h>
 #include <linux/tegra-pm.h>
 #include <linux/regulator/machine.h>
+#include <linux/of_fdt.h>
 
 #include <mach/irqs.h>
 #include <mach/io_dpd.h>
@@ -103,11 +104,6 @@
 
 static struct tegra_usb_platform_data tegra_udc_pdata;
 static struct tegra_usb_otg_data tegra_otg_pdata;
-
-#if defined(CONFIG_TEGRA_NVADSP) && \
-		!defined(CONFIG_TEGRA_NVADSP_ON_SMMU)
-static struct nvadsp_platform_data nvadsp_plat_data;
-#endif
 
 static void t210ref_usb_init(void)
 {
@@ -176,11 +172,6 @@ static struct of_dev_auxdata t210ref_auxdata_lookup[] __initdata = {
 			NULL),
 	OF_DEV_AUXDATA("nvidia,tegra210-ahci-sata", 0x70021000, "tegra-sata.0",
 		NULL),
-#if defined(CONFIG_TEGRA_NVADSP) && \
-		!defined(CONFIG_TEGRA_NVADSP_ON_SMMU)
-	OF_DEV_AUXDATA("nvidia,tegra210-adsp", TEGRA_APE_AMC_BASE,
-			"tegra210-adsp", &nvadsp_plat_data),
-#endif
 	OF_DEV_AUXDATA("nvidia,tegra210-adsp-audio", 0, "adsp_audio.3", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra210-efuse", TEGRA_FUSE_BASE, "tegra-fuse",
 			NULL),
@@ -188,6 +179,7 @@ static struct of_dev_auxdata t210ref_auxdata_lookup[] __initdata = {
 	OF_DEV_AUXDATA("linux,spdif-dit", 1, "spdif-dit.1", NULL),
 	OF_DEV_AUXDATA("linux,spdif-dit", 2, "spdif-dit.2", NULL),
 	OF_DEV_AUXDATA("linux,spdif-dit", 3, "spdif-dit.3", NULL),
+	OF_DEV_AUXDATA("linux,spdif-dit", 4, "spdif-dit.4", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra210-xhci", 0x70090000, "tegra-xhci",
 			NULL),
 	OF_DEV_AUXDATA("nvidia,tegra210-xudc", 0x700D0000, "tegra-xudc",
@@ -237,12 +229,13 @@ static void __init tegra_t210ref_early_init(void)
 		tegra_soc_device_init("he2290");
 }
 
+#ifdef CONFIG_PM_SLEEP
 static struct tegra_suspend_platform_data t210ref_suspend_data = {
 	.cpu_timer      = 1700,
 	.cpu_off_timer  = 300,
 	.suspend_mode   = TEGRA_SUSPEND_LP0,
-	.core_timer     = 0x257e,
-	.core_off_timer = 1280,
+	.core_timer     = 0x61e1,
+	.core_off_timer = 1350,
 	.cpu_suspend_freq = 204000,
 	.corereq_high   = true,
 	.sysclkreq_high = true,
@@ -253,6 +246,7 @@ static int __init t210ref_suspend_init(void)
 	tegra_init_suspend(&t210ref_suspend_data);
 	return 0;
 }
+#endif
 
 static void __init tegra_t210ref_late_init(void)
 {
@@ -265,12 +259,12 @@ static void __init tegra_t210ref_late_init(void)
 
 	t210ref_usb_init();
 	tegra_io_dpd_init();
+#ifdef CONFIG_PM_SLEEP
 	/* FIXME: Assumed all t210ref platforms have sdhci DT support */
 	t210ref_suspend_init();
-
+#endif
 	tegra21_emc_init();
 	isomgr_init();
-	tegra_fb_copy_or_clear();
 
 	/* put PEX pads into DPD mode to save additional power */
 	t210ref_camera_init();
@@ -385,39 +379,17 @@ static void __init tegra_t210ref_dt_init(void)
 
 static void __init tegra_t210ref_reserve(void)
 {
-#ifdef CONFIG_TEGRA_HDMI_PRIMARY
-	ulong tmp;
-#endif /* CONFIG_TEGRA_HDMI_PRIMARY */
-
 #if defined(CONFIG_NVMAP_CONVERT_CARVEOUT_TO_IOVMM) || \
 		defined(CONFIG_TEGRA_NO_CARVEOUT)
 	ulong carveout_size = 0;
-	ulong fb2_size = SZ_64M + SZ_8M;
 #else
 	ulong carveout_size = SZ_1G;
-	ulong fb2_size = SZ_4M;
 #endif
-	ulong fb1_size = SZ_64M + SZ_8M;
-	ulong vpr_size = 186 * SZ_1M;
+	ulong vpr_size = 364 * SZ_1M;
+	if (of_flat_dt_is_compatible(of_get_flat_dt_root(), "nvidia,foster-e"))
+		vpr_size = 672 * SZ_1M;
 
-#if defined(CONFIG_TEGRA_NVADSP) && \
-		!defined(CONFIG_TEGRA_NVADSP_ON_SMMU)
-	nvadsp_plat_data.co_pa = tegra_reserve_adsp(SZ_32M);
-	nvadsp_plat_data.co_size = SZ_32M;
-#endif
-
-#ifdef CONFIG_FRAMEBUFFER_CONSOLE
-	/* support FBcon on 4K monitors */
-	fb2_size = SZ_64M + SZ_8M;	/* 4096*2160*4*2 = 70778880 bytes */
-#endif /* CONFIG_FRAMEBUFFER_CONSOLE */
-
-#ifdef CONFIG_TEGRA_HDMI_PRIMARY
-	tmp = fb1_size;
-	fb1_size = fb2_size;
-	fb2_size = tmp;
-#endif /* CONFIG_TEGRA_HDMI_PRIMARY */
-
-	tegra_reserve4(carveout_size, fb1_size, fb2_size, vpr_size);
+	tegra_reserve4(carveout_size, 0, 0, vpr_size);
 }
 
 static const char * const t210ref_dt_board_compat[] = {

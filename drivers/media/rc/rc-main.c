@@ -26,7 +26,7 @@
 #define IR_TAB_MAX_SIZE	8192
 
 /* FIXME: IR_KEYPRESS_TIMEOUT should be protocol specific */
-#define IR_KEYPRESS_TIMEOUT 250
+#define IR_KEYPRESS_TIMEOUT 125
 
 /* Used to keep track of known keymaps */
 static LIST_HEAD(rc_map_list);
@@ -942,9 +942,6 @@ static void rc_dev_release(struct device *device)
 static int rc_dev_uevent(struct device *device, struct kobj_uevent_env *env)
 {
 	struct rc_dev *dev = to_rc_dev(device);
-
-	if (!dev || !dev->input_dev)
-		return -ENODEV;
 
 	if (dev->rc_map.name)
 		ADD_HOTPLUG_VAR("NAME=%s", dev->rc_map.name);

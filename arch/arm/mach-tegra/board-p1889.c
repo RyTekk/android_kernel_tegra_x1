@@ -56,9 +56,9 @@ static __initdata struct tegra_clk_init_table p1889_clk_init_table[] = {
 	{ "i2s0_sync",	NULL,		12288000,	false},
 	{ "audio0",	"i2s0_sync",	12288000,	false},
 	{ "audio0_2x",	"audio0",	12288000,	false},
-	{ "i2s0",	"pll_a_out0",	12288000,	false},
+	{ "i2s0",	"audio0_2x",	12288000,	false},
 	{ "i2s1",	"pll_a_out0",	3072000,	false},
-	{ "i2s2",	"pll_a_out0",	12288000,	false},
+	{ "i2s2",	"audio2_2x",	12288000,	false},
 	{ "i2s3",	"pll_a_out0",	3072000,	false},
 	{ "i2s4",	"pll_a_out0",	1024000,	false},
 	{ "extern1",	"pll_a_out0",	12288000,	false},
@@ -79,15 +79,6 @@ static int __init p1889_fixed_target_rate_init(void)
 	return 0;
 }
 
-static __initdata struct tegra_clk_init_table p1889_gpu_780mhz_clk[] = {
-	{ "gk20a.gbus",         NULL,           780000000,      false},
-	{ NULL,         NULL,           0,              0},
-};
-
-static void __init p1889_gpu_clk_rate_init(void)
-{
-	tegra_clk_init_from_table(p1889_gpu_780mhz_clk);
-}
 
 /* Display panel/HDMI */
 static int p1889_dev_dummy(struct device *dev)
@@ -169,7 +160,6 @@ static void __init tegra_p1889_early_init(void)
 	/* Board specific clock POR */
 	tegra_clk_init_from_table(clk_table);
 	p1889_fixed_target_rate_init();
-	p1889_gpu_clk_rate_init();
 
 	tegra_clk_verify_parents();
 

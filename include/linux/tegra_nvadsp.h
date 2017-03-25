@@ -1,7 +1,7 @@
 /*
  * A Header file for managing ADSP/APE
  *
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -184,12 +184,15 @@ void nvadsp_aram_release(char *start, size_t size);
  */
 
 typedef const void *nvadsp_os_handle_t;
+typedef void (*nvadsp_crash_handler)(void *arg);
 
 void nvadsp_adsp_init(void);
 int __must_check nvadsp_os_load(void);
 int __must_check nvadsp_os_start(void);
 void nvadsp_os_stop(void);
 int __must_check nvadsp_os_suspend(void);
+void nvadsp_register_crash_handler(nvadsp_crash_handler crash_handler,
+			void *arg);
 
 /*
  * ADSP TSC
@@ -199,8 +202,6 @@ uint64_t nvadsp_get_timestamp_counter(void);
 /*
  * ADSP OS App
  */
-#define NVADSP_NAME_SZ	64
-
 #define ARGV_SIZE_IN_WORDS         128
 
 enum {
@@ -300,7 +301,7 @@ int nvadsp_app_deinit(nvadsp_app_info_t *);
 void *nvadsp_alloc_coherent(size_t, dma_addr_t *, gfp_t);
 void nvadsp_free_coherent(size_t, void *, dma_addr_t);
 void *nvadsp_da_to_va_mappings(u64, int);
-nvadsp_app_info_t *nvadsp_run_app(nvadsp_os_handle_t, const char *,
+nvadsp_app_info_t __must_check *nvadsp_run_app(nvadsp_os_handle_t, const char *,
 	nvadsp_app_args_t *, app_complete_status_notifier, uint32_t, bool);
 void nvadsp_exit_app(nvadsp_app_info_t *app, bool terminate);
 
@@ -347,21 +348,31 @@ static inline long wait_for_nvadsp_app_complete_timeout(nvadsp_app_info_t *info,
 
 #ifdef CONFIG_TEGRA_ADSP_DFS
 /*
- * Set adsp freq.
- * It sets adsp freq and communicate ADSP OS to adjust the timers.
- * Disable dfs if adsp is requried to run at constant freq.
- * freq : freq in KHz
- * dfs : 0 for disable, 1 for enable
+ * Override adsp freq and reinit actmon counters
+ *
+ * @params:
+ * freq: adsp freq in KHz
+ * return - final freq got set.
+ *		- 0, incase of error.
+ *
  */
-void adsp_update_dfs(unsigned long freq, bool dfs);
+unsigned long adsp_override_freq(unsigned long freq);
 void adsp_update_dfs_min_rate(unsigned long freq);
+
+/* Enable / disable dynamic freq scaling */
+void adsp_update_dfs(bool enable);
 #else
-static inline void adsp_update_dfs(unsigned long freq, bool dfs)
+static inline unsigned long adsp_override_freq(unsigned long freq)
+{
+	return 0;
+}
+
+static inline void adsp_update_dfs_min_rate(unsigned long freq)
 {
 	return;
 }
 
-static inline void adsp_update_dfs_min_rate(unsigned long freq)
+static inline void adsp_update_dfs(bool enable)
 {
 	return;
 }

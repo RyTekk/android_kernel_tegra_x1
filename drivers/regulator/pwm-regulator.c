@@ -1,7 +1,7 @@
 /*
  * pwm-regulator: PWM based regulator configuration.
  *
- * Copyright (c) 2013-2015 NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2013 NVIDIA CORPORATION. All rights reserved.
  *
  * Author: Laxman Dewangan <ldewangan@nvidia.com>
  *

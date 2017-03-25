@@ -32,6 +32,7 @@
 #include <linux/of_platform.h>
 #include <linux/tegra-soc.h>
 #include <linux/tegra_pm_domains.h>
+#include <linux/vmalloc.h>
 
 #include "dev.h"
 #include <trace/events/nvhost.h>
@@ -68,8 +69,6 @@ static const char *alloc_syncpts_per_apps_name = "alloc_syncpts_per_apps";
 static const char *alloc_chs_per_submits_name = "alloc_chs_per_submits";
 static const char *syncpts_pts_base_name = "pts_base";
 static const char *syncpts_pts_limit_name = "pts_limit";
-
-struct nvhost_master *nvhost;
 
 struct nvhost_ctrl_userctx {
 	struct nvhost_master *dev;
@@ -303,81 +302,86 @@ static int nvhost_ioctl_ctrl_module_regrdwr(struct nvhost_ctrl_userctx *ctx,
 	u32 __user *offsets = (u32 __user *)(uintptr_t)args->offsets;
 	u32 __user *values = (u32 __user *)(uintptr_t)args->values;
 	u32 *vals;
-	u32 *p1;
-	int remaining;
+	u32 count;
 	int err;
 
 	struct platform_device *ndev;
 	trace_nvhost_ioctl_ctrl_module_regrdwr(args->id,
 			args->num_offsets, args->write);
 
-	/* Check that there is something to read and that block size is
-	 * u32 aligned */
-	if (num_offsets == 0 || args->block_size & 3)
+	/* Check that there is something to read */
+	if (num_offsets == 0)
 		return -EINVAL;
 
 	ndev = nvhost_device_list_match_by_id(args->id);
 	if (!ndev)
 		return -ENODEV;
 
+	err = validate_max_size(ndev, args->block_size);
+	if (err)
+		return err;
+
+	count = args->block_size >> 2;
+
 	if (nvhost_dev_is_virtual(ndev))
 		return vhost_rdwr_module_regs(ndev, num_offsets,
 				args->block_size, offsets, values, args->write);
 
-	remaining = args->block_size >> 2;
-
-	vals = kmalloc(num_offsets * args->block_size,
-				GFP_KERNEL);
-	if (!vals)
-		return -ENOMEM;
-	p1 = vals;
+	vals = kmalloc(args->block_size, GFP_KERNEL);
+	if (!vals) {
+		vals = vmalloc(args->block_size);
+		if (!vals)
+			return -ENOMEM;
+	}
 
 	if (args->write) {
-		if (copy_from_user((char *)vals, (char __user *)values,
-				num_offsets * args->block_size)) {
-			kfree(vals);
-			return -EFAULT;
-		}
 		while (num_offsets--) {
 			u32 offs;
-			if (get_user(offs, offsets)) {
-				kfree(vals);
+
+			if (copy_from_user((char *)vals,
+					(char __user *)values,
+					args->block_size)) {
+				kvfree(vals);
 				return -EFAULT;
 			}
-			offsets++;
+			if (get_user(offs, offsets)) {
+				kvfree(vals);
+				return -EFAULT;
+			}
 			err = nvhost_write_module_regs(ndev,
-					offs, remaining, p1);
+					offs, count, vals);
 			if (err) {
-				kfree(vals);
+				kvfree(vals);
 				return err;
 			}
-			p1 += remaining;
+			offsets++;
+			values += count;
 		}
-		kfree(vals);
 	} else {
 		while (num_offsets--) {
 			u32 offs;
 			if (get_user(offs, offsets)) {
-				kfree(vals);
+				kvfree(vals);
+				return -EFAULT;
+			}
+			err = nvhost_read_module_regs(ndev,
+					offs, count, vals);
+			if (err) {
+				kvfree(vals);
+				return err;
+			}
+			if (copy_to_user((void __user *)values,
+					(void const *)vals,
+					args->block_size)) {
+				kvfree(vals);
 				return -EFAULT;
 			}
 			offsets++;
-			err = nvhost_read_module_regs(ndev,
-					offs, remaining, p1);
-			if (err) {
-				kfree(vals);
-				return err;
-			}
-			p1 += remaining;
+			values += count;
 		}
-
-		if (copy_to_user((void __user *)values, (void const *)vals,
-				args->num_offsets * args->block_size)) {
-			kfree(vals);
-			return -EFAULT;
-		}
-		kfree(vals);
 	}
+
+	kvfree(vals);
 	return 0;
 }
 
@@ -395,6 +399,29 @@ static int nvhost_ioctl_ctrl_syncpt_read_max(struct nvhost_ctrl_userctx *ctx,
 		return -EINVAL;
 	args->value = nvhost_syncpt_read_max(&ctx->dev->syncpt, args->id);
 	return 0;
+}
+
+static int nvhost_ioctl_ctrl_get_characteristics(struct nvhost_ctrl_userctx *ctx,
+	struct nvhost_ctrl_get_characteristics *args)
+{
+	struct nvhost_characteristics *nvhost_char = &ctx->dev->nvhost_char;
+	int err = 0;
+
+	if (args->nvhost_characteristics_buf_size > 0) {
+		size_t write_size = sizeof(*nvhost_char);
+
+		if (write_size > args->nvhost_characteristics_buf_size)
+			write_size = args->nvhost_characteristics_buf_size;
+
+		err = copy_to_user((void __user *)(uintptr_t)
+			args->nvhost_characteristics_buf_addr,
+			nvhost_char, write_size);
+	}
+
+	if (err == 0)
+		args->nvhost_characteristics_buf_size = sizeof(*nvhost_char);
+
+	return err;
 }
 
 static long nvhost_ctrlctl(struct file *filp,
@@ -474,6 +501,9 @@ static long nvhost_ctrlctl(struct file *filp,
 		break;
 	case NVHOST_IOCTL_CTRL_SYNCPT_WAITMEX:
 		err = nvhost_ioctl_ctrl_syncpt_waitmex(priv, (void *)buf);
+		break;
+	case NVHOST_IOCTL_CTRL_GET_CHARACTERISTICS:
+		err = nvhost_ioctl_ctrl_get_characteristics(priv, (void *)buf);
 		break;
 	default:
 		err = -ENOTTY;
@@ -597,7 +627,8 @@ static int nvhost_user_init(struct nvhost_master *host)
 	dev_t devno;
 	int err;
 
-	host->nvhost_class = class_create(THIS_MODULE, IFACE_NAME);
+	host->nvhost_class = class_create(THIS_MODULE,
+					dev_name(&host->dev->dev));
 	if (IS_ERR(host->nvhost_class)) {
 		err = PTR_ERR(host->nvhost_class);
 		dev_err(&host->dev->dev, "failed to create class\n");
@@ -728,8 +759,12 @@ static struct of_device_id tegra_host1x_of_match[] = {
 		.data = (struct nvhost_device_data *)&t21_host1x_info },
 #endif
 #ifdef CONFIG_ARCH_TEGRA_18x_SOC
-	{ .compatible = "nvidia,tegra186-host1x",
+	{ .name = "host1x",
+		.compatible = "nvidia,tegra186-host1x",
 		.data = (struct nvhost_device_data *)&t18_host1x_info },
+	{ .name = "host1xb",
+		.compatible = "nvidia,tegra186-host1x",
+		.data = (struct nvhost_device_data *)&t18_host1xb_info },
 	{ .compatible = "nvidia,tegra186-host1x-cl34000094",
 		.data = (struct nvhost_device_data *)&t18_host1x_info },
 #endif
@@ -746,7 +781,7 @@ int nvhost_host1x_prepare_poweroff(struct platform_device *dev)
 	return power_off_host(dev);
 }
 
-static void of_nvhost_parse_platform_data(struct platform_device *dev,
+static int of_nvhost_parse_platform_data(struct platform_device *dev,
 					struct nvhost_device_data *pdata)
 {
 	struct device_node *np = dev->dev.of_node;
@@ -765,25 +800,51 @@ static void of_nvhost_parse_platform_data(struct platform_device *dev,
 		host->info.nb_channels = value;
 
 	host->info.ch_limit = host->info.ch_base + host->info.nb_channels;
-}
 
-static int nvhost_check_valid_config(void)
-{
-	if ((nvhost_get_channel_policy() == MAP_CHANNEL_ON_OPEN &&
-		  nvhost_get_syncpt_policy() == SYNCPT_PER_CHANNEL) ||
-	    (nvhost_get_channel_policy() == MAP_CHANNEL_ON_SUBMIT &&
-		  nvhost_get_syncpt_policy() == SYNCPT_PER_CHANNEL_INSTANCE))
-		return 0;
+	if (!of_property_read_u32(np, "nvidia,nb-hw-pts", &value))
+		host->info.nb_hw_pts = value;
 
-	return -EINVAL;
+	if (!of_property_read_u32(np, "nvidia,pts-base", &value))
+		host->info.pts_base = value;
+
+	if (!of_property_read_u32(np, "nvidia,nb-pts", &value))
+		host->info.nb_pts = value;
+
+	if (host->info.nb_pts > host->info.nb_hw_pts)
+		return -EINVAL;
+
+	host->info.pts_limit = host->info.pts_base + host->info.nb_pts;
+
+	return 0;
 }
 
 long linsim_cl = 0;
 
+int nvhost_update_characteristics(struct platform_device *dev)
+{
+	struct nvhost_master *host = nvhost_get_host(dev);
+
+	if (nvhost_gather_filter_enabled(&host->syncpt))
+		host->nvhost_char.flags |= NVHOST_CHARACTERISTICS_GFILTER;
+
+	if (host->info.channel_policy == MAP_CHANNEL_ON_SUBMIT)
+		host->nvhost_char.flags |=
+			NVHOST_CHARACTERISTICS_RESOURCE_PER_CHANNEL_INSTANCE;
+
+	host->nvhost_char.flags |= NVHOST_CHARACTERISTICS_SUPPORT_PREFENCES;
+
+	host->nvhost_char.num_mlocks = host->info.nb_mlocks;
+	host->nvhost_char.num_syncpts = host->info.nb_pts;
+	host->nvhost_char.syncpts_base = host->info.pts_base;
+	host->nvhost_char.syncpts_limit = host->info.pts_limit;
+	host->nvhost_char.num_hw_pts = host->info.nb_hw_pts;
+
+	return 0;
+}
+
 static int nvhost_probe(struct platform_device *dev)
 {
 	struct nvhost_master *host;
-	struct resource *regs;
 	int syncpt_irq, generic_irq;
 	int err;
 	struct nvhost_device_data *pdata = NULL;
@@ -818,12 +879,6 @@ static int nvhost_probe(struct platform_device *dev)
 		return err;
 	}
 
-	regs = platform_get_resource(dev, IORESOURCE_MEM, 0);
-	if (!regs) {
-		dev_err(&dev->dev, "missing host1x regs\n");
-		return -ENXIO;
-	}
-
 	syncpt_irq = platform_get_irq(dev, 0);
 	if (IS_ERR_VALUE(syncpt_irq)) {
 		dev_err(&dev->dev, "missing syncpt irq\n");
@@ -840,8 +895,6 @@ static int nvhost_probe(struct platform_device *dev)
 	if (!host)
 		return -ENOMEM;
 
-	nvhost = host;
-
 	host->dev = dev;
 	INIT_LIST_HEAD(&host->static_mappings_list);
 	INIT_LIST_HEAD(&host->vm_list);
@@ -854,12 +907,6 @@ static int nvhost_probe(struct platform_device *dev)
 	memcpy(&host->info, pdata->private_data,
 			sizeof(struct host1x_device_info));
 
-	err = nvhost_check_valid_config();
-	if (err) {
-		dev_err(&dev->dev, "booting with invalid config. err:%d", err);
-		return err;
-	}
-
 	pdata->pdev = dev;
 
 	/* set common host1x device data */
@@ -868,7 +915,13 @@ static int nvhost_probe(struct platform_device *dev)
 	/* set private host1x device data */
 	nvhost_set_private_data(dev, host);
 
-	of_nvhost_parse_platform_data(dev, pdata);
+	err = of_nvhost_parse_platform_data(dev, pdata);
+	if (err) {
+		dev_err(&dev->dev, "error in parsing DT properties, err:%d",
+			err);
+		return err;
+	}
+
 	if (pdata->virtual_dev) {
 		err = nvhost_virt_init(dev, NVHOST_MODULE_NONE);
 		if (err) {
@@ -876,11 +929,12 @@ static int nvhost_probe(struct platform_device *dev)
 			goto fail;
 		}
 	} else {
-		host->aperture = devm_request_and_ioremap(&dev->dev, regs);
-		if (!host->aperture) {
-			err = -ENXIO;
+		err = nvhost_device_get_resources(dev);
+		if (err) {
+			dev_err(&dev->dev, "failed to get resources\n");
 			goto fail;
 		}
+		host->aperture = pdata->aperture[0];
 	}
 
 	err = nvhost_alloc_resources(host);
@@ -900,6 +954,9 @@ static int nvhost_probe(struct platform_device *dev)
 	err = nvhost_user_init(host);
 	if (err)
 		goto fail;
+
+	if (of_machine_is_compatible("nvidia,foster-e"))
+		pdata->can_powergate = false;
 
 	err = nvhost_module_init(dev);
 	if (err)
@@ -935,6 +992,8 @@ static int nvhost_probe(struct platform_device *dev)
 	nvhost_debug_init(host);
 
 	nvhost_module_idle(dev);
+
+	nvhost_update_characteristics(dev);
 
 	dev_info(&dev->dev, "initialized\n");
 	return 0;
@@ -1040,9 +1099,13 @@ static struct platform_driver platform_driver = {
 	},
 };
 
-static struct of_device_id tegra21x_host1x_domain_match[] = {
+static struct of_device_id tegra_host1x_domain_match[] = {
 	{.compatible = "nvidia,tegra210-host1x-pd",
 	 .data = (struct nvhost_device_data *)&t21_host1x_info},
+	{.compatible = "nvidia,tegra132-host1x-pd",
+	.data = (struct nvhost_device_data *)&t124_host1x_info},
+	{.compatible = "nvidia,tegra124-host1x-pd",
+	 .data = (struct nvhost_device_data *)&t124_host1x_info},
 	{},
 };
 
@@ -1050,7 +1113,7 @@ static int __init nvhost_mod_init(void)
 {
 	int ret;
 
-	ret = nvhost_domain_init(tegra21x_host1x_domain_match);
+	ret = nvhost_domain_init(tegra_host1x_domain_match);
 	if (ret)
 		return ret;
 

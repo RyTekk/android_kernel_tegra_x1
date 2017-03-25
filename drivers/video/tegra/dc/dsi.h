@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/dc/dsi.h
  *
- * Copyright (c) 2011-2014, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2011-2015, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -18,8 +18,8 @@
 #define __DRIVERS_VIDEO_TEGRA_DC_DSI_H__
 
 #define BOARD_P1761   0x06E1
-#define AUO_12X19_DSI_PANEL	"a,wuxga-8-0"
 #include "dc_priv_defs.h"
+#include <linux/sysedp.h>
 
 /* Defines the DSI phy timing parameters */
 struct dsi_phy_timing_inclk {
@@ -119,6 +119,8 @@ struct tegra_dc_dsi_data {
 
 	u32 dsi_control_val;
 	u32 device_shutdown;
+
+	struct sysedp_consumer *sysedpc;
 };
 
 /* Max number of data lanes supported */

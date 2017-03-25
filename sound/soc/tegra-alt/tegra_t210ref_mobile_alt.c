@@ -224,6 +224,8 @@ static int tegra_t210ref_dai_init(struct snd_soc_pcm_runtime *rtd,
 		break;
 	}
 
+	pr_info("Setting pll_a = %d Hz clk_out = %d Hz\n",
+			mclk, clk_out_rate);
 	err = tegra_alt_asoc_utils_set_rate(&machine->audio_clock,
 				clk_rate, mclk, clk_out_rate);
 	if (err < 0) {
@@ -750,8 +752,11 @@ static int tegra_t210ref_driver_probe(struct platform_device *pdev)
 		&tegra_t210ref_sfc_init);
 
 	/* set ADSP PCM */
-	tegra_machine_set_dai_ops(TEGRA210_DAI_LINK_ADSP_PCM,
+	for (i = TEGRA210_DAI_LINK_ADSP_PCM1;
+		i <= TEGRA210_DAI_LINK_ADSP_PCM2; i++) {
+		tegra_machine_set_dai_ops(i,
 			&tegra_t210ref_ops);
+	}
 
 	/* set ADSP COMPR */
 	for (i = TEGRA210_DAI_LINK_ADSP_COMPR1;

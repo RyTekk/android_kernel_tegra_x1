@@ -353,6 +353,12 @@ dhd_wl_ioctl_cmd(dhd_pub_t *dhd_pub, int cmd, void *arg, int len, uint8 set, int
 	return dhd_wl_ioctl(dhd_pub, ifidx, &ioc, arg, len);
 }
 
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+extern atomic_t rf_test;
+extern atomic_t cur_power_mode;
+extern rf_test_params_t rf_test_params[NUM_RF_TEST_PARAMS];
+#endif /* CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA */
+
 int
 dhd_wl_ioctl_get_intiovar(dhd_pub_t *dhd_pub, char *name, uint *pval,
 	int cmd, uint8 set, int ifidx)
@@ -404,7 +410,34 @@ int
 dhd_wl_ioctl(dhd_pub_t *dhd_pub, int ifidx, wl_ioctl_t *ioc, void *buf, int len)
 {
 	int ret = BCME_ERROR;
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+	int i;
+	/* Changing PM is not allowed while RF test is enabled */
+	if (atomic_read(&rf_test)) {
+		if (ioc->cmd == WLC_SET_PM && ioc->buf) {
+			uint pm_mode = *(uint*)ioc->buf;
+			if (ioc->set) {
+				atomic_set(&cur_power_mode, pm_mode);
+				DHD_ERROR(("%s: WLC_SET_PM: %d not allowed\n", __FUNCTION__, pm_mode));
+				return BCME_OK;
+			}
+		}
+		if (ioc->cmd == WLC_SET_VAR) {
+			uint value;
+			for (i = 0; i < NUM_RF_TEST_PARAMS; i++) {
+				const char * param = rf_test_params[i].var;
+				const char * buf = ioc->buf;
 
+				value = *(uint*)&buf[strlen(param)+1];
+				if (strncmp(ioc->buf, param, strlen(param)) == 0) {
+					atomic_set(&rf_test_params[i].cur_val, value);
+					DHD_ERROR(("%s: WLC_SET_VAR %s:%d not allowed\n", __FUNCTION__, param, value));
+					return BCME_OK;
+				}
+			}
+		}
+	}
+#endif /* CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA */
 	if (dhd_os_proto_block(dhd_pub))
 	{
 #if defined(WL_WLC_SHIM)
@@ -1734,7 +1767,7 @@ wl_show_host_event(dhd_pub_t *dhd_pub, wl_event_msg_t *event, void *event_data,
 #endif /* SHOW_EVENTS */
 
 int
-wl_host_event(dhd_pub_t *dhd_pub, int *ifidx, void *pktdata,
+wl_host_event(dhd_pub_t *dhd_pub, int *ifidx, void *pktdata, size_t pktlen,
 	wl_event_msg_t *event, void **data_ptr, void *raw_event)
 {
 	/* check whether packet is a BRCM event pkt */
@@ -1756,6 +1789,9 @@ wl_host_event(dhd_pub_t *dhd_pub, int *ifidx, void *pktdata,
 		return (BCME_ERROR);
 	}
 
+	if (pktlen < sizeof(bcm_event_t))
+		return (BCME_ERROR);
+
 	*data_ptr = &pvt_data[1];
 	event_data = *data_ptr;
 
@@ -1766,8 +1802,14 @@ wl_host_event(dhd_pub_t *dhd_pub, int *ifidx, void *pktdata,
 	type = ntoh32_ua((void *)&event->event_type);
 	flags = ntoh16_ua((void *)&event->flags);
 	status = ntoh32_ua((void *)&event->status);
+
 	datalen = ntoh32_ua((void *)&event->datalen);
+	if (datalen > pktlen)
+		return (BCME_ERROR);
+
 	evlen = datalen + sizeof(bcm_event_t);
+	if (evlen > pktlen)
+		return (BCME_ERROR);
 
 	/* find equivalent host index for event ifidx */
 	hostidx = dhd_ifidx2hostidx(dhd_pub->info, event->ifidx);
@@ -2897,4 +2939,42 @@ wl_iw_parse_channel_list(char** list_str, uint16* channel_list, int channel_num)
 	}
 	*list_str = str;
 	return num;
+}
+
+/* Parse EAPOL 4 way handshake messages */
+void dhd_dump_eapol_4way_message(char *dump_data, bool direction)
+{
+	int pair, ack, mic, kerr, req, sec, install;
+	unsigned short us_tmp;
+	unsigned char type;
+
+	/* Extract EAPOL Key type from 802.1x authentication header
+	 * EAPOL WPA2 key type - 2, EAPOL WPA key type - 254
+	 */
+	type = dump_data[18];
+	if (type == 2 || type == 254) {
+		us_tmp = (dump_data[19] << 8) | dump_data[20];
+		pair = 0 != (us_tmp & 0x08);
+		ack = 0 != (us_tmp & 0x80);
+		mic = 0 != (us_tmp & 0x100);
+		kerr = 0 != (us_tmp & 0x400);
+		req = 0 != (us_tmp & 0x800);
+		sec = 0 != (us_tmp & 0x200);
+		install = 0 != (us_tmp & 0x40);
+
+		if (!sec && !mic && ack && !install && pair && !kerr && !req)
+			DHD_NV_INFO(("ETHER_TYPE_802_1X [%s] : M1 of 4way\n",
+				    direction ? "TX" : "RX"));
+		else if (pair && !install && !ack && mic &&
+				!sec && !kerr && !req)
+			DHD_NV_INFO(("ETHER_TYPE_802_1X [%s] : M2 of 4way\n",
+				    direction ? "TX" : "RX"));
+		else if (pair && ack && mic && sec && !kerr && !req)
+			DHD_NV_INFO(("ETHER_TYPE_802_1X [%s] : M3 of 4way\n",
+				    direction ? "TX" : "RX"));
+		else if (pair && !install && !ack && mic &&
+				sec && !req && !kerr)
+			DHD_NV_INFO(("ETHER_TYPE_802_1X [%s] : M4 of 4way\n",
+				    direction ? "TX" : "RX"));
+	}
 }

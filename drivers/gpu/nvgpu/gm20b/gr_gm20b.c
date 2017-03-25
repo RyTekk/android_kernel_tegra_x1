@@ -47,6 +47,7 @@ static void gr_gm20b_init_gpc_mmu(struct gk20a *g)
 	temp = gk20a_readl(g, fb_mmu_ctrl_r());
 	temp &= gr_gpcs_pri_mmu_ctrl_vm_pg_size_m() |
 		gr_gpcs_pri_mmu_ctrl_use_pdb_big_page_size_m() |
+		gr_gpcs_pri_mmu_ctrl_use_full_comp_tag_line_m() |
 		gr_gpcs_pri_mmu_ctrl_vol_fault_m() |
 		gr_gpcs_pri_mmu_ctrl_comp_fault_m() |
 		gr_gpcs_pri_mmu_ctrl_miss_gran_m() |
@@ -85,8 +86,9 @@ static void gr_gm20b_cb_size_default(struct gk20a *g)
 {
 	struct gr_gk20a *gr = &g->gr;
 
-	gr->attrib_cb_default_size =
-		gr_gpc0_ppc0_cbm_beta_cb_size_v_default_v();
+	if (!gr->attrib_cb_default_size)
+		gr->attrib_cb_default_size =
+			gr_gpc0_ppc0_cbm_beta_cb_size_v_default_v();
 	gr->alpha_cb_default_size =
 		gr_gpc0_ppc0_cbm_alpha_cb_size_v_default_v();
 }
@@ -112,9 +114,9 @@ static int gr_gm20b_calc_global_ctx_buffer_size(struct gk20a *g)
 	return size;
 }
 
-static void gr_gk20a_commit_global_attrib_cb(struct gk20a *g,
-					    struct channel_ctx_gk20a *ch_ctx,
-					    u64 addr, bool patch)
+void gr_gm20b_commit_global_attrib_cb(struct gk20a *g,
+				      struct channel_ctx_gk20a *ch_ctx,
+				      u64 addr, bool patch)
 {
 	gr_gk20a_ctx_patch_write(g, ch_ctx, gr_gpcs_setup_attrib_cb_base_r(),
 		gr_gpcs_setup_attrib_cb_base_addr_39_12_f(addr) |
@@ -463,7 +465,7 @@ static const u32 _num_sm_dsm_perf_ctrl_regs = 2;
 static u32 *_sm_dsm_perf_regs;
 static u32 _sm_dsm_perf_ctrl_regs[2];
 
-void gr_gm20b_init_sm_dsm_reg_info(void)
+static void gr_gm20b_init_sm_dsm_reg_info(void)
 {
 	if (_sm_dsm_perf_ctrl_regs[0] != 0)
 		return;
@@ -474,20 +476,20 @@ void gr_gm20b_init_sm_dsm_reg_info(void)
 			      gr_pri_gpc0_tpc0_sm_dsm_perf_counter_control5_r();
 }
 
-void gr_gm20b_get_sm_dsm_perf_regs(struct gk20a *g,
-				   u32 *num_sm_dsm_perf_regs,
-				   u32 **sm_dsm_perf_regs,
-				   u32 *perf_register_stride)
+static void gr_gm20b_get_sm_dsm_perf_regs(struct gk20a *g,
+					  u32 *num_sm_dsm_perf_regs,
+					  u32 **sm_dsm_perf_regs,
+					  u32 *perf_register_stride)
 {
 	*num_sm_dsm_perf_regs = _num_sm_dsm_perf_regs;
 	*sm_dsm_perf_regs = _sm_dsm_perf_regs;
 	*perf_register_stride = 0;
 }
 
-void gr_gm20b_get_sm_dsm_perf_ctrl_regs(struct gk20a *g,
-					u32 *num_sm_dsm_perf_ctrl_regs,
-					u32 **sm_dsm_perf_ctrl_regs,
-					u32 *ctrl_register_stride)
+static void gr_gm20b_get_sm_dsm_perf_ctrl_regs(struct gk20a *g,
+					       u32 *num_sm_dsm_perf_ctrl_regs,
+					       u32 **sm_dsm_perf_ctrl_regs,
+					       u32 *ctrl_register_stride)
 {
 	*num_sm_dsm_perf_ctrl_regs = _num_sm_dsm_perf_ctrl_regs;
 	*sm_dsm_perf_ctrl_regs = _sm_dsm_perf_ctrl_regs;
@@ -527,7 +529,7 @@ static void gr_gm20b_set_gpc_tpc_mask(struct gk20a *g, u32 gpc_index)
 	}
 }
 
-static int gr_gm20b_ctx_state_floorsweep(struct gk20a *g)
+int gr_gm20b_ctx_state_floorsweep(struct gk20a *g)
 {
 	struct gr_gk20a *gr = &g->gr;
 	u32 tpc_index, gpc_index;
@@ -687,28 +689,12 @@ static void gr_gm20b_load_gpccs_with_bootloader(struct gk20a *g)
 		gr_fecs_falcon_hwcfg_r());
 }
 
-static int gr_gm20b_ctx_wait_lsf_ready(struct gk20a *g, u32 timeout, u32 val)
-{
-	unsigned long end_jiffies = jiffies + msecs_to_jiffies(timeout);
-	unsigned long delay = GR_FECS_POLL_INTERVAL;
-	u32 reg;
-
-	gk20a_dbg_fn("");
-	reg = gk20a_readl(g, gr_fecs_ctxsw_mailbox_r(0));
-	do {
-		reg = gk20a_readl(g, gr_fecs_ctxsw_mailbox_r(0));
-		if (reg == val)
-			return 0;
-		udelay(delay);
-	} while (time_before(jiffies, end_jiffies) ||
-			!tegra_platform_is_silicon());
-
-	return -ETIMEDOUT;
-}
-
 static int gr_gm20b_load_ctxsw_ucode(struct gk20a *g)
 {
-	u32 err;
+	u32 err, flags;
+	u32 reg_offset = gr_gpcs_gpccs_falcon_hwcfg_r() -
+	  gr_fecs_falcon_hwcfg_r();
+
 	gk20a_dbg_fn("");
 
 	if (tegra_platform_is_linsim()) {
@@ -718,50 +704,62 @@ static int gr_gm20b_load_ctxsw_ucode(struct gk20a *g)
 			gr_gpccs_ctxsw_mailbox_value_f(0xc0de7777));
 	}
 
-	gk20a_writel(g, gr_fecs_ctxsw_mailbox_clear_r(0), ~0x0);
-	gm20b_pmu_load_lsf(g, LSF_FALCON_ID_FECS);
-
-	gr_gm20b_load_gpccs_with_bootloader(g);
-
-	if (g->ops.pmu.fecsrecoveryinprogress) {
-		unsigned long timeout = gk20a_get_gr_idle_timeout(g);
-		err = gr_gm20b_ctx_wait_lsf_ready(g, timeout, 0x55AA55AA);
-		if (err) {
-			gk20a_err(dev_from_gk20a(g), "Unable to recover FECS");
-			return err;
+	flags = PMU_ACR_CMD_BOOTSTRAP_FALCON_FLAGS_RESET_YES;
+	g->ops.pmu.lsfloadedfalconid = 0;
+	if (g->ops.pmu.fecsbootstrapdone) {
+		/* this must be recovery so bootstrap fecs and gpccs */
+		if (!g->ops.securegpccs) {
+			gr_gm20b_load_gpccs_with_bootloader(g);
+			err = g->ops.pmu.load_lsfalcon_ucode(g,
+					(1 << LSF_FALCON_ID_FECS));
 		} else {
-			g->ops.pmu.fecsrecoveryinprogress = 0;
-			gk20a_writel(g, gr_fecs_ctxsw_mailbox_clear_r(0), ~0x0);
-			gk20a_writel(g, gr_fecs_ctxsw_mailbox_r(1), 0x1);
-			gk20a_writel(g, gr_fecs_ctxsw_mailbox_clear_r(6),
-					0xffffffff);
+			/* bind WPR VA inst block */
+			gr_gk20a_load_falcon_bind_instblk(g);
+			err = g->ops.pmu.load_lsfalcon_ucode(g,
+				(1 << LSF_FALCON_ID_FECS) |
+				(1 << LSF_FALCON_ID_GPCCS));
+		}
+		if (err) {
+			gk20a_err(dev_from_gk20a(g),
+				"Unable to recover GR falcon");
+			return err;
+		}
 
-			gk20a_writel(g, gr_gpccs_dmactl_r(),
-					gr_gpccs_dmactl_require_ctx_f(0));
-			gk20a_writel(g, gr_gpccs_cpuctl_r(),
-					gr_gpccs_cpuctl_startcpu_f(1));
-
-			gk20a_writel(g, gr_fecs_cpuctl_alias_r(),
-					gr_fecs_cpuctl_startcpu_f(1));
+	} else {
+		/* cold boot or rg exit */
+		g->ops.pmu.fecsbootstrapdone = true;
+		if (!g->ops.securegpccs) {
+			gr_gm20b_load_gpccs_with_bootloader(g);
+		} else {
+			/* bind WPR VA inst block */
+			gr_gk20a_load_falcon_bind_instblk(g);
+			err = g->ops.pmu.load_lsfalcon_ucode(g,
+					(1 << LSF_FALCON_ID_GPCCS));
+			if (err) {
+				gk20a_err(dev_from_gk20a(g),
+						"Unable to boot GPCCS\n");
+				return err;
+			}
 		}
 	}
 
-
-	if (!g->ops.pmu.fecsbootstrapdone) {
-		g->ops.pmu.fecsbootstrapdone = true;
-		gk20a_writel(g, gr_fecs_ctxsw_mailbox_clear_r(0), ~0x0);
-		gk20a_writel(g, gr_fecs_ctxsw_mailbox_r(1), 0x1);
-		gk20a_writel(g, gr_fecs_ctxsw_mailbox_clear_r(6), 0xffffffff);
-
+	/*start gpccs */
+	if (g->ops.securegpccs) {
+		gk20a_writel(g, reg_offset +
+			gr_fecs_cpuctl_alias_r(),
+			gr_gpccs_cpuctl_startcpu_f(1));
+	} else {
 		gk20a_writel(g, gr_gpccs_dmactl_r(),
-				gr_gpccs_dmactl_require_ctx_f(0));
+			gr_gpccs_dmactl_require_ctx_f(0));
 		gk20a_writel(g, gr_gpccs_cpuctl_r(),
-				gr_gpccs_cpuctl_startcpu_f(1));
-
-		gk20a_writel(g, gr_fecs_cpuctl_alias_r(),
-				gr_fecs_cpuctl_startcpu_f(1));
+			gr_gpccs_cpuctl_startcpu_f(1));
 	}
-
+	/* start fecs */
+	gk20a_writel(g, gr_fecs_ctxsw_mailbox_clear_r(0), ~0x0);
+	gk20a_writel(g, gr_fecs_ctxsw_mailbox_r(1), 0x1);
+	gk20a_writel(g, gr_fecs_ctxsw_mailbox_clear_r(6), 0xffffffff);
+	gk20a_writel(g, gr_fecs_cpuctl_alias_r(),
+			gr_fecs_cpuctl_startcpu_f(1));
 	gk20a_dbg_fn("done");
 
 	return 0;
@@ -979,8 +977,8 @@ static int gr_gm20b_update_pc_sampling(struct channel_gk20a *c,
 	if (!ch_ctx || !ch_ctx->gr_ctx || c->vpr)
 		return -EINVAL;
 
-	ctx_ptr = vmap(ch_ctx->gr_ctx->pages,
-			PAGE_ALIGN(ch_ctx->gr_ctx->size) >> PAGE_SHIFT,
+	ctx_ptr = vmap(ch_ctx->gr_ctx->mem.pages,
+			PAGE_ALIGN(ch_ctx->gr_ctx->mem.size) >> PAGE_SHIFT,
 			0, pgprot_dmacoherent(PAGE_KERNEL));
 	if (!ctx_ptr)
 		return -ENOMEM;
@@ -1021,7 +1019,7 @@ static u32 gr_gm20b_get_max_lts_per_ltc(struct gk20a *g)
 	return lts_per_ltc;
 }
 
-u32 *gr_gm20b_rop_l2_en_mask(struct gk20a *g)
+static u32 *gr_gm20b_rop_l2_en_mask(struct gk20a *g)
 {
 	struct nvgpu_gpu_characteristics *gpu = &g->gpu_characteristics;
 	u32 i, tmp, max_fbps_count;
@@ -1043,6 +1041,27 @@ static u32 gr_gm20b_get_max_fbps_count(struct gk20a *g)
 	return max_fbps_count;
 }
 
+static void gr_gm20b_init_cyclestats(struct gk20a *g)
+{
+#if defined(CONFIG_GK20A_CYCLE_STATS)
+	g->gpu_characteristics.flags |=
+		NVGPU_GPU_FLAGS_SUPPORT_CYCLE_STATS;
+	g->gpu_characteristics.flags |=
+		NVGPU_GPU_FLAGS_SUPPORT_CYCLE_STATS_SNAPSHOT;
+#else
+	(void)g;
+#endif
+}
+
+void gr_gm20b_enable_cde_in_fecs(void *ctx_ptr)
+{
+	u32 cde_v;
+
+	cde_v = gk20a_mem_rd32(ctx_ptr + ctxsw_prog_main_image_ctl_o(), 0);
+	cde_v |=  ctxsw_prog_main_image_ctl_cde_enabled_f();
+	gk20a_mem_wr32(ctx_ptr + ctxsw_prog_main_image_ctl_o(), 0, cde_v);
+}
+
 void gm20b_init_gr(struct gpu_ops *gops)
 {
 	gops->gr.init_gpc_mmu = gr_gm20b_init_gpc_mmu;
@@ -1050,7 +1069,7 @@ void gm20b_init_gr(struct gpu_ops *gops)
 	gops->gr.cb_size_default = gr_gm20b_cb_size_default;
 	gops->gr.calc_global_ctx_buffer_size =
 		gr_gm20b_calc_global_ctx_buffer_size;
-	gops->gr.commit_global_attrib_cb = gr_gk20a_commit_global_attrib_cb;
+	gops->gr.commit_global_attrib_cb = gr_gm20b_commit_global_attrib_cb;
 	gops->gr.commit_global_bundle_cb = gr_gm20b_commit_global_bundle_cb;
 	gops->gr.commit_global_cb_manager = gr_gm20b_commit_global_cb_manager;
 	gops->gr.commit_global_pagepool = gr_gm20b_commit_global_pagepool;
@@ -1096,5 +1115,7 @@ void gm20b_init_gr(struct gpu_ops *gops)
 	gops->gr.get_rop_l2_en_mask = gr_gm20b_rop_l2_en_mask;
 	gops->gr.get_max_fbps_count = gr_gm20b_get_max_fbps_count;
 	gops->gr.init_sm_dsm_reg_info = gr_gm20b_init_sm_dsm_reg_info;
-	gops->gr.update_smpc_ctxsw_mode = gr_gk20a_update_smpc_ctxsw_mode;
+	gops->gr.wait_empty = gr_gk20a_wait_idle;
+	gops->gr.init_cyclestats = gr_gm20b_init_cyclestats;
+	gops->gr.enable_cde_in_fecs = gr_gm20b_enable_cde_in_fecs;
 }

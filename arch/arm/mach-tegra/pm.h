@@ -39,6 +39,7 @@
 #define PMC_SCRATCH0		0x50
 #define PMC_SCRATCH1		0x54
 #define PMC_SCRATCH4		0x60
+#define PMC_SCRATCH203		0x84c
 
 unsigned long tegra_cpu_power_good_time(void);
 unsigned long tegra_cpu_power_off_time(void);
@@ -227,6 +228,6 @@ void tegra_smp_clear_power_mask(void);
 static inline void tegra_smp_clear_power_mask(void){}
 #endif
 
-u32 tegra_restart_prev_smc(void);
+u32 tegra_register_suspend_vectors(u32, u32);
 
 #endif /* _MACH_TEGRA_PM_H_ */

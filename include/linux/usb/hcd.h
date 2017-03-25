@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2001-2002 by David Brownell
+ * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -349,6 +350,9 @@ struct hc_driver {
 	int	(*update_device)(struct usb_hcd *, struct usb_device *);
 	int	(*set_usb2_hw_lpm)(struct usb_hcd *, struct usb_device *, int);
 	int	(*hcd_reinit)(struct usb_hcd *);
+#ifdef CONFIG_NV_GAMEPAD_RESET
+	void	(*device_reset) (void);
+#endif
 	/* USB 3.0 Link Power Management */
 		/* Returns the USB3 hub-encoded value for the U1/U2 timeout. */
 	int	(*enable_usb3_lpm_timeout)(struct usb_hcd *,
@@ -359,6 +363,11 @@ struct hc_driver {
 	int	(*disable_usb3_lpm_timeout)(struct usb_hcd *,
 			struct usb_device *, enum usb3_link_state state);
 	int	(*find_raw_port_number)(struct usb_hcd *, int);
+	/* (optional) called from xhci ISR before (on=1) and after (on=0)
+	   soft retry. It gives HCD driver a chance to configure it hardware to
+	   deal with intermittent SuperSpeed transfer errors */
+	void	(*endpoint_soft_retry)(struct usb_hcd *hcd,
+			struct usb_host_endpoint *ep, bool on);
 };
 
 extern int usb_hcd_link_urb_to_ep(struct usb_hcd *hcd, struct urb *urb);
@@ -417,6 +426,7 @@ extern const struct dev_pm_ops usb_hcd_pci_pm_ops;
 #endif /* CONFIG_PCI */
 
 /* pci-ish (pdev null is ok) buffer alloc/mapping support */
+void usb_init_pool_max(void);
 int hcd_buffer_create(struct usb_hcd *hcd);
 void hcd_buffer_destroy(struct usb_hcd *hcd);
 

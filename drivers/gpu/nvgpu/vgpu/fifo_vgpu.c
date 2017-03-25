@@ -57,16 +57,6 @@ static void vgpu_channel_unbind(struct channel_gk20a *ch)
 	}
 
 	ch->bound = false;
-
-	/*
-	 * if we are agrressive then we can destroy the syncpt
-	 * resource at this point
-	 * if not, then it will be destroyed at channel_free()
-	 */
-	if (ch->sync && platform->aggressive_sync_destroy) {
-		ch->sync->destroy(ch->sync);
-		ch->sync = NULL;
-	}
 }
 
 static int vgpu_channel_alloc_inst(struct gk20a *g, struct channel_gk20a *ch)
@@ -126,7 +116,7 @@ static void vgpu_channel_disable(struct channel_gk20a *ch)
 }
 
 static int vgpu_channel_setup_ramfc(struct channel_gk20a *ch, u64 gpfifo_base,
-				u32 gpfifo_entries)
+				u32 gpfifo_entries, u32 flags)
 {
 	struct gk20a_platform *platform = gk20a_get_platform(ch->g->dev);
 	struct device __maybe_unused *d = dev_from_gk20a(ch->g);
@@ -290,7 +280,7 @@ static int vgpu_init_fifo_setup_sw(struct gk20a *g)
 		f->channel[chid].userd_cpu_va =
 			f->userd.cpu_va + chid * f->userd_entry_size;
 		f->channel[chid].userd_iova =
-			gk20a_mm_iova_addr(g, f->userd.sgt->sgl)
+			g->ops.mm.get_iova_addr(g, f->userd.sgt->sgl, 0)
 				+ chid * f->userd_entry_size;
 		f->channel[chid].userd_gpu_va =
 			f->userd.gpu_va + chid * f->userd_entry_size;
@@ -515,17 +505,6 @@ static int vgpu_fifo_wait_engine_idle(struct gk20a *g)
 	return 0;
 }
 
-static int vgpu_fifo_force_reset_ch(struct channel_gk20a *ch, bool verbose)
-{
-	gk20a_dbg_fn("");
-
-	if (verbose)
-		gk20a_warn(dev_from_gk20a(ch->g),
-			"channel force reset is not supported");
-
-	return -ENOSYS;
-}
-
 static void vgpu_fifo_set_ctx_mmu_error(struct gk20a *g,
 		struct channel_gk20a *ch)
 {
@@ -566,7 +545,7 @@ int vgpu_fifo_isr(struct gk20a *g, struct tegra_vgpu_fifo_intr_info *info)
 					NVGPU_CHANNEL_FIFO_ERROR_IDLE_TIMEOUT);
 		break;
 	case TEGRA_VGPU_FIFO_INTR_MMU_FAULT:
-		gk20a_channel_abort(ch);
+		gk20a_channel_abort(ch, false);
 		vgpu_fifo_set_ctx_mmu_error(g, ch);
 		break;
 	default:
@@ -605,6 +584,5 @@ void vgpu_init_fifo_ops(struct gpu_ops *gops)
 	gops->fifo.preempt_channel = vgpu_fifo_preempt_channel;
 	gops->fifo.update_runlist = vgpu_fifo_update_runlist;
 	gops->fifo.wait_engine_idle = vgpu_fifo_wait_engine_idle;
-	gops->fifo.force_reset_ch = vgpu_fifo_force_reset_ch;
 }
 

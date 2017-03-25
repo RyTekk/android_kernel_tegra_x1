@@ -130,7 +130,7 @@ static int ecx_init_input_cables(struct extcon_cable_xlate *ecx)
 static int ecx_attach_cable(struct extcon_cable_xlate *ecx)
 {
 	struct ecx_in_cables *in_cables;
-	int mask_state;
+	int mask_state = 0;
 	int all_states = 0;
 	int new_state = -1;
 	int i;
@@ -152,10 +152,15 @@ static int ecx_attach_cable(struct extcon_cable_xlate *ecx)
 			mask_state = all_states & ecx->pdata->io_new_states[i].in_mask;
 			if (mask_state ==
 					ecx->pdata->io_new_states[i].current_in_cable_state) {
+					if ((ecx->last_cable_in_state == mask_state) && mask_state) {
+						mutex_unlock(&ecx->cable_lock);
+						return 0;
+					}
+
 					if ((ecx->last_cable_in_state ==
 							ecx->pdata->io_new_states[i].last_cable_in_state)
-							|| (ecx->last_cable_in_state == mask_state)
 							|| (mask_state == 0)) {
+
 						ecx->last_cable_in_state = mask_state;
 						new_state = ecx->pdata->io_new_states[i].new_cable_out_state;
 						reschedule_wq = ecx->pdata->io_new_states[i].reschedule_wq;
@@ -176,6 +181,9 @@ static int ecx_attach_cable(struct extcon_cable_xlate *ecx)
 	if (new_state < 0) {
 		dev_err(ecx->dev, "Cable state 0x%04x is not defined\n",
 			all_states);
+		dev_err(ecx->dev,
+			"Last cable in state: 0x%04x, mask state: 0x%04x\n",
+			ecx->last_cable_in_state, mask_state);
 		mutex_unlock(&ecx->cable_lock);
 		return -EINVAL;
 	}
@@ -187,6 +195,7 @@ static int ecx_attach_cable(struct extcon_cable_xlate *ecx)
 			dev_info(ecx->dev, "Cable%d %s is attach\n",
 				i, ecx->pdata->out_cable_names[i]);
 		} else {
+			ecx->last_cable_in_state = 0;
 			dev_info(ecx->dev, "No cable attach\n");
 		}
 	}

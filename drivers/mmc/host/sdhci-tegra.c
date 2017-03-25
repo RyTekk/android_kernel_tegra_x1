@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2010 Google, Inc.
  *
- * Copyright (c) 2012-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2012-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -630,6 +630,37 @@ struct dbg_cfg_data {
 	bool			clk_ungated;
 };
 #endif
+
+/*These dummy function are defined, because dvfs function
+are not available. This function will be removed once dvfs
+function are available to use.
+*/
+
+#ifdef CONFIG_ARCH_TEGRA_18x_SOC
+static int tegra_dvfs_predict_mv_at_hz_no_tfloor(struct clk *c, unsigned long rate) {
+	return 0;
+}
+
+static int tegra_dvfs_set_fmax_at_vmin(struct clk *c, unsigned long f_max, int v_min) {
+	return 0;
+}
+
+static int tegra_dvfs_get_core_nominal_millivolts(void) {
+	return 0;
+}
+
+static int tegra_dvfs_get_core_override_floor(void) {
+	return 0;
+}
+
+static int tegra_dvfs_get_core_boot_level(void) {
+	return 0;
+}
+static int tegra_soc_speedo_0_value(void) {
+	return 0;
+}
+#endif
+
 struct sdhci_tegra {
 	const struct tegra_sdhci_platform_data *plat;
 	const struct sdhci_tegra_soc_data *soc_data;
@@ -1361,6 +1392,7 @@ static irqreturn_t carddetect_irq(int irq, void *data)
 		 */
 		tegra_host->tuning_status = TUNING_STATUS_RETUNE;
 		tegra_host->force_retune = true;
+		sdhost->is_calibration_done = false;
 	}
 
 	tasklet_schedule(&sdhost->card_tasklet);
@@ -1767,10 +1799,6 @@ static void tegra_sdhci_set_clk_rate(struct sdhci_host *sdhci,
 	clk_set_rate(pltfm_host->clk, clk_rate);
 	sdhci->max_clk = clk_get_rate(pltfm_host->clk);
 
-	/* FPGA supports 26MHz of clock for SDMMC. */
-	if (tegra_platform_is_fpga())
-		sdhci->max_clk = 13000000;
-
 #ifdef CONFIG_MMC_FREQ_SCALING
 	/* Set the tap delay if tuning is done and dfs is enabled */
 	if (sdhci->mmc->df &&
@@ -2078,7 +2106,7 @@ static void tegra_sdhci_do_calibration(struct sdhci_host *sdhci,
 	}
 	sdhci_writel(sdhci, val, SDMMC_AUTO_CAL_CONFIG);
 
-	/* Wait for 1us after auto calibration is enabled*/
+	/* Wait for 2us after auto calibration is enabled*/
 	if (soc_data->nvquirks2 & NVQUIRK2_ADD_DELAY_AUTO_CALIBRATION)
 		udelay(2);
 
@@ -2139,7 +2167,7 @@ static void tegra_sdhci_do_calibration(struct sdhci_host *sdhci,
 		}
 	}
 
-	if (tegra_host->plat->en_periodic_calib) {
+	if (tegra_host->plat->en_periodic_calib && tegra_host->card_present) {
 		tegra_host->timestamp = ktime_get();
 		sdhci->timestamp = ktime_get();
 		sdhci->is_calibration_done = true;
@@ -3249,7 +3277,6 @@ static int sdhci_tegra_get_tap_window_data(struct sdhci_host *sdhci,
 	u8 boun_end = 0, next_boun_end = 0;
 	u8 j = 0;
 	bool valid_ui_found = false;
-	unsigned long flags;
 
 	/*
 	 * Assume there are a max of 10 windows and allocate tap window
@@ -3263,7 +3290,7 @@ static int sdhci_tegra_get_tap_window_data(struct sdhci_host *sdhci,
 		return -ENOMEM;
 	}
 
-	spin_lock_irqsave(&sdhci->lock, flags);
+	spin_lock(&sdhci->lock);
 	tap_value = 0;
 	do {
 		tap_data = &tuning_data->tap_data[num_of_wins];
@@ -3271,7 +3298,7 @@ static int sdhci_tegra_get_tap_window_data(struct sdhci_host *sdhci,
 		tap_value = sdhci_tegra_scan_tap_values(sdhci, tap_value, true,
 				&err);
 		if ((tap_value < 0) && (err == -ENOMEDIUM)) {
-			spin_unlock_irqrestore(&sdhci->lock, flags);
+			spin_unlock(&sdhci->lock);
 			return err;
 		}
 		tap_data->win_start = min_t(u8, tap_value, MAX_TAP_VALUES);
@@ -3281,7 +3308,7 @@ static int sdhci_tegra_get_tap_window_data(struct sdhci_host *sdhci,
 			if (!num_of_wins) {
 				dev_err(mmc_dev(sdhci->mmc),
 					"All tap values(0-255) failed\n");
-				spin_unlock_irqrestore(&sdhci->lock, flags);
+				spin_unlock(&sdhci->lock);
 				return -EINVAL;
 			} else {
 				/* All windows obtained */
@@ -3293,7 +3320,7 @@ static int sdhci_tegra_get_tap_window_data(struct sdhci_host *sdhci,
 		tap_value = sdhci_tegra_scan_tap_values(sdhci,
 				tap_value, false, &err);
 		if ((tap_value < 0) && (err == -ENOMEDIUM)) {
-			spin_unlock_irqrestore(&sdhci->lock, flags);
+			spin_unlock(&sdhci->lock);
 			return err;
 		}
 		tap_data->win_end = min_t(u8, (tap_value - 1), MAX_TAP_VALUES);
@@ -3327,7 +3354,7 @@ static int sdhci_tegra_get_tap_window_data(struct sdhci_host *sdhci,
 		}
 		num_of_wins++;
 	} while (tap_value < MAX_TAP_VALUES);
-	spin_unlock_irqrestore(&sdhci->lock, flags);
+	spin_unlock(&sdhci->lock);
 
 	tuning_data->num_of_valid_tap_wins = num_of_wins;
 	valid_num_uis = num_of_uis;
@@ -4060,7 +4087,7 @@ static int tegra_sdhci_suspend(struct sdhci_host *sdhci)
 	if (tegra_host->card_present) {
 
 		/* Configure sdmmc pins to GPIO mode if needed */
-		if (plat->pin_count > 0)
+		if (plat && plat->pin_count > 0)
 			gpio_request_array(plat->gpios,
 				ARRAY_SIZE(plat->gpios));
 
@@ -4069,6 +4096,7 @@ static int tegra_sdhci_suspend(struct sdhci_host *sdhci)
 		if (err)
 			dev_err(mmc_dev(sdhci->mmc),
 			"Regulators disable in suspend failed %d\n", err);
+		sdhci->is_calibration_done = false;
 	}
 	if (plat && gpio_is_valid(plat->cd_gpio)) {
 		if (!plat->cd_wakeup_incapable) {
@@ -4082,7 +4110,7 @@ static int tegra_sdhci_suspend(struct sdhci_host *sdhci)
 		}
 	}
 
-	if (plat->pwrdet_support && tegra_host->sdmmc_padctrl) {
+	if (plat && plat->pwrdet_support && tegra_host->sdmmc_padctrl) {
 		err = padctrl_set_voltage(tegra_host->sdmmc_padctrl,
 				SDHOST_HIGH_VOLT_3V3);
 		if (err)
@@ -4090,8 +4118,11 @@ static int tegra_sdhci_suspend(struct sdhci_host *sdhci)
 				"padcontrol set volt failed: %d\n", err);
 	}
 
-	if (plat->pin_count > 0)
+	if (plat && plat->pin_count > 0)
 		gpio_free_array(plat->gpios, ARRAY_SIZE(plat->gpios));
+	if (!plat)
+		pr_err("%s %s line=%d - null plat\n",
+			mmc_hostname(sdhci->mmc), __func__, __LINE__);
 
 	if (!err)
 		sdhci->detect_resume = 1;
@@ -4775,16 +4806,14 @@ static const struct file_operations sdhci_host_bus_timing_fops = {
 	.llseek		= default_llseek,
 };
 
-DEFINE_SIMPLE_ATTRIBUTE(sdhci_tegra_card_insert_fops, get_card_insert,
-		set_card_insert, "%llu\n");
+DEFINE_SIMPLE_ATTRIBUTE(sdhci_tegra_card_insert_fops, get_card_insert, set_card_insert,
+	"%llu\n");
 static void sdhci_tegra_misc_debugfs(struct sdhci_host *host)
 {
 	struct dentry *root = host->debugfs_root;
 	unsigned saved_line;
-	/*
-	 *backup original host timing capabilities as debugfs
-	 *may override it later
-	 */
+
+	/*backup original host timing capabilities as debugfs may override it later*/
 	host->caps_timing_orig = host->mmc->caps &
 				(MMC_CAP_SD_HIGHSPEED | MMC_CAP_UHS_DDR50
 				| MMC_CAP_UHS_SDR12 | MMC_CAP_UHS_SDR25
@@ -4817,8 +4846,8 @@ err_node:
 	debugfs_remove_recursive(root);
 	host->debugfs_root = NULL;
 err_root:
-	pr_err("%s %s:Failed to initialize debugfs functionality at line=%d\n",
-			__func__, mmc_hostname(host->mmc), saved_line);
+	pr_err("%s %s: Failed to initialize debugfs functionality at line=%d\n", __func__,
+		mmc_hostname(host->mmc), saved_line);
 	return;
 }
 
@@ -4918,6 +4947,7 @@ static int tegra_sdhci_reboot_notify(struct notifier_block *nb,
 	struct sdhci_tegra *tegra_host =
 		container_of(nb, struct sdhci_tegra, reboot_notify);
 	int err;
+	struct sdhci_host *sdhci = dev_get_drvdata(tegra_host->dev);
 
 	switch (event) {
 	case SYS_RESTART:
@@ -4927,6 +4957,11 @@ static int tegra_sdhci_reboot_notify(struct notifier_block *nb,
 		if (err)
 			pr_err("Disable regulator in reboot notify failed %d\n",
 				err);
+
+		/* disable runtime pm callbacks */
+		pr_debug("%s: %s line=%d\n",
+			mmc_hostname(sdhci->mmc), __func__, __LINE__);
+		sdhci_runtime_forbid(sdhci);
 
 		return NOTIFY_OK;
 	}
@@ -5276,13 +5311,51 @@ static struct sdhci_tegra_soc_data soc_data_tegra21 = {
 	.nvquirks2 = NVQUIRK2_UPDATE_HW_TUNING_CONFG |
 		     NVQUIRK2_CONFIG_PWR_DET |
 		     NVQUIRK2_BROKEN_SD2_0_SUPPORT |
-		     NVQUIRK2_SELECT_SDR50_MODE |
 		     NVQUIRK2_ADD_DELAY_AUTO_CALIBRATION |
 		     NVQUIRK2_SET_PAD_E_INPUT_VOL |
 		     NVQUIRK2_DYNAMIC_TRIM_SUPPLY_SWITCH,
 };
 
+static struct sdhci_pltfm_data sdhci_tegra18_pdata = {
+	.quirks = TEGRA_SDHCI_QUIRKS,
+	.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN |
+		   SDHCI_QUIRK2_NON_STD_VOLTAGE_SWITCHING |
+		   SDHCI_QUIRK2_NON_STD_TUNING_LOOP_CNTR |
+		   SDHCI_QUIRK2_NO_CALC_MAX_DISCARD_TO |
+		   SDHCI_QUIRK2_REG_ACCESS_REQ_HOST_CLK |
+		   SDHCI_QUIRK2_HOST_OFF_CARD_ON |
+		   SDHCI_QUIRK2_USE_64BIT_ADDR |
+		   SDHCI_QUIRK2_NON_STD_TUN_CARD_CLOCK |
+		   SDHCI_QUIRK2_NON_STD_RTPM |
+		   SDHCI_QUIRK2_SUPPORT_64BIT_DMA,
+	.ops  = &tegra_sdhci_ops,
+};
+
+static struct sdhci_tegra_soc_data soc_data_tegra18 = {
+	.pdata = &sdhci_tegra18_pdata,
+	.nvquirks = TEGRA_SDHCI_NVQUIRKS |
+		    NVQUIRK_SET_TRIM_DELAY |
+		    NVQUIRK_ENABLE_DDR50 |
+		    NVQUIRK_ENABLE_HS200 |
+		    NVQUIRK_ENABLE_HS400 |
+		    NVQUIRK_ENABLE_AUTO_CMD23 |
+		    NVQUIRK_INFINITE_ERASE_TIMEOUT |
+		    NVQUIRK_SET_PAD_E_INPUT_OR_E_PWRD |
+		    NVQUIRK_SET_SDMEMCOMP_VREF_SEL |
+		    NVQUIRK_HIGH_FREQ_TAP_PROCEDURE |
+		    NVQUIRK_SET_CALIBRATION_OFFSETS |
+		    NVQUIRK_DISABLE_EXTERNAL_LOOPBACK |
+		    NVQUIRK_UPDATE_PAD_CNTRL_REG |
+		    NVQUIRK_UPDATE_PIN_CNTRL_REG,
+	.nvquirks2 = NVQUIRK2_UPDATE_HW_TUNING_CONFG |
+		     NVQUIRK2_CONFIG_PWR_DET |
+		     NVQUIRK2_BROKEN_SD2_0_SUPPORT |
+		     NVQUIRK2_ADD_DELAY_AUTO_CALIBRATION |
+		     NVQUIRK2_DYNAMIC_TRIM_SUPPLY_SWITCH,
+};
+
 static const struct of_device_id sdhci_tegra_dt_match[] = {
+	{ .compatible = "nvidia,tegra186-sdhci", .data = &soc_data_tegra18 },
 	{ .compatible = "nvidia,tegra210-sdhci", .data = &soc_data_tegra21 },
 	{ .compatible = "nvidia,tegra124-sdhci", .data = &soc_data_tegra12 },
 	{ .compatible = "nvidia,tegra114-sdhci", .data = &soc_data_tegra11 },
@@ -5294,9 +5367,10 @@ static struct tegra_sdhci_platform_data *sdhci_tegra_dt_parse_pdata(
 						struct platform_device *pdev)
 {
 	int val;
-	int ret;
+	int ret, len;
 	struct tegra_sdhci_platform_data *plat;
 	struct device_node *np = pdev->dev.of_node;
+	struct sdhci_host *host = platform_get_drvdata(pdev);
 	u32 bus_width;
 	int i;
 	char label[12];
@@ -5416,6 +5490,8 @@ static struct tegra_sdhci_platform_data *sdhci_tegra_dt_parse_pdata(
 	plat->bcm_sdio_suppress_kso_dump =
 		of_property_read_bool(np, "nvidia,bcm-sdio-suppress-kso-dump");
 
+	if (of_find_property(np, "broken-cd", &len))
+		host->mmc->caps |= MMC_CAP_NEEDS_POLL;
 	return plat;
 }
 
@@ -5602,6 +5678,11 @@ static int sdhci_tegra_init_pinctrl_info(struct device *dev,
 	return 0;
 }
 
+static const struct of_device_id sdhci_tegra_device_match[] = {
+	{ .compatible = "nvidia,tegra124-sdhci", },
+	{},
+};
+
 static int sdhci_tegra_probe(struct platform_device *pdev)
 {
 	const struct of_device_id *match;
@@ -5616,6 +5697,7 @@ static int sdhci_tegra_probe(struct platform_device *pdev)
 	int rc;
 	u8 i;
 	u32 opt_subrevision;
+	int ret;
 
 	for (i = 0; i < ARRAY_SIZE(parent_clk_list); i++)
 		parent_clk_list[i] = NULL;
@@ -5785,6 +5867,12 @@ static int sdhci_tegra_probe(struct platform_device *pdev)
 	 */
 	if (!gpio_is_valid(plat->cd_gpio))
 		tegra_host->card_present = 1;
+
+	ret = genpd_dev_pm_add(sdhci_tegra_device_match, &pdev->dev);
+	if (ret) {
+		pr_err("Could not add %s to power domain using device tree\n",
+						dev_name(&pdev->dev));
+	}
 
 	tegra_pd_add_device(&pdev->dev);
 	/* Get the ddr clock */
@@ -5975,6 +6063,8 @@ static int sdhci_tegra_probe(struct platform_device *pdev)
 	if (plat->cd_wakeup_incapable)
 		host->mmc->pm_flags &= ~MMC_PM_IGNORE_PM_NOTIFY;
 
+	host->mmc->caps |= MMC_CAP_WAIT_WHILE_BUSY;
+
 	/* disable access to boot partitions */
 	host->mmc->caps2 |= MMC_CAP2_BOOTPART_NOACC;
 
@@ -6056,9 +6146,6 @@ static int sdhci_tegra_probe(struct platform_device *pdev)
 	sdhci_tegra_error_stats_debugfs(host);
 	sdhci_tegra_misc_debugfs(host);
 	device_create_file(&pdev->dev, &dev_attr_cmd_state);
-
-	/* Enable async suspend/resume to reduce LP0 latency */
-	device_enable_async_suspend(&pdev->dev);
 
 	if (plat->power_off_rail) {
 		tegra_host->reboot_notify.notifier_call =

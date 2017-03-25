@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2008 Atmel Corporation
  *
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -32,6 +32,8 @@ static char *fail_request;
 module_param(fail_request, charp, 0);
 
 #endif /* CONFIG_FAIL_MMC_REQUEST */
+
+static int mmc_speed_opt_get(void *data, u64 *val);
 
 /* The debugfs functions are optimized away when CONFIG_DEBUG_FS isn't set. */
 static int mmc_ios_show(struct seq_file *s, void *data)
@@ -146,6 +148,9 @@ static int mmc_ios_show(struct seq_file *s, void *data)
 		break;
 	case MMC_TIMING_MMC_HS200:
 		str = "mmc high-speed SDR200";
+		break;
+	case MMC_TIMING_MMC_HS400:
+		str = "mmc HS400";
 		break;
 	default:
 		str = "invalid";
@@ -323,6 +328,9 @@ static int mmc_speed_opt_set(void *data, u64 val)
 	u32 prev_timing, prev_maxdtr;
 	u32 timing_req = 0;
 	u32 maxdtr_req = 0;
+	u64 current_mode;
+
+	mmc_speed_opt_get(host, &current_mode);
 
 	if (host->card->type != MMC_TYPE_MMC) {
 		pr_warn("%s: usage error, only MMC device is supported\n",
@@ -333,17 +341,20 @@ static int mmc_speed_opt_set(void *data, u64 val)
 	prev_maxdtr = host->card->sw_caps.uhs_max_dtr;
 
 	/* Currently supporting only DDR50 and HS200 speeds */
-	switch (val) {
-	case UHS_SDR104_BUS_SPEED:
+	if (current_mode == val) {
+		pr_info("%s: current mode is same as requested",
+				mmc_hostname(host));
+		return 0;
+	} else if ((current_mode == UHS_DDR50_BUS_SPEED)
+			&& (val == UHS_SDR104_BUS_SPEED)) {
 		timing_req = MMC_TIMING_MMC_HS200;
 		maxdtr_req = MMC_HS200_MAX_DTR;
-		break;
-	case UHS_DDR50_BUS_SPEED:
+	} else if ((current_mode == UHS_SDR104_BUS_SPEED)
+			&& (val == UHS_DDR50_BUS_SPEED)) {
 		timing_req = MMC_TIMING_UHS_DDR50;
 		maxdtr_req = UHS_DDR50_MAX_DTR;
-		break;
-	default:
-		pr_warn("%s: usage error, set only 3 for HS200 or 4 for DDR50\n",
+	} else {
+		pr_info("%s: usage error, set only 3 for HS200 or 4 for DDR50 \nFollowing are the supported modes: \n\t 1.HS200 to DDR50 \n\t 2.DDR50 to HS200",
 			mmc_hostname(host));
 		return 0;
 	}
@@ -387,8 +398,10 @@ static int mmc_speed_opt_get(void *data, u64 *val)
 		(host->card->sd_bus_speed < ARRAY_SIZE(uhs_speeds))) {
 		str = uhs_speeds[host->card->sd_bus_speed];
 		*val = host->card->sd_bus_speed;
-	} else if (host->ios.timing == MMC_TIMING_MMC_HS) {
+	} else if ((host->ios.timing == MMC_TIMING_MMC_HS)
+			|| (host->ios.timing == MMC_TIMING_SD_HS)) {
 		str = "high speed";
+		*val = HIGH_SPEED_BUS_SPEED;
 	} else if (host->ios.timing == MMC_TIMING_MMC_HS200) {
 		str = "HS200";
 		*val = UHS_SDR104_BUS_SPEED;
@@ -495,7 +508,7 @@ static int mmc_dbg_card_speed_class_get(void *data, u64 *val)
 	return 0;
 }
 DEFINE_SIMPLE_ATTRIBUTE(mmc_dbg_card_speed_class_fops,
-		mmc_dbg_card_speed_class_get, NULL, "%u\n");
+		mmc_dbg_card_speed_class_get, NULL, "%llu\n");
 
 static int mmc_get_ext_csd_byte_val(struct mmc_card *card, u64 *val,
 		unsigned int ext_csd_byte)
@@ -516,7 +529,6 @@ static int mmc_get_ext_csd_byte_val(struct mmc_card *card, u64 *val,
 	if (!err)
 		*val = ext_csd[ext_csd_byte];
 
-out_free:
 	kfree(ext_csd);
 	return err;
 }
@@ -530,6 +542,42 @@ static int mmc_dbg_ext_csd_eol_get(void *data, u64 *val)
 DEFINE_SIMPLE_ATTRIBUTE(mmc_dbg_ext_csd_eol_fops,
 			mmc_dbg_ext_csd_eol_get, NULL, "%llu\n");
 
+static int mmc_dbg_ext_csd_bkops_status_get(void *data, u64 *val)
+{
+	struct mmc_card *card = data;
+	return mmc_get_ext_csd_byte_val(card, val, EXT_CSD_BKOPS_STATUS);
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(mmc_dbg_ext_csd_bkops_status_fops,
+			mmc_dbg_ext_csd_bkops_status_get, NULL, "%llu\n");
+
+static int mmc_dbg_ext_csd_bkops_support_get(void *data, u64 *val)
+{
+	struct mmc_card *card = data;
+	return mmc_get_ext_csd_byte_val(card, val, EXT_CSD_BKOPS_SUPPORT);
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(mmc_dbg_ext_csd_bkops_support_fops,
+			mmc_dbg_ext_csd_bkops_support_get, NULL, "%llu\n");
+
+static int mmc_dbg_ext_csd_hpi_support_get(void *data, u64 *val)
+{
+	struct mmc_card *card = data;
+	return mmc_get_ext_csd_byte_val(card, val, EXT_CSD_HPI_FEATURES);
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(mmc_dbg_ext_csd_hpi_support_fops,
+		mmc_dbg_ext_csd_hpi_support_get, NULL, "%llu\n");
+
+static int mmc_dbg_ext_csd_pon_notify_get(void *data, u64 *val)
+{
+	struct mmc_card *card = data;
+	return mmc_get_ext_csd_byte_val(card, val,
+			EXT_CSD_POWER_OFF_NOTIFICATION);
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(mmc_dbg_ext_csd_pon_notify_fops,
+		mmc_dbg_ext_csd_pon_notify_get, NULL, "%llu\n");
 
 static int mmc_dbg_ext_csd_life_time_type_a(void *data, u64 *val)
 {
@@ -706,6 +754,18 @@ void mmc_add_card_debugfs(struct mmc_card *card)
 			goto err;
 		if (!debugfs_create_file("firmware_version", S_IRUSR, root,
 					card, &mmc_dbg_ext_csd_fw_v_fops))
+			goto err;
+		if (!debugfs_create_file("bkops_status", S_IRUSR, root, card,
+					&mmc_dbg_ext_csd_bkops_status_fops))
+			goto err;
+		if (!debugfs_create_file("bkops_support", S_IRUSR, root, card,
+					&mmc_dbg_ext_csd_bkops_support_fops))
+			goto err;
+		if (!debugfs_create_file("poweron_notify", S_IRUSR, root, card,
+					&mmc_dbg_ext_csd_pon_notify_fops))
+			goto err;
+		if (!debugfs_create_file("hpi_support", S_IRUSR, root, card,
+					&mmc_dbg_ext_csd_hpi_support_fops))
 			goto err;
 	}
 

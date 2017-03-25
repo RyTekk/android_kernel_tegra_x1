@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -32,7 +32,6 @@
 #include <media/soc_camera.h>
 #include <media/soc_mediabus.h>
 #include <media/tegra_v4l2_camera.h>
-#include <media/camera_common.h>
 
 #include <mach/clk.h>
 #include <mach/io_dpd.h>
@@ -59,15 +58,15 @@ module_param(tpg_mode, int, 0644);
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT			0x000
 #if (IS_ENABLED(CONFIG_ARCH_TEGRA_12x_SOC) || \
 	IS_ENABLED(CONFIG_ARCH_TEGRA_13x_SOC))
-#define	VI_MW_REQ_DONE					4
-#define	VI_MW_ACK_DONE					6
-#define	VI_FRAME_START					9
-#define	VI_LINE_START					11
+#define 	VI_MW_REQ_DONE				4
+#define 	VI_MW_ACK_DONE				6
+#define 	VI_FRAME_START				9
+#define 	VI_LINE_START				11
 #else
-#define	VI_LINE_START					4
-#define	VI_FRAME_START					5
-#define	VI_MW_REQ_DONE					6
-#define	VI_MW_ACK_DONE					7
+#define 	VI_LINE_START				4
+#define 	VI_FRAME_START				5
+#define 	VI_MW_REQ_DONE				6
+#define 	VI_MW_ACK_DONE				7
 #endif
 
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT_CNTRL		0x004
@@ -187,7 +186,7 @@ module_param(tpg_mode, int, 0644);
 
 /* CSI Pattern Generator registers */
 #if (IS_ENABLED(CONFIG_ARCH_TEGRA_12x_SOC) || \
-	    IS_ENABLED(CONFIG_ARCH_TEGRA_13x_SOC))
+	IS_ENABLED(CONFIG_ARCH_TEGRA_13x_SOC))
 #define TEGRA_CSI_PATTERN_GENERATOR_0_BASE		0xa68
 #define TEGRA_CSI_PATTERN_GENERATOR_1_BASE		0xa9c
 #else
@@ -210,16 +209,28 @@ module_param(tpg_mode, int, 0644);
 #define TEGRA_CSI_PG_BLUE_FREQ_RATE			0x020
 #define TEGRA_CSI_PG_AOHDR				0x024
 
+#if (IS_ENABLED(CONFIG_ARCH_TEGRA_12x_SOC) || \
+	IS_ENABLED(CONFIG_ARCH_TEGRA_13x_SOC))
 #define TEGRA_CSI_DPCM_CTRL_A				0xad0
 #define TEGRA_CSI_DPCM_CTRL_B				0xad4
 #define TEGRA_CSI_STALL_COUNTER				0xae8
 #define TEGRA_CSI_CSI_READONLY_STATUS			0xaec
 #define TEGRA_CSI_CSI_SW_STATUS_RESET			0xaf0
 #define TEGRA_CSI_CLKEN_OVERRIDE			0xaf4
+#define TEGRA_CSI_DEBUG_COUNTER_BASE			0xaf8
 #define TEGRA_CSI_DEBUG_CONTROL				0xaf8
 #define TEGRA_CSI_DEBUG_COUNTER_0			0xafc
 #define TEGRA_CSI_DEBUG_COUNTER_1			0xb00
 #define TEGRA_CSI_DEBUG_COUNTER_2			0xb04
+#else
+#define TEGRA_CSI_DEBUG_COUNTER_BASE			0xa54
+#define TEGRA_CSI_DEBUG_CONTROL				0x000
+#define TEGRA_CSI_DEBUG_COUNTER_0			0x004
+#define TEGRA_CSI_DEBUG_COUNTER_1			0x008
+#define TEGRA_CSI_DEBUG_COUNTER_2			0x00c
+#endif
+
+#define TEGRA_CSI_PORT_OFFSET				0x800
 
 #define MIPI_CAL_CTRL		0x00
 #define		STARTCAL	(1 << 0)
@@ -340,6 +351,7 @@ struct chan_regs_config {
 	u32 cil_base;
 	u32 cil_phy_base;
 	u32 tpg_base;
+	u32 debug_base;
 };
 
 #define csi_regs_write(cam, chan, offset, val) \
@@ -361,6 +373,12 @@ struct chan_regs_config {
 		TC_VI_REG_WT(cam, chan->regs.tpg_base + offset, val)
 #define tpg_regs_read(cam, chan, offset) \
 		TC_VI_REG_RD(cam, chan->regs.tpg_base + offset)
+
+#define debug_regs_write(cam, chan, offset, val) \
+		TC_VI_REG_WT(cam, chan->regs.debug_base + offset, val)
+
+#define debug_regs_read(cam, chan, offset) \
+		TC_VI_REG_RD(cam, chan->regs.debug_base + offset);
 
 static struct tegra_io_dpd vi2_io_dpd[] = {
 	{
@@ -429,21 +447,16 @@ struct vi2_channel {
 
 	int				port;
 	int				lanes;
+	int				continuous_clk;
 	s32				bytes_per_line;
 	int				fourcc;
 	int				code;
 	int				surface;
 	int				width;
 	int				height;
-	u8				bits_per_sample;
 
 	int				sequence;
 	int				sof;
-
-	int				buffer_offset;
-	int				gang_mode;
-	int				gang_refcnt;
-	struct vi2_channel		*gang_channels[MAX_CHAN_NUM];
 };
 
 struct vi2_camera {
@@ -549,12 +562,15 @@ static const struct soc_mbus_pixelfmt vi2_tpg_format = {
 
 static void vi2_init_syncpts(struct vi2_channel *chan)
 {
-	chan->syncpt_id = nvhost_get_syncpt_client_managed("vi");
+	struct vi2_camera *vi2_cam = chan->vi2_cam;
+	chan->syncpt_id =
+		nvhost_get_syncpt_client_managed(vi2_cam->cam.pdev, "vi");
 }
 
 static void vi2_free_syncpts(struct vi2_channel *chan)
 {
-	nvhost_free_syncpt(chan->syncpt_id);
+	struct vi2_camera *vi2_cam = chan->vi2_cam;
+	nvhost_syncpt_put_ref_ext(vi2_cam->cam.pdev, chan->syncpt_id);
 }
 
 static u32 vi2_syncpt_cond(u32 cond, int port)
@@ -661,7 +677,8 @@ static void vi2_common_clock_stop(struct vi2_camera *vi2_cam)
 
 static u32 vi2_cal_regs_base(u32 regs_base, int port)
 {
-	return regs_base + (port / 2 * 0x800) + (port & 1) * 0x34;
+	return regs_base + (port / 2 * TEGRA_CSI_PORT_OFFSET) +
+	       (port & 1) * 0x34;
 }
 
 static int vi2_channel_capture_frame(struct vi2_channel *chan,
@@ -736,24 +753,10 @@ static int vi2_channel_kthread_capture_done(void *data)
 
 static s32 vi2_bytes_per_line(u32 width, const struct soc_mbus_pixelfmt *mf);
 
-static int vi2_get_gang_mode(struct vi2_camera *vi2_cam,
-			     struct soc_camera_device *icd)
-{
-	struct v4l2_subdev *sd = soc_camera_to_subdev(icd);
-	struct v4l2_control gang_mode_control;
-	int gang_mode = CAMERA_GANG_DISABLED;
-
-	if (sd) {
-		gang_mode_control.id = V4L2_CID_GANG_MODE;
-		if (!v4l2_subdev_g_ctrl(sd, &gang_mode_control))
-			gang_mode = gang_mode_control.value;
-	}
-	return gang_mode;
-}
-
 static int vi2_channel_init(struct vi2_camera *vi2_cam,
-			    struct soc_camera_device *icd, int port)
+			    struct soc_camera_device *icd)
 {
+	int port = icd_to_port(icd);
 	struct vi2_channel *chan = &vi2_cam->channels[port];
 	struct chan_regs_config *regs = &chan->regs;
 
@@ -771,7 +774,7 @@ static int vi2_channel_init(struct vi2_camera *vi2_cam,
 	chan->sof = 1;
 	chan->port = port;
 	chan->lanes = icd_to_lanes(icd);
-	chan->buffer_offset = 0;
+	chan->continuous_clk = icd_to_continuous_clk(icd);
 
 	if (IS_ENABLED(CONFIG_ARCH_TEGRA_12x_SOC) ||
 	    IS_ENABLED(CONFIG_ARCH_TEGRA_13x_SOC))
@@ -818,7 +821,10 @@ static int vi2_channel_init(struct vi2_camera *vi2_cam,
 	regs->csi_pp_base = vi2_cal_regs_base(TEGRA_CSI_PIXEL_PARSER_0_BASE,
 			    port);
 	regs->cil_base = vi2_cal_regs_base(TEGRA_CSI_CIL_0_BASE, port);
-	regs->cil_phy_base = TEGRA_CSI_CIL_PHY_0_BASE + port / 2 * 0x800;
+	regs->cil_phy_base = TEGRA_CSI_CIL_PHY_0_BASE +
+			     port / 2 * TEGRA_CSI_PORT_OFFSET;
+	regs->debug_base = TEGRA_CSI_DEBUG_COUNTER_BASE +
+			   port / 2 * TEGRA_CSI_PORT_OFFSET;
 	regs->tpg_base = vi2_cal_regs_base(TEGRA_CSI_PATTERN_GENERATOR_0_BASE,
 			 port);
 
@@ -833,8 +839,9 @@ static int vi2_channel_init(struct vi2_camera *vi2_cam,
 }
 
 static void vi2_channel_deinit(struct vi2_camera *vi2_cam,
-			       struct soc_camera_device *icd, int port)
+			       struct soc_camera_device *icd)
 {
+	int port = icd_to_port(icd);
 	struct vi2_channel *chan = &vi2_cam->channels[port];
 
 	/* free syncpts */
@@ -869,7 +876,6 @@ static int vi2_camera_activate(struct vi2_camera *vi2_cam)
 	/* Reset VI2/CSI2 when activating, no sepecial ops for deactiving  */
 	/* T12_CG_2ND_LEVEL_EN */
 	TC_VI_REG_WT(vi2_cam, TEGRA_VI_CFG_CG_CTRL, 1);
-	TC_VI_REG_WT(vi2_cam, TEGRA_CSI_CLKEN_OVERRIDE, 0x0);
 	udelay(10);
 
 	/* Unpowergate VE */
@@ -887,35 +893,14 @@ static int vi2_add_device(struct soc_camera_device *icd)
 	struct soc_camera_host *ici = to_soc_camera_host(icd->parent);
 	struct tegra_camera *cam = ici->priv;
 	struct vi2_camera *vi2_cam = (struct vi2_camera *)cam;
-	int port = icd_to_port(icd);
-	struct vi2_channel *chan = &vi2_cam->channels[port];
-	int gang_port = icd_to_gang_port(icd);
-	int i, ret;
+	int ret;
 
 	if (!vi2_cam->enable_refcnt) {
 		ret = vi2_camera_activate(vi2_cam);
 		if (ret)
 			return ret;
 	}
-
-	vi2_channel_init(vi2_cam, icd, port);
-
-	/* Set base channel as gang_channel 0  */
-	chan->gang_refcnt = 0;
-	chan->gang_channels[chan->gang_refcnt++] = chan;
-	chan->gang_mode = vi2_get_gang_mode(vi2_cam, icd);
-
-	/* Set required gang channel for gang mode */
-	if (chan->gang_mode) {
-		for (i = 0; i < MAX_CHAN_NUM; i++) {
-			if (gang_port == i) {
-				vi2_channel_init(vi2_cam, icd, gang_port);
-				chan->gang_channels[chan->gang_refcnt++] =
-					&vi2_cam->channels[gang_port];
-			}
-		}
-	}
-
+	vi2_channel_init(vi2_cam, icd);
 	vi2_cam->enable_refcnt++;
 
 	return 0;
@@ -940,18 +925,9 @@ static void vi2_remove_device(struct soc_camera_device *icd)
 	struct soc_camera_host *ici = to_soc_camera_host(icd->parent);
 	struct tegra_camera *cam = ici->priv;
 	struct vi2_camera *vi2_cam = (struct vi2_camera *)cam;
-	int port = icd_to_port(icd);
-	struct vi2_channel *chan = &vi2_cam->channels[port];
-	struct vi2_channel *channel;
-	int i;
 
 	vi2_cam->enable_refcnt--;
-
-	for (i = 0; i < chan->gang_refcnt; i++) {
-		channel = chan->gang_channels[i];
-		vi2_channel_deinit(vi2_cam, icd, channel->port);
-	}
-
+	vi2_channel_deinit(vi2_cam, icd);
 	if (!vi2_cam->enable_refcnt)
 		vi2_camera_deactivate(vi2_cam);
 }
@@ -1047,58 +1023,6 @@ static int vi2_s_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
 	return 0;
 }
 
-static void vi2_channel_fmt_setup(struct tegra_camera *cam,
-			       struct soc_camera_device *icd)
-{
-	struct vi2_camera *vi2_cam = (struct vi2_camera *)cam;
-	int port = icd_to_port(icd);
-	struct vi2_channel *chan = &vi2_cam->channels[port];
-	struct vi2_channel *channel;
-	int i;
-
-	if (!icd->current_fmt)
-		return;
-
-	for (i = 0; i < chan->gang_refcnt; i++) {
-		channel = chan->gang_channels[i];
-		channel->fourcc = icd->current_fmt->host_fmt->fourcc;
-		channel->code = icd->current_fmt->code;
-		channel->bytes_per_line = vi2_bytes_per_line(icd->user_width,
-				icd->current_fmt->host_fmt);
-		channel->bits_per_sample =
-			icd->current_fmt->host_fmt->bits_per_sample;
-
-		channel->width = icd->user_width;
-		channel->height = icd->user_height;
-		switch (chan->gang_mode) {
-		case CAMERA_GANG_L_R:
-		case CAMERA_GANG_R_L:
-			channel->width = icd->user_width / 2;
-			channel->height = icd->user_height;
-			break;
-		case CAMERA_GANG_T_B:
-		case CAMERA_GANG_B_T:
-			channel->width = icd->user_width;
-			channel->height = icd->user_height / 2;
-			break;
-		default:
-			channel->width = icd->user_width;
-			channel->height = icd->user_height;
-			break;
-		};
-		if ((i == 0 && chan->gang_mode == CAMERA_GANG_R_L) ||
-		    (i == 1 && chan->gang_mode == CAMERA_GANG_L_R))
-			channel->buffer_offset =
-				(channel->width *
-				 channel->bits_per_sample) >> 3;
-		else if ((i == 0 && chan->gang_mode == CAMERA_GANG_B_T) ||
-			 (i == 1 && chan->gang_mode == CAMERA_GANG_T_B))
-			channel->buffer_offset =
-				(channel->width * channel->height *
-				 channel->bits_per_sample) >> 3;
-	}
-}
-
 static void vi2_videobuf_queue(struct tegra_camera *cam,
 			       struct soc_camera_device *icd,
 			       struct tegra_camera_buffer *buf)
@@ -1107,7 +1031,14 @@ static void vi2_videobuf_queue(struct tegra_camera *cam,
 	int port = icd_to_port(icd);
 	struct vi2_channel *chan = &vi2_cam->channels[port];
 
-	vi2_channel_fmt_setup(cam, icd);
+	if (icd->current_fmt) {
+		chan->fourcc = icd->current_fmt->host_fmt->fourcc;
+		chan->code = icd->current_fmt->code;
+		chan->bytes_per_line = vi2_bytes_per_line(icd->user_width,
+				icd->current_fmt->host_fmt);
+		chan->width = icd->user_width;
+		chan->height = icd->user_height;
+	}
 
 	spin_lock(&chan->start_lock);
 	list_add_tail(&buf->queue, &chan->capture);
@@ -1196,10 +1127,8 @@ static void vi2_capture_setup_cil_t124(struct vi2_camera *vi2_cam, int port)
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_CSI_CIL_A_INTERRUPT_MASK, 0x0);
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_CSI_CIL_B_INTERRUPT_MASK, 0x0);
 
-#ifdef DEBUG
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_DEBUG_CONTROL,
 			     0x3 | (0x1 << 5) | (0x40 << 8));
-#endif
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_PHY_CILA_CONTROL0, 0x9);
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_PHY_CILB_CONTROL0, 0x9);
 	} else {
@@ -1218,10 +1147,8 @@ static void vi2_capture_setup_cil_t124(struct vi2_camera *vi2_cam, int port)
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_CSI_CIL_C_INTERRUPT_MASK, 0x0);
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_CSI_CIL_D_INTERRUPT_MASK, 0x0);
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_CSI_CIL_E_INTERRUPT_MASK, 0x0);
-#ifdef DEBUG
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_DEBUG_CONTROL,
 				0x5 | (0x1 << 5) | (0x50 << 8));
-#endif
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_PHY_CILC_CONTROL0, 0x9);
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_PHY_CILD_CONTROL0, 0x9);
 		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_PHY_CILE_CONTROL0, 0x9);
@@ -1275,12 +1202,16 @@ static int vi2_channel_capture_setup(struct vi2_channel *chan)
 			IS_ENABLED(CONFIG_ARCH_TEGRA_13x_SOC))
 		vi2_capture_setup_cil_t124(vi2_cam, port);
 	else {
-		if (port & 0x1) {
+	if (port & 0x1) {
+			debug_regs_write(vi2_cam, chan, TEGRA_CSI_DEBUG_CONTROL,
+					 0x5 | (0x3 << 5) | (0x50 << 16));
 			cil_regs_write(vi2_cam, chan,
 				       TEGRA_CSI_CIL_PAD_CONFIG0 - 0x34, 0x0);
 			cil_regs_write(vi2_cam, chan, TEGRA_CSI_CIL_PAD_CONFIG0,
 				       0x0);
 		} else {
+			debug_regs_write(vi2_cam, chan, TEGRA_CSI_DEBUG_CONTROL,
+					 0x3 | (0x3 << 5) | (0x40 << 8));
 			cil_regs_write(vi2_cam, chan, TEGRA_CSI_CIL_PAD_CONFIG0,
 				       0x10000);
 			cil_regs_write(vi2_cam, chan,
@@ -1290,7 +1221,8 @@ static int vi2_channel_capture_setup(struct vi2_channel *chan)
 
 		cil_regs_write(vi2_cam, chan, TEGRA_CSI_CIL_INTERRUPT_MASK,
 			       0x0);
-		cil_regs_write(vi2_cam, chan, TEGRA_CSI_CIL_PHY_CONTROL, 0xA);
+		cil_regs_write(vi2_cam, chan, TEGRA_CSI_CIL_PHY_CONTROL,
+			       (chan->continuous_clk << 6) | 0xA);
 		if (lanes == 4) {
 			regs->cil_base = vi2_cal_regs_base(TEGRA_CSI_CIL_0_BASE,
 							   port + 1);
@@ -1299,7 +1231,7 @@ static int vi2_channel_capture_setup(struct vi2_channel *chan)
 			cil_regs_write(vi2_cam, chan,
 				       TEGRA_CSI_CIL_INTERRUPT_MASK, 0x0);
 			cil_regs_write(vi2_cam, chan, TEGRA_CSI_CIL_PHY_CONTROL,
-				       0xA);
+				       (chan->continuous_clk << 6) | 0xA);
 			regs->cil_base = vi2_cal_regs_base(TEGRA_CSI_CIL_0_BASE,
 							   port);
 		}
@@ -1399,11 +1331,6 @@ static int vi2_channel_capture_setup(struct vi2_channel *chan)
 		data_type = TEGRA_IMAGE_DT_RAW12;
 		image_size = width * 12 / 8;
 		bypass_pixel_transform = 1;
-	} else if (chan->code == V4L2_MBUS_FMT_RGBA8888_4X8_LE) {
-		format = TEGRA_IMAGE_FORMAT_T_A8B8G8R8;
-		data_type = TEGRA_IMAGE_DT_RGB888;
-		image_size = width * 3;
-		bypass_pixel_transform = 0;
 	}
 
 	csi_regs_write(vi2_cam, chan, TEGRA_VI_CSI_IMAGE_DEF,
@@ -1448,7 +1375,7 @@ static int vi2_capture_buffer_setup(struct vi2_channel *chan,
 		csi_regs_write(vi2_cam, chan,
 			       TEGRA_VI_CSI_SURFACE0_OFFSET_LSB +
 			       chan->surface * 8,
-			       buf->buffer_addr + chan->buffer_offset);
+			       buf->buffer_addr);
 		csi_regs_write(vi2_cam, chan,
 			       TEGRA_VI_CSI_SURFACE0_STRIDE +
 			       chan->surface * 4,
@@ -1472,23 +1399,51 @@ static void vi2_capture_error_status(struct vi2_channel *chan, int err)
 		"CSI %d syncpt timeout, syncpt = %d, err = %d\n",
 		chan->port, chan->syncpt_id, err);
 
-#ifdef DEBUG
+#if (IS_ENABLED(CONFIG_ARCH_TEGRA_12x_SOC) || \
+	IS_ENABLED(CONFIG_ARCH_TEGRA_13x_SOC))
 	val = TC_VI_REG_RD(vi2_cam, TEGRA_CSI_DEBUG_COUNTER_0);
+	if (val)
+		TC_VI_REG_WT(vi2_cam, TEGRA_CSI_DEBUG_COUNTER_0, val);
 	dev_err(&vi2_cam->cam.pdev->dev,
 		"TEGRA_CSI_DEBUG_COUNTER_0 0x%08x\n", val);
+#else
+	if (chan->port & 0x1) {
+		val = debug_regs_read(vi2_cam, chan,
+				      TEGRA_CSI_DEBUG_COUNTER_0);
+		if (val)
+			debug_regs_write(vi2_cam, chan,
+					 TEGRA_CSI_DEBUG_COUNTER_0, val);
+	} else {
+		val = debug_regs_read(vi2_cam, chan,
+				      TEGRA_CSI_DEBUG_COUNTER_1);
+		if (val)
+			debug_regs_write(vi2_cam, chan,
+					 TEGRA_CSI_DEBUG_COUNTER_1, val);
+	}
+	dev_err(&vi2_cam->cam.pdev->dev,
+		"TEGRA_CSI_DEBUG_COUNTER 0x%08x\n", val);
 #endif
 	val = cil_regs_read(vi2_cam, chan, TEGRA_CSI_CIL_STATUS);
 	dev_err(&vi2_cam->cam.pdev->dev,
 		"TEGRA_CSI_CSI_CIL_STATUS 0x%08x\n", val);
+	if (val)
+		cil_regs_write(vi2_cam, chan, TEGRA_CSI_CIL_STATUS, val);
 	val = cil_regs_read(vi2_cam, chan, TEGRA_CSI_CILX_STATUS);
 	dev_err(&vi2_cam->cam.pdev->dev,
 		"TEGRA_CSI_CSI_CILX_STATUS 0x%08x\n", val);
+	if (val)
+		cil_regs_write(vi2_cam, chan, TEGRA_CSI_CILX_STATUS, val);
 	val = csi_pp_regs_read(vi2_cam, chan, TEGRA_CSI_PIXEL_PARSER_STATUS);
 	dev_err(&vi2_cam->cam.pdev->dev,
 		"TEGRA_CSI_PIXEL_PARSER_STATUS 0x%08x\n", val);
+	if (val)
+		csi_pp_regs_write(vi2_cam, chan,
+				  TEGRA_CSI_PIXEL_PARSER_STATUS, val);
 	val = csi_regs_read(vi2_cam, chan, TEGRA_VI_CSI_ERROR_STATUS);
 	dev_err(&vi2_cam->cam.pdev->dev,
 		"TEGRA_VI_CSI_ERROR_STATUS 0x%08x\n", val);
+	if (val)
+		csi_regs_write(vi2_cam, chan, TEGRA_VI_CSI_ERROR_STATUS, val);
 }
 
 static int vi2_channel_capture_frame(struct vi2_channel *chan,
@@ -1496,39 +1451,30 @@ static int vi2_channel_capture_frame(struct vi2_channel *chan,
 {
 	struct vi2_camera *vi2_cam = chan->vi2_cam;
 	struct tegra_camera *cam = &vi2_cam->cam;
-	struct vi2_channel *channel;
-	int err = 0, i;
+	int err;
 
 	/* Setup capture registers */
-	for (i = 0; i < chan->gang_refcnt; i++) {
-		channel = chan->gang_channels[i];
-		vi2_channel_capture_setup(channel);
-		err = vi2_capture_buffer_setup(channel, buf);
-		if (err < 0)
-			return err;
-
-		channel->syncpt_thresh = nvhost_syncpt_incr_max_ext(cam->pdev,
-			channel->syncpt_id, 1);
-	}
+	vi2_channel_capture_setup(chan);
 
 	/* Start capture */
-	for (i = 0; i < chan->gang_refcnt; i++) {
-		channel = chan->gang_channels[i];
-		TC_VI_REG_WT(vi2_cam, TEGRA_VI_CFG_VI_INCR_SYNCPT,
-			     vi2_syncpt_cond(VI_FRAME_START,
-			     channel->port) | channel->syncpt_id);
+	err = vi2_capture_buffer_setup(chan, buf);
+	if (err < 0)
+		return err;
 
-		csi_regs_write(vi2_cam, channel, TEGRA_VI_CSI_SINGLE_SHOT, 0x1);
-	}
+	chan->syncpt_thresh = nvhost_syncpt_incr_max_ext(cam->pdev,
+			chan->syncpt_id, 1);
 
-	for (i = 0; i < chan->gang_refcnt; i++) {
-		channel = chan->gang_channels[i];
-		err = nvhost_syncpt_wait_timeout_ext(cam->pdev,
-			channel->syncpt_id, channel->syncpt_thresh,
+	TC_VI_REG_WT(vi2_cam, TEGRA_VI_CFG_VI_INCR_SYNCPT,
+		     vi2_syncpt_cond(VI_FRAME_START,  chan->port) |
+		     chan->syncpt_id);
+
+	csi_regs_write(vi2_cam, chan, TEGRA_VI_CSI_SINGLE_SHOT, 0x1);
+
+	err = nvhost_syncpt_wait_timeout_ext(cam->pdev,
+			chan->syncpt_id, chan->syncpt_thresh,
 			TEGRA_SYNCPT_CSI_WAIT_TIMEOUT,
 			NULL,
 			NULL);
-	}
 
 	/* Move buffer to capture done queue */
 	spin_lock(&chan->done_lock);
@@ -1539,11 +1485,8 @@ static int vi2_channel_capture_frame(struct vi2_channel *chan,
 	wake_up_interruptible(&chan->done_wait);
 
 	/* Mark SOF flag to Zero after we captured the FIRST frame */
-	for (i = 0; i < chan->gang_refcnt; i++) {
-		channel = chan->gang_channels[i];
-		if (channel->sof)
-			channel->sof = 0;
-	}
+	if (chan->sof)
+		chan->sof = 0;
 
 	/* Capture syncpt timeout err, then dump error status */
 	if (err)
@@ -1557,40 +1500,33 @@ static int vi2_channel_capture_done(struct vi2_channel *chan,
 {
 	struct vi2_camera *vi2_cam = chan->vi2_cam;
 	struct tegra_camera *cam = &vi2_cam->cam;
-	struct vi2_channel *channel;
 	struct vb2_buffer *vb = &buf->vb;
-	int err = 0, i;
+	int err = 0;
 
-	for (i = 0; i < chan->gang_refcnt; i++) {
-		channel = chan->gang_channels[i];
-		channel->syncpt_thresh = nvhost_syncpt_incr_max_ext(cam->pdev,
-			channel->syncpt_id, 1);
+	chan->syncpt_thresh = nvhost_syncpt_incr_max_ext(cam->pdev,
+				chan->syncpt_id, 1);
 
-		/*
-		 * Make sure recieve VI_MW_ACK_DONE of the last frame before
-		 * stop and dequeue buffer, otherwise MC error will shows up
-		 * for the last frame.
-		 */
-		TC_VI_REG_WT(vi2_cam, TEGRA_VI_CFG_VI_INCR_SYNCPT,
-			vi2_syncpt_cond(VI_MW_ACK_DONE,  channel->port) |
-			channel->syncpt_id);
-	}
+	/*
+	 * Make sure recieve VI_MW_ACK_DONE of the last frame before
+	 * stop and dequeue buffer, otherwise MC error will shows up
+	 * for the last frame.
+	 */
+	TC_VI_REG_WT(vi2_cam, TEGRA_VI_CFG_VI_INCR_SYNCPT,
+		     vi2_syncpt_cond(VI_MW_ACK_DONE,  chan->port) |
+		     chan->syncpt_id);
 
-	for (i = 0; i < chan->gang_refcnt; i++) {
-		channel = chan->gang_channels[i];
-		/*
-		 * Ignore error here and just stop pixel parser after waiting,
-		 * even if it's timeout
-		 */
-		err = nvhost_syncpt_wait_timeout_ext(cam->pdev,
-				channel->syncpt_id, channel->syncpt_thresh,
-				TEGRA_SYNCPT_CSI_WAIT_TIMEOUT,
-				NULL,
-				NULL);
-		if (err)
-			dev_err(&vi2_cam->cam.pdev->dev,
-				"MW_ACK_DONE syncpoint time out!\n");
-	}
+	/*
+	 * Ignore error here and just stop pixel parser after waiting,
+	 * even if it's timeout
+	 */
+	err = nvhost_syncpt_wait_timeout_ext(cam->pdev,
+			chan->syncpt_id, chan->syncpt_thresh,
+			TEGRA_SYNCPT_CSI_WAIT_TIMEOUT,
+			NULL,
+			NULL);
+	if (err)
+		dev_err(&vi2_cam->cam.pdev->dev,
+			"MW_ACK_DONE syncpoint time out!\n");
 
 	/* Captured one frame */
 	do_gettimeofday(&vb->v4l2_buf.timestamp);
@@ -1736,14 +1672,6 @@ static int vi2_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	/* vi.1 has to wait vi.0 initialized, so defer probing */
-	if (pdev->id && ndata->master) {
-		struct nvhost_device_data *master_ndata =
-			ndata->master->dev.platform_data;
-		if (master_ndata == platform_get_drvdata(ndata->master))
-			return -EPROBE_DEFER;
-	}
-
 	vi2_cam = devm_kzalloc(&pdev->dev, sizeof(struct vi2_camera),
 			       GFP_KERNEL);
 	if (!vi2_cam) {
@@ -1776,15 +1704,9 @@ static int vi2_probe(struct platform_device *pdev)
 	}
 
 	if (!ndata->aperture[0]) {
-		if (ndata->master) {
-			struct nvhost_device_data *master_ndata =
-				ndata->master->dev.platform_data;
-			ndata->aperture[0] = master_ndata->aperture[0];
-		} else {
-			dev_err(&pdev->dev, "%s: failed to map register base\n",
+		dev_err(&pdev->dev, "%s: failed to map register base\n",
 				__func__);
-			return -ENXIO;
-		}
+		return -ENXIO;
 	}
 
 	/* Match the nvhost_module_init VENC powergating */

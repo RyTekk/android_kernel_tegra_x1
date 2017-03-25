@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,8 +17,8 @@
  */
 
 / {
-	sdhci@700b0600 {
-		tap-delay = <4>;
+	sdhci3: sdhci@700b0600 {
+		tap-delay = <0>;
 		trim-delay = <8>;
 		nvidia,is-ddr-tap-delay;
 		nvidia,ddr-tap-delay = <0>;
@@ -38,7 +38,7 @@
 		pll_source = "pll_p";
 	};
 
-	sdhci@700b0400 {
+	sdhci2: sdhci@700b0400 {
 		tap-delay = <1>;
 		trim-delay = <3>;
 		max-clk-limit = <204000000>;
@@ -53,8 +53,8 @@
 		nvidia,en-periodic-calib;
 	};
 
-	sdhci@700b0200 {
-		tap-delay = <4>;
+	sdhci1: sdhci@700b0200 {
+		tap-delay = <0>;
 		trim-delay = <8>;
 		mmc-ocr-mask = <0>;
 		max-clk-limit = <204000000>;
@@ -69,7 +69,7 @@
 		nvidia,en-io-trim-volt;
 	};
 
-	sdhci@700b0000 {
+	sdhci0: sdhci@700b0000 {
 		tap-delay = <4>;
 		trim-delay = <2>;
 		max-clk-limit = <204000000>;

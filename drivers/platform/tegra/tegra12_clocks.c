@@ -1,7 +1,7 @@
 /*
  * drivers/platform/tegra/tegra12_clocks.c
  *
- * Copyright (C) 2011-2015 NVIDIA Corporation. All rights reserved.
+ * Copyright (C) 2011-2016 NVIDIA Corporation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -36,7 +36,7 @@
 
 #include <mach/edp.h>
 
-#include <tegra/mc.h>
+#include <linux/platform/tegra/mc.h>
 
 #include <linux/platform/tegra/clock.h>
 #include <linux/platform/tegra/dvfs.h>
@@ -569,7 +569,6 @@
 #define PLLE_AUX_PLLP_SEL		(1<<2)
 
 #define PLLE_AUX_CML_SATA_ENABLE	(1<<1)
-#define PLLE_AUX_CML_PCIE_ENABLE	(1<<0)
 
 /* USB PLLs PD HW controls */
 #define XUSBIO_PLL_CFG0				0x51c
@@ -5598,7 +5597,7 @@ static struct clk_ops tegra_audio_sync_clk_ops = {
 	.set_parent = tegra12_audio_sync_clk_set_parent,
 };
 
-/* cml0 (pcie), and cml1 (sata) clock ops */
+/* cml1 (sata) clock ops */
 static void tegra12_cml_clk_init(struct clk *c)
 {
 	u32 val = clk_readl(c->reg);
@@ -7096,18 +7095,6 @@ static struct clk tegra_pll_e = {
 };
 
 
-
-static struct clk tegra_cml0_clk = {
-	.name      = "cml0",
-	.parent    = &tegra_pll_e,
-	.ops       = &tegra_cml_clk_ops,
-	.reg       = PLLE_AUX,
-	.max_rate  = 100000000,
-	.u.periph  = {
-		.clk_num = 0,
-	},
-};
-
 static struct clk tegra_cml1_clk = {
 	.name      = "cml1",
 	.parent    = &tegra_pll_e,
@@ -7758,6 +7745,10 @@ static struct clk_mux_sel mux_plld[] = {
 	{ 0, 0},
 };
 
+static struct clk_mux_sel mux_plle[] = {
+	{ .input = &tegra_pll_e, .value = 0},
+	{ 0, 0},
+};
 
 static struct raw_notifier_head emc_rate_change_nh;
 
@@ -7831,6 +7822,11 @@ static struct clk tegra_clk_mselect = {
 		.threshold = 408000000,
 	},
 	.rate_change_nh = &mselect_rate_change_nh,
+};
+
+static struct clk_mux_sel mux_clk_mselect[] = {
+	{ .input = &tegra_clk_mselect, .value = 0},
+	{ NULL, 0},
 };
 
 #ifdef CONFIG_TEGRA_DUAL_CBUS
@@ -8322,12 +8318,12 @@ struct clk tegra_list_clks[] = {
 	PERIPH_CLK("owr",	"tegra_w1",		NULL,	71,	0x1cc,	26000000,  mux_pllp_pllc_pllm_clkm,	MUX | DIV_U71 | PERIPH_ON_APB),
 	PERIPH_CLK("nor",	"tegra-nor",		NULL,	42,	0x1d0,	127000000, mux_pllp_pllc_pllm_clkm,	MUX | DIV_U71),
 	PERIPH_CLK("mipi",	"mipi",			NULL,	50,	0x174,	60000000,  mux_pllp_pllc_pllm_clkm,	MUX | DIV_U71 | PERIPH_ON_APB),
-	PERIPH_CLK("i2c1",	"tegra12-i2c.0",	"div-clk",	12,	0x124,	136000000, mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
-	PERIPH_CLK("i2c2",	"tegra12-i2c.1",	"div-clk",	54,	0x198,	136000000, mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
-	PERIPH_CLK("i2c3",	"tegra12-i2c.2",	"div-clk",	67,	0x1b8,	136000000, mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
-	PERIPH_CLK("i2c4",	"tegra12-i2c.3",	"div-clk",	103,	0x3c4,	136000000, mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
-	PERIPH_CLK("i2c5",	"tegra12-i2c.4",	"div-clk",	47,	0x128,	136000000,  mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
-	PERIPH_CLK("i2c6",	"tegra12-i2c.5",	"div-clk",	166,	0x65c,	58300000,  mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
+	PERIPH_CLK("i2c1",	"7000c000.i2c",		"div-clk",	12,	0x124,	136000000, mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
+	PERIPH_CLK("i2c2",	"7000c400.i2c",		"div-clk",	54,	0x198,	136000000, mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
+	PERIPH_CLK("i2c3",	"7000c500.i2c",		"div-clk",	67,	0x1b8,	136000000, mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
+	PERIPH_CLK("i2c4",	"7000c700.i2c",		"div-clk",	103,	0x3c4,	136000000, mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
+	PERIPH_CLK("i2c5",	"7000d000.i2c",		"div-clk",	47,	0x128,	136000000,  mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
+	PERIPH_CLK("i2c6",	"7000d100.i2c",		"div-clk",	166,	0x65c,	58300000,  mux_pllp_clkm,	MUX | DIV_U16 | PERIPH_ON_APB),
 	PERIPH_CLK("mipi-cal",	"mipi-cal",		NULL,	56,	0,	60000000,  mux_clk_m,			PERIPH_ON_APB),
 	PERIPH_CLK("mipi-cal-fixed", "mipi-cal-fixed",	NULL,	0,	0,	108000000, mux_pllp_out3,	PERIPH_NO_ENB),
 	PERIPH_CLK("uarta",	"70006000.serial",		NULL,	6,	0x178,	800000000, mux_pllp_pllc_pllm_clkm,	MUX | DIV_U151 | DIV_U151_UART | PERIPH_ON_APB),
@@ -8373,8 +8369,8 @@ struct clk tegra_list_clks[] = {
 	PERIPH_CLK("extern2",	"extern2",		NULL,	121,	0x3f0,	216000000, mux_plla_clk32_pllp_clkm_plle,	MUX | DIV_U71),
 	PERIPH_CLK("extern3",	"extern3",		NULL,	122,	0x3f4,	216000000, mux_plla_clk32_pllp_clkm_plle,	MUX | DIV_U71),
 	PERIPH_CLK("i2cslow",	"i2cslow",		NULL,	81,	0x3fc,	26000000,  mux_pllp_pllc_clk32_clkm,	MUX | DIV_U71 | PERIPH_ON_APB),
-	PERIPH_CLK("pcie",	"tegra-pcie",		"pcie",	70,	0,	250000000, mux_clk_m, 			0),
-	PERIPH_CLK("afi",	"tegra-pcie",		"afi",	72,	0,	250000000, mux_clk_m, 			0),
+	PERIPH_CLK("pcie",	"tegra_pcie",		"pcie",	70,	0,	250000000, mux_plle, PERIPH_MANUAL_RESET),
+	PERIPH_CLK("afi",	"tegra_pcie",		"afi",	72,	0,	408000000, mux_clk_mselect, PERIPH_MANUAL_RESET),
 	PERIPH_CLK("se",	"se",			NULL,	127,	0x42c,	600000000, mux_pllp_pllc2_c_c3_pllm_clkm,	MUX | DIV_U71 | DIV_U71_INT | PERIPH_ON_APB),
 	PERIPH_CLK("cl_dvfs_ref", "tegra_cl_dvfs",	"ref",	155,	0x62c,	54000000,  mux_pllp_clkm,		MUX | DIV_U71 | DIV_U71_INT | PERIPH_ON_APB),
 	PERIPH_CLK("cl_dvfs_soc", "tegra_cl_dvfs",	"soc",	155,	0x630,	54000000,  mux_pllp_clkm,		MUX | DIV_U71 | DIV_U71_INT | PERIPH_ON_APB),
@@ -8394,11 +8390,7 @@ struct clk tegra_list_clks[] = {
 	SHARED_SCLK("usb3.sclk", "tegra-ehci.2",	"sclk",	&tegra_clk_ahb,        NULL, 0, 0),
 	SHARED_SCLK("wake.sclk", "wake_sclk",		"sclk",	&tegra_clk_sbus_cmplx, NULL, 0, 0),
 	SHARED_SCLK("automotive.sclk", "automotive",	"sclk", &tegra_clk_sbus_cmplx, NULL, 0, 0),
-#ifdef CONFIG_VI_ONE_DEVICE
 	SHARED_SCLK("vi.sclk",	"tegra_vi",		"sclk",	&tegra_clk_sbus_cmplx, NULL, 0, 0),
-#else
-	SHARED_SCLK("via.sclk",	"tegra_vi.0",		"sclk",	&tegra_clk_sbus_cmplx, NULL, 0, 0),
-#endif
 	SHARED_SCLK("vib.sclk",	"tegra_vi.1",		"sclk",	&tegra_clk_sbus_cmplx, NULL, 0, 0),
 	SHARED_SCLK("ispa.sclk",	"tegra_isp.0",		"sclk",	&tegra_clk_sbus_cmplx, NULL, 0, 0),
 	SHARED_SCLK("ispb.sclk",	"tegra_isp.1",		"sclk",	&tegra_clk_sbus_cmplx, NULL, 0, 0),
@@ -8438,12 +8430,7 @@ struct clk tegra_list_clks[] = {
 	SHARED_EMC_CLK("3d.emc",	"tegra_gk20a.0", "emc",	&tegra_clk_emc, NULL, 0, 0, BIT(EMC_USER_3D)),
 	SHARED_EMC_CLK("msenc.emc",	"tegra_msenc",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_BW,	BIT(EMC_USER_MSENC)),
 	SHARED_EMC_CLK("tsec.emc",	"tegra_tsec",	"emc",	&tegra_clk_emc, NULL, 0, 0, 0),
-#ifdef CONFIG_VI_ONE_DEVICE
 	SHARED_EMC_CLK("vi.emc",	"tegra_vi",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW,	BIT(EMC_USER_VI)),
-#else
-	SHARED_EMC_CLK("via.emc",	"tegra_vi.0",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW,	BIT(EMC_USER_VI)),
-	SHARED_EMC_CLK("vib.emc",	"tegra_vi.1",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW,	BIT(EMC_USER_VI2)),
-#endif
 	SHARED_EMC_CLK("ispa.emc",	"tegra_isp.0",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW,	BIT(EMC_USER_ISP1)),
 	SHARED_EMC_CLK("ispb.emc",	"tegra_isp.1",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW,	BIT(EMC_USER_ISP2)),
 	SHARED_EMC_CLK("iso.emc",	"iso",		"emc",	&tegra_clk_emc, NULL, 0, 0, 0),
@@ -8455,6 +8442,7 @@ struct clk tegra_list_clks[] = {
 	SHARED_LIMIT("floor.emc",	"floor.emc",	NULL,	&tegra_clk_emc, NULL,  0, 0),
 	SHARED_LIMIT("floor.profile.emc", "profile.emc", "floor", &tegra_clk_emc, NULL,  0, 0),
 	SHARED_EMC_CLK("camera.emc",	"tegra_camera_ctrl",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_BW, 0),
+	SHARED_EMC_CLK("camera_iso.emc", "tegra_camera_ctrl",	"iso.emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW, 0),
 
 #ifdef CONFIG_TEGRA_DUAL_CBUS
 	DUAL_CBUS_CLK("msenc.cbus",	"tegra_msenc",		"msenc", &tegra_clk_c2bus, "msenc", 0, 0),
@@ -8517,13 +8505,10 @@ static struct clk tegra_visp_clks[] = {
 	SHARED_CONNECT("isp.c4bus",	"isp.c4bus",	NULL,	&tegra_clk_c4bus,   "isp",   0, 0),
 	SHARED_CLK("override.c4bus",	"override.c4bus", NULL,	&tegra_clk_c4bus,    NULL,   0, SHARED_OVERRIDE),
 
-#ifndef CONFIG_VI_ONE_DEVICE
-	SHARED_CLK("via.vi.c4bus",	"via.vi",	NULL,	&tegra_visp_clks[0], NULL,   0, 0),
-	SHARED_CLK("vib.vi.c4bus",	"vib.vi",	NULL,	&tegra_visp_clks[0], NULL,   0, 0),
-#endif
-
 	SHARED_CLK("ispa.isp.c4bus",	"ispa.isp",	NULL,	&tegra_visp_clks[1], "ispa", 0, 0),
 	SHARED_CLK("ispb.isp.c4bus",	"ispb.isp",	NULL,	&tegra_visp_clks[1], "ispb", 0, 0),
+	SHARED_CLK("vi_v4l2.c4bus",	"vi",		NULL,	&tegra_visp_clks[0], "vi", 0, 0),
+	SHARED_CLK("vi_bypass.c4bus",	"tegra_vi",	NULL,	&tegra_visp_clks[0], "vi", 0, 0),
 };
 
 /* XUSB clocks */
@@ -8662,7 +8647,6 @@ struct clk_duplicate tegra_clk_duplicates[] = {
 	CLK_DUPLICATE("vde", "tegra-aes", "vde"),
 	CLK_DUPLICATE("bsea", "tegra-aes", "bsea"),
 	CLK_DUPLICATE("cml1", "tegra_sata_cml", NULL),
-	CLK_DUPLICATE("cml0", "tegra_pcie", "cml"),
 	CLK_DUPLICATE("pciex", "tegra_pcie", "pciex"),
 	CLK_DUPLICATE("clk_m", NULL, "apb_pclk"),
 	CLK_DUPLICATE("i2c1", "tegra-i2c-slave.0", NULL),
@@ -8670,8 +8654,8 @@ struct clk_duplicate tegra_clk_duplicates[] = {
 	CLK_DUPLICATE("i2c3", "tegra-i2c-slave.2", NULL),
 	CLK_DUPLICATE("i2c4", "tegra-i2c-slave.3", NULL),
 	CLK_DUPLICATE("i2c5", "tegra-i2c-slave.4", NULL),
-	CLK_DUPLICATE("cl_dvfs_ref", "tegra12-i2c.4", NULL),
-	CLK_DUPLICATE("cl_dvfs_soc", "tegra12-i2c.4", NULL),
+	CLK_DUPLICATE("cl_dvfs_ref", "7000d000.i2c", NULL),
+	CLK_DUPLICATE("cl_dvfs_soc", "7000d000.i2c", NULL),
 	CLK_DUPLICATE("sbc1", "spi-tegra114-slave.0", NULL),
 	CLK_DUPLICATE("sbc2", "spi-tegra114-slave.1", NULL),
 	CLK_DUPLICATE("sbc3", "spi-tegra114-slave.2", NULL),
@@ -8698,30 +8682,12 @@ struct clk_duplicate tegra_clk_duplicates[] = {
 	CLK_DUPLICATE("pll_p_out5", "tegra_gk20a.0", "pwr"),
 	CLK_DUPLICATE("ispa.isp.c4bus", "tegra_isp.0", "isp"),
 	CLK_DUPLICATE("ispb.isp.c4bus", "tegra_isp.1", "isp"),
-#ifdef CONFIG_VI_ONE_DEVICE
-	CLK_DUPLICATE("vi.c4bus", "tegra_vi", "vi"),
 	CLK_DUPLICATE("csi", "tegra_vi", "csi"),
 	CLK_DUPLICATE("csus", "tegra_vi", "csus"),
 	CLK_DUPLICATE("vim2_clk", "tegra_vi", "vim2_clk"),
 	CLK_DUPLICATE("cilab", "tegra_vi", "cilab"),
 	CLK_DUPLICATE("cilcd", "tegra_vi", "cilcd"),
 	CLK_DUPLICATE("cile", "tegra_vi", "cile"),
-#else
-	CLK_DUPLICATE("via.vi.c4bus", "tegra_vi.0", "vi"),
-	CLK_DUPLICATE("vib.vi.c4bus", "tegra_vi.1", "vi"),
-	CLK_DUPLICATE("csi", "tegra_vi.0", "csi"),
-	CLK_DUPLICATE("csi", "tegra_vi.1", "csi"),
-	CLK_DUPLICATE("csus", "tegra_vi.0", "csus"),
-	CLK_DUPLICATE("csus", "tegra_vi.1", "csus"),
-	CLK_DUPLICATE("vim2_clk", "tegra_vi.0", "vim2_clk"),
-	CLK_DUPLICATE("vim2_clk", "tegra_vi.1", "vim2_clk"),
-	CLK_DUPLICATE("cilab", "tegra_vi.0", "cilab"),
-	CLK_DUPLICATE("cilab", "tegra_vi.1", "cilab"),
-	CLK_DUPLICATE("cilcd", "tegra_vi.0", "cilcd"),
-	CLK_DUPLICATE("cilcd", "tegra_vi.1", "cilcd"),
-	CLK_DUPLICATE("cile", "tegra_vi.0", "cile"),
-	CLK_DUPLICATE("cile", "tegra_vi.1", "cile"),
-#endif
 	CLK_DUPLICATE("i2s0", NULL, "i2s0"),
 	CLK_DUPLICATE("i2s1", NULL, "i2s1"),
 	CLK_DUPLICATE("i2s2", NULL, "i2s2"),
@@ -8759,6 +8725,14 @@ struct clk_duplicate tegra_clk_duplicates[] = {
 	CLK_DUPLICATE("afc4", "tegra30-ahub-apbif", "afc4"),
 	CLK_DUPLICATE("afc5", "tegra30-ahub-apbif", "afc5"),
 	CLK_DUPLICATE("cpu_g", "tegra_simon", "cpu"),
+
+	/* Connection name change for reset controller */
+	CLK_DUPLICATE("i2c1",   "7000c000.i2c",   "i2c"),
+	CLK_DUPLICATE("i2c2",   "7000c400.i2c",   "i2c"),
+	CLK_DUPLICATE("i2c3",   "7000c500.i2c",   "i2c"),
+	CLK_DUPLICATE("i2c4",   "7000c700.i2c",   "i2c"),
+	CLK_DUPLICATE("i2c5",   "7000d000.i2c",   "i2c"),
+	CLK_DUPLICATE("i2c6",   "7000d100.i2c",   "i2c"),
 };
 
 struct clk *tegra_ptr_clks[] = {
@@ -8798,7 +8772,6 @@ struct clk *tegra_ptr_clks[] = {
 	&tegra_pll_re_vco,
 	&tegra_pll_re_out,
 	&tegra_pll_e,
-	&tegra_cml0_clk,
 	&tegra_cml1_clk,
 	&tegra_pciex_clk,
 	&tegra_clk_cclk_g,

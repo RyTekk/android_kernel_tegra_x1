@@ -1,7 +1,7 @@
 /*
  * GK20A Graphics Engine
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -170,6 +170,11 @@ struct sm_info {
 	u8 tpc_index;
 };
 
+#if defined(CONFIG_GK20A_CYCLE_STATS)
+struct gk20a_cs_snapshot_client;
+struct gk20a_cs_snapshot;
+#endif
+
 struct gr_gk20a {
 	struct gk20a *g;
 	struct {
@@ -265,7 +270,13 @@ struct gr_gk20a {
 
 	u32 max_comptag_mem; /* max memory size (MB) for comptag */
 	struct compbit_store_desc compbit_store;
-	struct gk20a_allocator comp_tags;
+	struct gk20a_comptag_allocator {
+		struct mutex lock;
+		/* this bitmap starts at ctag 1. 0th cannot be taken */
+		unsigned long *bitmap;
+		/* size of bitmap, not max ctags, so one less */
+		unsigned long size;
+	} comp_tags;
 
 	struct gr_zcull_gk20a zcull;
 
@@ -294,6 +305,10 @@ struct gr_gk20a {
 	u32 fbp_en_mask;
 	u32 no_of_sm;
 	struct sm_info *sm_to_cluster;
+#if defined(CONFIG_GK20A_CYCLE_STATS)
+	struct mutex			cs_lock;
+	struct gk20a_cs_snapshot	*cs_data;
+#endif
 };
 
 void gk20a_fecs_dump_falcon_stats(struct gk20a *g);
@@ -315,6 +330,7 @@ struct gk20a_ctxsw_ucode_segments {
 /* sums over the ucode files as sequences of u32, computed to the
  * boot_signature field in the structure above */
 
+#define FALCON_UCODE_SIG_T21X_FECS_WITH_DMEM_SIZE	0x9121ab5c
 #define FALCON_UCODE_SIG_T21X_FECS_WITH_RESERVED	0x9125ab5c
 #define FALCON_UCODE_SIG_T12X_FECS_WITH_RESERVED	0x8a621f78
 #define FALCON_UCODE_SIG_T12X_FECS_WITHOUT_RESERVED	0x67e5344b
@@ -376,6 +392,10 @@ int gk20a_init_gr_support(struct gk20a *g);
 int gk20a_enable_gr_hw(struct gk20a *g);
 int gk20a_gr_reset(struct gk20a *g);
 void gk20a_gr_wait_initialized(struct gk20a *g);
+/* real size here, but first (ctag 0) isn't used */
+int gk20a_comptag_allocator_init(struct gk20a_comptag_allocator *allocator,
+		unsigned long size);
+void gk20a_comptag_allocator_destroy(struct gk20a_comptag_allocator *allocator);
 
 int gk20a_init_gr_channel(struct channel_gk20a *ch_gk20a);
 
@@ -424,11 +444,15 @@ bool gk20a_gr_sm_debugger_attached(struct gk20a *g);
 #define gr_gk20a_elpg_protected_call(g, func) \
 	({ \
 		int err = 0; \
-		if (support_gk20a_pmu(g->dev)) \
+		if (support_gk20a_pmu(g->dev) && g->elpg_enabled) { \
 			err = gk20a_pmu_disable_elpg(g); \
-		if (err) return err; \
+			if (err) { \
+				gk20a_pmu_enable_elpg(g); \
+				return err; \
+			} \
+		} \
 		err = func; \
-		if (support_gk20a_pmu(g->dev)) \
+		if (support_gk20a_pmu(g->dev) && g->elpg_enabled) \
 			gk20a_pmu_enable_elpg(g); \
 		err; \
 	})
@@ -495,5 +519,29 @@ int gr_gk20a_alloc_gr_ctx(struct gk20a *g,
 void gr_gk20a_free_gr_ctx(struct gk20a *g,
 			  struct vm_gk20a *vm, struct gr_ctx_desc *gr_ctx);
 int gr_gk20a_halt_pipe(struct gk20a *g);
+int gr_gk20a_debugfs_init(struct gk20a *g);
+
+#if defined(CONFIG_GK20A_CYCLE_STATS)
+int gr_gk20a_css_attach(struct gk20a *g,	/* in - main hw structure */
+			u32 dmabuf_fd,		/* in - dma mapped memory */
+			u32 perfmon_id_count,	/* in - number of perfmons*/
+			u32 *perfmon_id_start,	/* out- index of first pm */
+			/* out - pointer to client data used in later     */
+			struct gk20a_cs_snapshot_client **css_client);
+
+int gr_gk20a_css_detach(struct gk20a *g,
+				struct gk20a_cs_snapshot_client *css_client);
+int gr_gk20a_css_flush(struct gk20a *g,
+				struct gk20a_cs_snapshot_client *css_client);
+
+void gr_gk20a_free_cyclestats_snapshot_data(struct gk20a *g);
+
+#else
+/* fake empty cleanup function if no cyclestats snapshots enabled */
+static inline void gr_gk20a_free_cyclestats_snapshot_data(struct gk20a *g)
+{
+	(void)g;
+}
+#endif
 
 #endif /*__GR_GK20A_H__*/

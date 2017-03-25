@@ -1,7 +1,7 @@
 /*
  * Power off driver for Maxim MAX77620 device.
  *
- * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * Author: Chaitanya Bandi <bandik@nvidia.com>
  *
@@ -99,7 +99,7 @@ static void max77620_auto_power_on(struct max77620_poweroff *max77620_poweroff)
 	}
 
 	/* Must wait 16ms for buffer update */
-	usleep_range(16000, 16000);
+	udelay(16000);
 
 	ret = max77620_reg_read(max77620_poweroff->max77620->dev,
 			MAX77620_RTC_SLAVE,
@@ -131,7 +131,7 @@ static void max77620_auto_power_on(struct max77620_poweroff *max77620_poweroff)
 	}
 
 	/* Must wait 16ms for buffer update */
-	usleep_range(16000, 16000);
+	udelay(16000);
 	max77620_allow_atomic_xfer(max77620_poweroff->max77620);
 
 	if (soc_specific_power_off)
@@ -289,6 +289,10 @@ static int max77620_restart_notify(struct notifier_block *nb,
 
 	max77620_poweroff = container_of(nb, struct max77620_poweroff,
 					reset_nb);
+
+	if (!max77620_poweroff->ngpio_states)
+		return NOTIFY_OK;
+
 	max77620_prepare_system_power_off(max77620_poweroff);
 	return NOTIFY_OK;
 };
@@ -341,6 +345,9 @@ static int max77620_poweroff_probe(struct platform_device *pdev)
 		goto gpio_done;
 
 	count = of_property_count_u32(np, "maxim,power-reset-gpio-states");
+	if (count == -EINVAL)
+		goto gpio_done;
+
 	if (count % 2) {
 		dev_warn(&pdev->dev, "Not able to parse reset-gpio-states\n");
 		goto gpio_done;

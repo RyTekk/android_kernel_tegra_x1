@@ -1,7 +1,7 @@
 /*
  * drivers/i2c/busses/vii2c-tegra.c
  *
- * Copyright (C) 2014-2015 NVIDIA Corporation.  All rights reserved.
+ * Copyright (C) 2014-2016 NVIDIA Corporation.  All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -40,6 +40,8 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/regulator/consumer.h>
 #include <linux/tegra-powergate.h>
+#include <linux/pm_domain.h>
+#include <linux/tegra_pm_domains.h>
 
 #include <asm/unaligned.h>
 
@@ -139,6 +141,16 @@
  * @MSG_END_CONTINUE: The following on message is coming and so do not send
  *		stop or repeat start.
  */
+
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+static struct of_device_id tegra_ve_pd[] = {
+	{ .compatible = "nvidia,tegra210-ve-pd", },
+	{ .compatible = "nvidia,tegra132-ve-pd", },
+	{ .compatible = "nvidia,tegra124-ve-pd", },
+	{},
+};
+#endif
+
 enum msg_end_type {
 	MSG_END_STOP,
 	MSG_END_REPEAT_START,
@@ -508,6 +520,7 @@ static int tegra_vi_i2c_fill_tx_fifo(struct tegra_vi_i2c_dev *i2c_dev)
 static inline int tegra_vi_i2c_power_enable(struct tegra_vi_i2c_dev *i2c_dev)
 {
 	int ret;
+	int partition_id;
 
 	if (i2c_dev->pull_up_supply) {
 		ret = regulator_enable(i2c_dev->pull_up_supply);
@@ -522,17 +535,32 @@ static inline int tegra_vi_i2c_power_enable(struct tegra_vi_i2c_dev *i2c_dev)
 	if (ret)
 		return ret;
 
-	tegra_unpowergate_partition(TEGRA_POWERGATE_VE);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_ve_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_VE;
+#endif
+	tegra_unpowergate_partition(partition_id);
 
 	return 0;
 }
 
 static inline int tegra_vi_i2c_power_disable(struct tegra_vi_i2c_dev *i2c_dev)
 {
+	int partition_id;
 	int ret = 0;
 
-	if (tegra_powergate_is_powered(TEGRA_POWERGATE_VE))
-		tegra_powergate_partition(TEGRA_POWERGATE_VE);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_ve_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_VE;
+#endif
+	if (tegra_powergate_is_powered(partition_id))
+		tegra_powergate_partition(partition_id);
 
 	ret = regulator_disable(i2c_dev->reg);
 	if (ret)
@@ -572,12 +600,20 @@ static int tegra_vi_i2c_clock_enable(struct tegra_vi_i2c_dev *i2c_dev)
 			"Enabling slow clk failed, err %d\n", ret);
 		goto slow_clk_err;
 	}
+
+	ret = clk_set_rate(i2c_dev->host1x_clk, 0);
+	if (ret < 0) {
+		dev_err(i2c_dev->dev,
+			"Set host1x clk failed, err %d\n", ret);
+		goto host1x_clk_err;
+	}
 	ret = clk_prepare_enable(i2c_dev->host1x_clk);
 	if (ret < 0) {
 		dev_err(i2c_dev->dev,
 			"Enabling host1x clk failed, err %d\n", ret);
 		goto host1x_clk_err;
 	}
+
 	return 0;
 
 host1x_clk_err:
@@ -930,6 +966,8 @@ static int tegra_vi_i2c_xfer_msg(struct tegra_vi_i2c_dev *i2c_dev,
 			if (time_after(jiffies, timeout)) {
 				dev_warn(i2c_dev->dev,
 					"timeout config_load");
+				spin_unlock_irqrestore(&i2c_dev->fifo_lock,
+							flags);
 				return -ETIMEDOUT;
 			}
 			udelay(2);
@@ -1172,7 +1210,7 @@ static int tegra_vi_i2c_xfer_msg(struct tegra_vi_i2c_dev *i2c_dev,
 	if (i2c_dev->msg_err == I2C_ERR_NO_ACK) {
 		if (msg->flags & I2C_M_IGNORE_NAK)
 			return 0;
-		return -EREMOTEIO;
+		return -EAGAIN;
 	}
 
 	if (i2c_dev->msg_err & I2C_ERR_UNEXPECTED_STATUS)
@@ -1280,6 +1318,7 @@ static const struct i2c_algorithm tegra_vi_i2c_algo = {
 	.functionality	= tegra_vi_i2c_func,
 };
 
+#ifdef CONFIG_PM_SLEEP
 static int __tegra_vi_i2c_suspend_noirq(struct tegra_vi_i2c_dev *i2c_dev);
 static int __tegra_vi_i2c_resume_noirq(struct tegra_vi_i2c_dev *i2c_dev);
 
@@ -1296,6 +1335,7 @@ static int tegra_vi_i2c_pm_notifier(struct notifier_block *nb,
 
 	return NOTIFY_OK;
 }
+#endif
 
 static struct tegra_i2c_platform_data *parse_i2c_tegra_dt(
 	struct platform_device *pdev)
@@ -1560,9 +1600,11 @@ skip_pinctrl:
 		return ret;
 	}
 
+#ifdef CONFIG_PM_SLEEP
 	i2c_dev->pm_nb.notifier_call = tegra_vi_i2c_pm_notifier;
 
 	tegra_register_pm_notifier(&i2c_dev->pm_nb);
+#endif
 
 	pm_runtime_enable(&i2c_dev->adapter.dev);
 	of_i2c_register_devices(&i2c_dev->adapter);
@@ -1594,7 +1636,7 @@ static void tegra_vi_i2c_shutdown(struct platform_device *pdev)
 {
 	struct tegra_vi_i2c_dev *i2c_dev = platform_get_drvdata(pdev);
 
-	dev_info(i2c_dev->dev, "Bus is shutdown down..\n");
+	dev_info(i2c_dev->dev, "Shutting down\n");
 	i2c_shutdown_adapter(&i2c_dev->adapter);
 	i2c_dev->is_shutdown = true;
 }
@@ -1659,7 +1701,7 @@ static int tegra_vi_i2c_resume_noirq(struct device *dev)
 
 #ifdef CONFIG_PM_RUNTIME
 
-int tegra_vi_i2c_runtime_resume(struct device *dev)
+static int tegra_vi_i2c_runtime_resume(struct device *dev)
 {
 	struct tegra_vi_i2c_dev *i2c_dev = dev_get_drvdata(dev);
 	int ret;
@@ -1680,7 +1722,7 @@ err_power_enable:
 	return ret;
 }
 
-int tegra_vi_i2c_runtime_suspend(struct device *dev)
+static int tegra_vi_i2c_runtime_suspend(struct device *dev)
 {
 	struct tegra_vi_i2c_dev *i2c_dev = dev_get_drvdata(dev);
 	int ret;

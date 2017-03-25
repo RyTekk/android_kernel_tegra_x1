@@ -621,6 +621,11 @@ config BLUEDROID_PM
           Say Y here to compile support for bluedroid_pm support into the kernel
           or say M to compile it as module (bluedroid_pm).
 
+config GPS_HWGEOFENCING
+	tristate "hw geofencing support"
+	---help---
+	This driver provides gps enable, hw geofencing and host wake capability.
+
 config CPULOAD_MONITOR
 	bool "Publish cpu load measures in sysfs"
 	depends on CPU_FREQ
@@ -678,6 +683,12 @@ config NV_GAMEPAD_RESET
 config SAF775x_HWDEP
         tristate "SAF775x HWDEP Driver"
         depends on I2C
+
+config UID_CPUTIME
+	tristate "Per-UID cpu time statistics"
+	depends on PROFILING
+	help
+	  Per UID based cpu time statistics exported to /proc/uid_cputime
 
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"

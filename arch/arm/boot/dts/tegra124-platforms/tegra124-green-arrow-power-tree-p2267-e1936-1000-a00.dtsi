@@ -99,7 +99,7 @@
 	spi@7000d400 {
 		spi-touch@0 {
 			avdd-supply = <&ldo3_reg>;
-			dvdd-supply = <&vdd_ts_1v8>;
+			dvdd-supply = <&palmas_smps8>;
 		};
 	};
 };

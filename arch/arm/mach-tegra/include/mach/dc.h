@@ -6,7 +6,7 @@
  * Author:
  *	Erik Gilling <konkers@google.com>
  *
- * Copyright (c) 2010-2015, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2010-2016, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -27,7 +27,11 @@
 #include <linux/fb.h>
 #include <drm/drm_fixed.h>
 
+#if defined(CONFIG_TEGRA_NVDISPLAY)
+#define TEGRA_MAX_DC		3
+#else
 #define TEGRA_MAX_DC		2
+#endif
 
 #if defined(CONFIG_ARCH_TEGRA_14x_SOC)
 #define DC_N_WINDOWS		6
@@ -57,6 +61,8 @@
 extern atomic_t sd_brightness;
 
 extern struct fb_videomode tegra_dc_vga_mode;
+
+extern char dc_or_node_names[][13];
 
 enum {
 	TEGRA_HPD_STATE_FORCE_DEASSERT = -1,
@@ -486,6 +492,7 @@ enum {
 	TEGRA_DC_ORDERED_DITHER,
 	TEGRA_DC_ERRDIFF_DITHER,
 	TEGRA_DC_TEMPORAL_DITHER,
+	TEGRA_DC_ERRACC_DITHER,
 };
 
 typedef u8 tegra_dc_bl_output[256];
@@ -520,6 +527,21 @@ struct tegra_dc_sd_window {
 };
 
 struct tegra_dc_sd_settings {
+#ifdef CONFIG_TEGRA_NVDISPLAY
+	bool update_sd;
+	unsigned upper_bound;
+	unsigned lower_bound;
+	unsigned num_over_saturated_pixels;
+	unsigned over_saturated_bin;
+	unsigned *gain_table;
+	unsigned *current_gain_table;
+	unsigned *phase_backlight_table;
+	unsigned new_backlight;
+	unsigned old_backlight;
+	unsigned last_phase_step;
+	unsigned phase_in_steps;
+	int backlight_adjust_steps;
+#endif
 	unsigned enable;
 	u8 turn_off_brightness;
 	u8 turn_on_brightness;
@@ -648,12 +670,22 @@ struct tegra_vrr {
 	s32	frame2flip_us;
 	s32	adjust_vfp;
 	s32     adjust_db;
+	u32 db_correct_cap;
+	u32 db_hist_cap;
 	s32     vfp;
+
+	/* Must be kept in order */
+	u8	keynum;
+	u8	serial[9];
+	u8	challenge[32];
+	u8	digest[32];
+	u8	challenge_src;
 };
 
 struct tegra_dc_out {
 	int				type;
 	unsigned			flags;
+	unsigned			hdcp_policy;
 
 	/* size in mm */
 	unsigned			h_size;
@@ -662,7 +694,6 @@ struct tegra_dc_out {
 	int				ddc_bus;
 	int				hotplug_gpio;
 	int				hotplug_state; /* 0 normal 1 force on */
-	int				hpd_wait_ms;  /* DP HPD wait in mSec */
 	const char			*parent_clk;
 	const char			*parent_clk_backup;
 
@@ -721,6 +752,11 @@ struct tegra_dc_out {
 #define TEGRA_DC_OUT_INITIALIZED_MODE		(1 << 6)
 /* Makes hotplug GPIO a LP0 wakeup source */
 #define TEGRA_DC_OUT_HOTPLUG_WAKE_LP0		(1 << 7)
+#define TEGRA_DC_OUT_NVSR_MODE			(1 << 8)
+
+#define TEGRA_DC_HDCP_POLICY_ALWAYS_ON	0
+#define TEGRA_DC_HDCP_POLICY_ON_DEMAND	1
+#define TEGRA_DC_HDCP_POLICY_ALWAYS_OFF	2
 
 #define TEGRA_DC_ALIGN_MSB		0
 #define TEGRA_DC_ALIGN_LSB		1
@@ -797,10 +833,23 @@ struct tegra_dc_cmu_csc {
 	u16 kbb;
 };
 
+#if defined(CONFIG_TEGRA_DC_CMU_V2)
+struct tegra_dc_cmu {
+	u64 rgb[1025];
+};
+#else
 struct tegra_dc_cmu {
 	u16 lut1[256];
 	struct tegra_dc_cmu_csc csc;
 	u8 lut2[960];
+};
+#endif
+
+struct tegra_dc_hdr {
+	bool		enabled;
+	u32		eotf;
+	u32		static_metadata_id;
+	u8		static_metadata[24];
 };
 
 struct tegra_dc_win {
@@ -912,7 +961,6 @@ struct tegra_dc_win {
 #define TEGRA_WIN_FMT_YUV422R			23
 #define TEGRA_WIN_FMT_YCbCr422RA		24
 #define TEGRA_WIN_FMT_YUV422RA			25
-#define TEGRA_WIN_FMT_R5G6B5			34
 #define TEGRA_WIN_FMT_A8R8G8B8			35
 #define TEGRA_WIN_FMT_A8B8G8R8			36
 #define TEGRA_WIN_FMT_B8G8R8X8			37
@@ -953,6 +1001,7 @@ struct tegra_fb_data {
 	int		xres;
 	int		yres;
 	int		bits_per_pixel; /* -1 means autodetect */
+	size_t		fbmem_size;
 
 	unsigned long	flags;
 };
@@ -965,8 +1014,8 @@ struct tegra_dc_platform_data {
 	struct tegra_dc_out	*default_out;
 	struct tegra_fb_data	*fb;
 	unsigned long		low_v_win;
-	char			*bl_name;
-#ifdef CONFIG_TEGRA_DC_CMU
+
+#if defined(CONFIG_TEGRA_DC_CMU) || defined(CONFIG_TEGRA_DC_CMU_V2)
 	bool			cmu_enable;
 	struct tegra_dc_cmu	*cmu;
 	struct tegra_dc_cmu	*cmu_adbRGB;
@@ -1085,10 +1134,22 @@ int tegra_dc_get_panel_sync_rate(void);
 int tegra_dc_get_head(const struct tegra_dc *dc);
 int tegra_dc_get_out(const struct tegra_dc *dc);
 
+struct device_node *tegra_dc_get_hdmi_node(int id);
+
 struct device_node *tegra_primary_panel_get_dt_node(
 				struct tegra_dc_platform_data *pdata);
 struct device_node *tegra_secondary_panel_get_dt_node(
 				struct tegra_dc_platform_data *pdata);
+#if defined(CONFIG_TEGRA_NVDISPLAY)
+struct device_node *tegra_tertiary_panel_get_dt_node(
+				struct tegra_dc_platform_data *pdata);
+#else
+static inline struct device_node *tegra_tertiary_panel_get_dt_node(
+				struct tegra_dc_platform_data *pdata)
+{
+	return NULL;
+}
+#endif
 bool tegra_is_bl_display_initialized(int instance);
 
 void find_dc_node(struct device_node **dc1_node,
@@ -1113,10 +1174,19 @@ struct tmds_config {
 	u32 pad_ctls0_setting; /* register OR mask */
 };
 
+struct spd_infoframe {
+	u8 vendor_name[8];
+	u8 prod_desc[16];
+	u8 source_information;
+};
+
 struct tegra_hdmi_out {
 	struct tmds_config *tmds_config;
 	int n_tmds_config;
 	bool hdmi2fpd_bridge_enable;
+	struct spd_infoframe *spd_infoframe;
+	void (*set_avi_infoframe)(struct tegra_dc *dc);
+	u8 it_content_type;
 };
 
 enum {
@@ -1155,24 +1225,13 @@ struct tegra_dc_dp_lt_settings {
 	u32 load_adj;
 };
 
-/* DP Golden Register Settings */
-struct tegra_dc_dp_gr_settings {
-	int  valid;            /* valid or not */
-	u32  vs[4][4][4];      /* nvidia,drive-current, [pc2][vs][pe] */
-	u32  pe[4][4][4];      /* nvidia,preemphasis, [pc2][vs][pe] */
-	u32  pc[4][4][4];      /* nvidia,post-cursor2, [pc2][vs][pe] */
-	u32  tx_pu[4][4][4];   /* nvidia,tx-pullup, [pc2][vs][pe] */
-	u32  pll0_ichpmp;      /* nvidia,pll0-ichpmp */
-	u32  pll0_vcocap;      /* nvidia,pll0-vcocap */
-	u32  pll1_loadadj[3];  /* nvidia,pll1-loadad, [RBR=0,HBR,HBR2] */
-};
-
 struct tegra_dp_out {
 	struct tegra_dc_dp_lt_settings *lt_settings;
 	int n_lt_settings;
+	bool enable_fast_lt_pdata;
 	bool tx_pu_disable;
-	u8 link_bw;
-	struct tegra_dc_dp_gr_settings  gr_settings;
+	int max_n_lanes;
+	u8 max_link_bw;
 };
 
 #ifdef CONFIG_PM_SLEEP

@@ -26,7 +26,6 @@
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <asm/cacheflush.h>
-#include <asm/outercache.h>
 #include <linux/list.h>
 #include <linux/dma-mapping.h>
 #include <linux/of.h>
@@ -57,11 +56,7 @@ static int te_create_free_cmd_list(struct tlk_device *dev)
 	 * phys addresses are passed in do_smc).
 	 */
 	dev->req_param_buf = NULL;
-
-	if (of_machine_is_compatible("nvidia,foster-e"))
-		use_reqbuf = !send_smc(TE_SMC_REGISTER_REQ_BUF_LEGACY, 0, 0);
-	else
-		use_reqbuf = !send_smc(TE_SMC_REGISTER_REQ_BUF, 0, 0);
+	use_reqbuf = !send_smc(TE_SMC_REGISTER_REQ_BUF, 0, 0);
 
 	if (use_reqbuf) {
 		dev->req_param_buf = kmalloc((2 * PAGE_SIZE), GFP_KERNEL);
@@ -71,10 +66,6 @@ static int te_create_free_cmd_list(struct tlk_device *dev)
 		dev->param_addr = (struct te_oper_param *)
 					(dev->req_param_buf + PAGE_SIZE);
 
-	if (of_machine_is_compatible("nvidia,foster-e"))
-		send_smc(TE_SMC_REGISTER_REQ_BUF_LEGACY,
-				(uintptr_t)dev->req_addr, (2 * PAGE_SIZE));
-	else
 		send_smc(TE_SMC_REGISTER_REQ_BUF,
 				(uintptr_t)dev->req_addr, (2 * PAGE_SIZE));
 	} else {
@@ -113,7 +104,7 @@ error:
 	return ret;
 }
 
-static struct te_oper_param *te_get_free_params(struct tlk_device *dev,
+struct te_oper_param *te_get_free_params(struct tlk_device *dev,
 	unsigned int nparams)
 {
 	struct te_oper_param *params = NULL;
@@ -129,7 +120,7 @@ static struct te_oper_param *te_get_free_params(struct tlk_device *dev,
 	return params;
 }
 
-static void te_put_free_params(struct tlk_device *dev,
+void te_put_free_params(struct tlk_device *dev,
 	struct te_oper_param *params, uint32_t nparams)
 {
 	int idx, nbits;
@@ -139,7 +130,7 @@ static void te_put_free_params(struct tlk_device *dev,
 	bitmap_release_region(dev->param_bitmap, idx, nbits);
 }
 
-static struct te_cmd_req_desc *te_get_free_cmd_desc(struct tlk_device *dev)
+struct te_cmd_req_desc *te_get_free_cmd_desc(struct tlk_device *dev)
 {
 	struct te_cmd_req_desc *cmd_desc = NULL;
 
@@ -152,7 +143,7 @@ static struct te_cmd_req_desc *te_get_free_cmd_desc(struct tlk_device *dev)
 	return cmd_desc;
 }
 
-static void te_put_used_cmd_desc(struct tlk_device *dev,
+void te_put_used_cmd_desc(struct tlk_device *dev,
 	struct te_cmd_req_desc *cmd_desc)
 {
 	struct te_cmd_req_desc *param_desc, *tmp_param_desc;

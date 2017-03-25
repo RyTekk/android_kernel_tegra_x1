@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2010 Google, Inc.
- * Copyright (c) 2012-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2012-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * Author:
  *	Colin Cross <ccross@android.com>
@@ -55,7 +55,7 @@
 #elif defined(CONFIG_ARCH_TEGRA_18x_SOC)
 #include "../../../../kernel-t18x/drivers/misc/tegra-fuse/tegra18x_fuse_offsets.h"
 #elif defined(CONFIG_ARCH_TEGRA_21x_SOC)
-#include "tegra21x_fuse_offsets.h"
+#include "tegra210_fuse_offsets.h"
 #endif
 
 static DEVICE_ATTR(device_key, 0440, tegra_fuse_show, tegra_fuse_store);
@@ -69,7 +69,7 @@ static DEVICE_ATTR(sw_reserved, 0440, tegra_fuse_show, tegra_fuse_store);
 static DEVICE_ATTR(ignore_dev_sel_straps, 0440, tegra_fuse_show,
 		tegra_fuse_store);
 static DEVICE_ATTR(odm_reserved, 0440, tegra_fuse_show, tegra_fuse_store);
-#ifdef CONFIG_AID_FUSE
+#ifdef CONFIG_ARM64
 static DEVICE_ATTR(aid, 0444, tegra_fuse_show, NULL);
 #endif
 
@@ -98,6 +98,7 @@ static const char *tegra_revision_name[TEGRA_REVISION_MAX] = {
 	[TEGRA_REVISION_A01]     = "A01",
 	[TEGRA_REVISION_A01q]    = "A01Q",
 	[TEGRA_REVISION_A02]     = "A02",
+	[TEGRA_REVISION_A02p]    = "A02P",
 	[TEGRA_REVISION_A03]     = "A03",
 	[TEGRA_REVISION_A03p]    = "A03 prime",
 	[TEGRA_REVISION_A04]     = "A04",
@@ -283,7 +284,7 @@ static struct param_info fuse_info_tbl[] = {
 		.data_offset = 15,
 		.sysfs_name = "odm_lock",
 	},
-#ifdef CONFIG_AID_FUSE
+#ifdef CONFIG_ARM64
 	[AID] = {
 		.addr = &fuse_info.aid,
 		.sz = sizeof(fuse_info.aid),
@@ -485,6 +486,7 @@ static struct chip_revision tegra_chip_revisions[] = {
 	CHIP_REVISION(TEGRA21, 1, 1, 0,   A01),
 	CHIP_REVISION(TEGRA21, 1, 1, 'q', A01q),
 	CHIP_REVISION(TEGRA21, 1, 2, 0,   A02),
+	CHIP_REVISION(TEGRA21, 1, 2, 'p', A02p),
 };
 
 static enum tegra_revision tegra_decode_revision(const struct tegra_id *id)
@@ -1431,11 +1433,12 @@ u32 tegra_get_bct_strapping(void)
 
 void tegra_init_fuse(void)
 {
-	u32 sku_id;
+	u32 sku_id, regsoc = 0;
 
 	tegra_fuse_cfg_reg_visible();
 #ifdef CONFIG_ARCH_TEGRA_21x_SOC
 	tegra_fuse_override_chip_option_regs();
+	regsoc = tegra_fuse_readl(FUSE_SPEEDO_1_CALIB_0);
 #endif
 	tegra_set_sku_id();
 	sku_id = tegra_get_sku_id();
@@ -1444,10 +1447,12 @@ void tegra_init_fuse(void)
 	tegra_revision = tegra_chip_get_revision();
 	tegra_fuse_tsosc_init();
 	tegra_init_speedo_data();
-	pr_info("Tegra Revision: %s SKU: 0x%x CPU Process: %d Core Process: %d\n",
+
+	pr_info("Tegra Revision: %s SKU: 0x%x CPU Process: %d Core Process: %d"
+		" Bootrom patch v0x%x\n",
 		tegra_revision_name[tegra_revision],
 		sku_id, tegra_cpu_process_id(),
-		tegra_core_process_id());
+		tegra_core_process_id(), regsoc);
 }
 
 static struct tegra_fuse_chip_data tegra114_fuse_chip_data = {
@@ -1561,7 +1566,7 @@ static int tegra_fuse_probe(struct platform_device *pdev)
 				&dev_attr_ignore_dev_sel_straps.attr));
 	CHK_ERR(&pdev->dev, sysfs_create_file(&pdev->dev.kobj,
 					&dev_attr_odm_reserved.attr));
-#ifdef CONFIG_AID_FUSE
+#ifdef CONFIG_ARM64
 	CHK_ERR(&pdev->dev, sysfs_create_file(&pdev->dev.kobj,
 					&dev_attr_aid.attr));
 #endif
@@ -1589,7 +1594,7 @@ static int tegra_fuse_remove(struct platform_device *pdev)
 	sysfs_remove_file(&pdev->dev.kobj,
 				&dev_attr_ignore_dev_sel_straps.attr);
 	sysfs_remove_file(&pdev->dev.kobj, &dev_attr_sw_reserved.attr);
-#ifdef CONFIG_AID_FUSE
+#ifdef CONFIG_ARM64
 	sysfs_remove_file(&pdev->dev.kobj, &dev_attr_aid.attr);
 #endif
 	tegra_fuse_rm_sysfs_variables(pdev);

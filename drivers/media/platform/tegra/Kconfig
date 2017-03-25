@@ -4,6 +4,7 @@
 
 source "drivers/media/platform/tegra/nvavp/Kconfig"
 source "drivers/media/platform/tegra/nvavp-virt/Kconfig"
+source "drivers/media/platform/tegra/mipical/Kconfig"
 
 # only involve device specific PCL drivers while virtual driver cannot
 # handle it full functionally.
@@ -126,6 +127,13 @@ config VIDEO_OV7695
           This is a driver for the OV7695 YUV camera sensor device
           This sensor has external ISP, it isn't using tegra ISP.
 
+config VIDEO_OV10823
+        tristate "OV10823 camera sensor support"
+        depends on I2C && ARCH_TEGRA
+        ---help---
+          This is a driver for the OV10823 camera sensor
+          for use with the tegra isp.
+
 config TORCH_SSL3250A
         tristate "SSL3250A flash/torch support"
         depends on I2C && ARCH_TEGRA
@@ -236,19 +244,11 @@ config VIDEO_IMX219
 	  The sensor has a maximum of 8MP
 	  resolution.
 
-config VIDEO_IMX214
-        tristate "IMX214 camera sensor support"
-        depends on I2C && ARCH_TEGRA
-        ---help---
-        This is a driver for the IMX214 camera sensor
-        for use with the tegra isp.  The sensor has a
-        maximum of 13MP (4208x3120) resolution with HDR
-        capability.
-
 config VIDEO_CAMERA
         tristate "generic camera device support"
         depends on I2C && PLATFORM_TEGRA
         select REGMAP_I2C
+        select VIDEOBUF2_DMA_CONTIG
         ---help---
           This is a driver for generic camera devices
           for use with the tegra isp.
@@ -263,9 +263,26 @@ config VIDEO_ISC
 
 config VIDEO_TEGRA_VI
 	depends on TEGRA_GRHOST
+        depends on VIDEO_V4L2 && VIDEO_V4L2_SUBDEV_API && OF
 	tristate "Tegra video input host1x client driver"
 	default y
 	help
-	  Driver for the Tegra video input hardware.
+	  Driver for the Tegra video input hardware based on
+	  media controller framework and interact with host1x
+	  apis to support both user space as well as kernel
+	  programming of VI hardware registers
 	  To compile this driver as a module, choose M here:
-	  the  module will be called nvhost-vi.
+	  the module will be called nvhost-vi.
+
+config VIDEO_TEGRA_VI_TPG
+	depends on VIDEO_TEGRA_VI
+	tristate "Tegra video input test pattern generator driver"
+	default m
+	help
+	  Driver for the Tegra video input test pattern generator
+	  driver is based on media controller framework and interact
+	  with host1x apis to support both user space as well as kernel
+	  programming of VI hardware registers to generate predefined
+	  test patterns.
+	  To compile this driver as a module, choose M here:
+	  the module will be called nvhost-vi-tpg.

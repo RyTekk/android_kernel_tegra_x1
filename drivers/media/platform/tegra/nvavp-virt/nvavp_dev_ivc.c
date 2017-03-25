@@ -1,7 +1,7 @@
 /*
  * IVC based librabry for AVP.
  *
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -57,7 +57,7 @@ fail:
 	return err;
 }
 
-void ivc_rx(struct tegra_hv_ivc_cookie *ivck)
+static void ivc_rx(struct tegra_hv_ivc_cookie *ivck)
 {
 	unsigned long flags;
 

@@ -17,6 +17,7 @@
 
 #include "gk20a/gk20a.h"
 #include "gk20a/kind_gk20a.h"
+#include "gk20a/fb_gk20a.h"
 
 #include "hw_fb_gm20b.h"
 #include "hw_top_gm20b.h"
@@ -90,9 +91,24 @@ static void gm20b_fb_set_mmu_page_size(struct gk20a *g)
 	gk20a_writel(g, fb_mmu_ctrl_r(), fb_mmu_ctrl);
 }
 
+static bool gm20b_fb_set_use_full_comp_tag_line(struct gk20a *g)
+{
+	/* set large page size in fb */
+	u32 fb_mmu_ctrl = gk20a_readl(g, fb_mmu_ctrl_r());
+	fb_mmu_ctrl |= fb_mmu_ctrl_use_full_comp_tag_line_true_f();
+	gk20a_writel(g, fb_mmu_ctrl_r(), fb_mmu_ctrl);
+
+	return true;
+}
+
 static int gm20b_fb_compression_page_size(struct gk20a *g)
 {
 	return SZ_128K;
+}
+
+static int gm20b_fb_compressible_page_size(struct gk20a *g)
+{
+	return SZ_64K;
 }
 
 static void gm20b_fb_dump_vpr_wpr_info(struct gk20a *g)
@@ -126,9 +142,12 @@ static void gm20b_fb_dump_vpr_wpr_info(struct gk20a *g)
 
 void gm20b_init_fb(struct gpu_ops *gops)
 {
+	gops->fb.reset = fb_gk20a_reset;
 	gops->fb.init_fs_state = fb_gm20b_init_fs_state;
 	gops->fb.set_mmu_page_size = gm20b_fb_set_mmu_page_size;
+	gops->fb.set_use_full_comp_tag_line = gm20b_fb_set_use_full_comp_tag_line;
 	gops->fb.compression_page_size = gm20b_fb_compression_page_size;
+	gops->fb.compressible_page_size = gm20b_fb_compressible_page_size;
 	gops->fb.dump_vpr_wpr_info = gm20b_fb_dump_vpr_wpr_info;
 	gm20b_init_uncompressed_kind_map();
 	gm20b_init_kind_attr();

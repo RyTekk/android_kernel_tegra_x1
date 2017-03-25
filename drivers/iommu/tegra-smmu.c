@@ -1,7 +1,7 @@
 /*
  * IOMMU driver for SMMU on Tegra 3 series SoCs and later.
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -828,10 +828,9 @@ err_out:
 }
 
 static size_t __smmu_iommu_unmap_pages(struct smmu_as *as, dma_addr_t iova,
-				       size_t bytes)
+				       u32 *pdir, size_t bytes)
 {
 	int total = bytes >> PAGE_SHIFT;
-	u32 *pdir = page_address(as->pdir_page);
 	struct smmu_device *smmu = as->smmu;
 	unsigned long iova_base = iova;
 	bool flush_all = (total > smmu_flush_all_th_unmap_pages) ? true : false;
@@ -893,10 +892,10 @@ static size_t __smmu_iommu_unmap_pages(struct smmu_as *as, dma_addr_t iova,
 	return bytes;
 }
 
-static size_t __smmu_iommu_unmap_largepage(struct smmu_as *as, dma_addr_t iova)
+static size_t __smmu_iommu_unmap_largepage(struct smmu_as *as,
+					dma_addr_t iova, u32 *pdir)
 {
 	int pdn = SMMU_ADDR_TO_PDN(iova);
-	u32 *pdir = (u32 *)page_address(as->pdir_page);
 
 	pdir[pdn] = _PDE_VACANT(pdn);
 	trace_smmu_set_pte(as->asid, iova, 0, SZ_4M, 0);
@@ -1102,10 +1101,10 @@ static int smmu_iommu_map_sg(struct iommu_domain *domain, unsigned long iova,
 }
 
 /* Remap a 4MB large page entry to 1024 * 4KB pages entries */
-static int __smmu_iommu_remap_largepage(struct smmu_as *as, dma_addr_t iova)
+static int __smmu_iommu_remap_largepage(struct smmu_as *as,
+					dma_addr_t iova, u32 *pdir)
 {
 	int pdn = SMMU_ADDR_TO_PDN(iova);
-	u32 *pdir = page_address(as->pdir_page);
 	unsigned long pfn = __phys_to_pfn(pdir[pdn] << SMMU_PDE_SHIFT);
 	unsigned int *rest = &as->pte_count[pdn];
 	gfp_t gfp = GFP_ATOMIC;
@@ -1149,7 +1148,7 @@ static size_t __smmu_iommu_unmap_default(struct smmu_as *as, dma_addr_t iova,
 			as->asid, &iova, bytes);
 		return 0;
 	} else if (pdir[pdn] & _PDE_NEXT) {
-		return __smmu_iommu_unmap_pages(as, iova, bytes);
+		return __smmu_iommu_unmap_pages(as, iova, pdir, bytes);
 	} else { /* 4MB PDE */
 		BUG_ON(config_enabled(CONFIG_TEGRA_IOMMU_SMMU_NO4MB));
 		BUG_ON(!IS_ALIGNED(iova, SZ_4M));
@@ -1157,13 +1156,13 @@ static size_t __smmu_iommu_unmap_default(struct smmu_as *as, dma_addr_t iova,
 		if (bytes < SZ_4M) {
 			int err;
 
-			err = __smmu_iommu_remap_largepage(as, iova);
+			err = __smmu_iommu_remap_largepage(as, iova, pdir);
 			if (err)
 				return 0;
-			return __smmu_iommu_unmap_pages(as, iova, bytes);
+			return __smmu_iommu_unmap_pages(as, iova, pdir, bytes);
 		}
 
-		return __smmu_iommu_unmap_largepage(as, iova);
+		return __smmu_iommu_unmap_largepage(as, iova, pdir);
 	}
 }
 
@@ -1255,6 +1254,7 @@ char *debug_dma_platformdata(struct device *dev)
 
 static const struct file_operations smmu_ptdump_fops;
 static const struct file_operations smmu_iova2pa_fops;
+static const struct file_operations smmu_iovadump_fops;
 
 static void debugfs_create_as(struct smmu_as *as)
 {
@@ -1270,6 +1270,8 @@ static void debugfs_create_as(struct smmu_as *as)
 			    as, &smmu_ptdump_fops);
 	debugfs_create_file("iova_to_phys", S_IRUSR, as->debugfs_root,
 			    as, &smmu_iova2pa_fops);
+	debugfs_create_file("iova_dump", S_IRUSR, as->debugfs_root,
+			    as, &smmu_iovadump_fops);
 }
 
 static struct smmu_as *smmu_as_alloc_default(void)
@@ -1558,12 +1560,34 @@ static void smmu_iommu_domain_destroy(struct iommu_domain *domain)
 	dev_dbg(smmu->dev, "smmu_as@%p\n", as);
 }
 
+/*
+ * Traverse the PCI tree to find the root of the PCI tree. That's the device
+ * that should be used for finding the SMMU mapping.
+ */
+struct device *__get_pci_dev(struct device *dev)
+{
+	struct pci_bus *bus;
+
+	if (!dev_is_pci(dev))
+		return dev;
+
+	bus = to_pci_dev(dev)->bus;
+
+	while (!pci_is_root_bus(bus))
+		bus = bus->parent;
+	return bus->bridge->parent;
+}
+
 static int __smmu_iommu_add_device(struct device *dev, u64 swgids)
 {
 	struct dma_iommu_mapping *map;
 	int err;
 
-	map = tegra_smmu_of_get_mapping(dev, swgids,
+	/*
+	 * If the device is a PCI device we need to use the root of the PCI
+	 * tree for looking up the SMMU mapping.
+	 */
+	map = tegra_smmu_of_get_mapping(__get_pci_dev(dev), swgids,
 					&smmu_handle->asprops);
 	if (!map) {
 		dev_err(dev, "map creation failed!!!\n");
@@ -1840,6 +1864,7 @@ static void smmu_walk_pgd(struct seq_file *m, struct smmu_as *as)
 {
 	int i;
 	u32 *pgd;
+	unsigned long flags;
 	struct smmu_pg_state st = {
 		.seq	= m,
 		.marker	= address_markers,
@@ -1848,6 +1873,7 @@ static void smmu_walk_pgd(struct seq_file *m, struct smmu_as *as)
 	if (!pfn_valid(page_to_pfn(as->pdir_page)))
 		return;
 
+	spin_lock_irqsave(&as->lock, flags);
 	pgd = page_address(as->pdir_page);
 	for (i = 0; i < SMMU_PDIR_COUNT; i++, pgd++) {
 		u32 addr = i * SMMU_PAGE_SIZE * SMMU_PTBL_COUNT;
@@ -1859,6 +1885,7 @@ static void smmu_walk_pgd(struct seq_file *m, struct smmu_as *as)
 	}
 
 	smmu_note_page(&st, 0, 0, 0);
+	spin_unlock_irqrestore(&as->lock, flags);
 }
 
 static int smmu_ptdump_show(struct seq_file *m, void *v)
@@ -1888,6 +1915,7 @@ void smmu_dump_pagetable(int swgid, dma_addr_t fault)
 		size_t bytes;
 		phys_addr_t pa;
 		u32 npte;
+		unsigned long flags;
 		struct smmu_client *c =
 			container_of(n, struct smmu_client, node);
 		struct smmu_as *as;
@@ -1899,7 +1927,10 @@ void smmu_dump_pagetable(int swgid, dma_addr_t fault)
 		if (!as)
 			continue;
 
+
+		spin_lock_irqsave(&as->lock, flags);
 		bytes =	__smmu_iommu_iova_to_phys(as, fault, &pa, &npte);
+		spin_unlock_irqrestore(&as->lock, flags);
 		snprintf(str, sizeof(str),
 			 "fault_address=%pa pa=%pa bytes=%zx #pte=%d in L2\n",
 			 &fault, &pa, bytes, npte);
@@ -1911,13 +1942,18 @@ void smmu_dump_pagetable(int swgid, dma_addr_t fault)
 }
 
 static dma_addr_t tegra_smmu_inquired_iova;
-static struct smmu_as *tegra_smmu_inquired_as;
+static phys_addr_t tegra_smmu_inquired_phys;
+static size_t tegra_smmu_inquired_bytes;
+static int tegra_smmu_inquired_npte;
 
 static void smmu_dump_phys_page(struct seq_file *m, phys_addr_t phys)
 {
 	ulong addr, base;
 	phys_addr_t paddr;
 	ulong offset;
+
+	if (!phys || (phys == ~0))
+		return;
 
 	offset = round_down(phys & ~PAGE_MASK, 16);
 
@@ -1945,26 +1981,12 @@ static void smmu_dump_phys_page(struct seq_file *m, phys_addr_t phys)
 
 static int smmu_iova2pa_show(struct seq_file *m, void *v)
 {
-	struct smmu_as *as = m->private;
-	phys_addr_t tegra_smmu_inquired_phys;
-	size_t tegra_smmu_inquired_bytes;
-	int tegra_smmu_inquired_npte;
-
-	if (tegra_smmu_inquired_as != as)
-		return -EINVAL;
-
-	tegra_smmu_inquired_bytes =
-		__smmu_iommu_iova_to_phys(as, tegra_smmu_inquired_iova,
-					  &tegra_smmu_inquired_phys,
-					  &tegra_smmu_inquired_npte);
 	seq_printf(m, "iova=%pa pa=%pa bytes=%zx npte=%d\n",
 		   &tegra_smmu_inquired_iova,
 		   &tegra_smmu_inquired_phys,
 		   tegra_smmu_inquired_bytes,
 		   tegra_smmu_inquired_npte);
 
-	/* pass m if you want to print in seq file */
-	smmu_dump_phys_page(NULL, tegra_smmu_inquired_phys);
 	return 0;
 }
 
@@ -1978,8 +2000,10 @@ static ssize_t smmu_debugfs_iova2pa_write(struct file *file,
 					  size_t count, loff_t *pos)
 {
 	int ret;
+	unsigned long flags;
 	struct smmu_as *as = file_inode(file)->i_private;
 	char str[] = "0123456789abcdef";
+	struct seq_file *p = file->private_data;
 
 	count = min_t(size_t, strlen(str), count);
 	if (copy_from_user(str, buffer, count))
@@ -1993,16 +2017,50 @@ static ssize_t smmu_debugfs_iova2pa_write(struct file *file,
 	if (ret != 1)
 		return -EINVAL;
 
-	tegra_smmu_inquired_as = as;
+	mutex_lock(&p->lock);
+	spin_lock_irqsave(&as->lock, flags);
+	tegra_smmu_inquired_bytes =
+		__smmu_iommu_iova_to_phys(as, tegra_smmu_inquired_iova,
+					  &tegra_smmu_inquired_phys,
+					  &tegra_smmu_inquired_npte);
+	spin_unlock_irqrestore(&as->lock, flags);
+	mutex_unlock(&p->lock);
 
-	pr_info("requested iova=%pa in as%03d\n", &tegra_smmu_inquired_iova,
-		as->asid);
+	pr_debug("iova=%pa pa=%pa bytes=%zx npte=%d\n",
+		 &tegra_smmu_inquired_iova, &tegra_smmu_inquired_phys,
+		 tegra_smmu_inquired_bytes, tegra_smmu_inquired_npte);
 
 	return count;
 }
 
 static const struct file_operations smmu_iova2pa_fops = {
 	.open		= smmu_iova2pa_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+	.write		= smmu_debugfs_iova2pa_write,
+};
+
+static int smmu_iovadump_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "iova=%pa pa=%pa bytes=%zx npte=%d\n",
+		   &tegra_smmu_inquired_iova,
+		   &tegra_smmu_inquired_phys,
+		   tegra_smmu_inquired_bytes,
+		   tegra_smmu_inquired_npte);
+
+	/* pass NULL if you want to print to console */
+	smmu_dump_phys_page(m, tegra_smmu_inquired_phys);
+	return 0;
+}
+
+static int smmu_iovadump_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, smmu_iovadump_show, inode->i_private);
+}
+
+static const struct file_operations smmu_iovadump_fops = {
+	.open		= smmu_iovadump_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= single_release,

@@ -8,6 +8,7 @@
  * Copyright (C) 2003       Pavel Machek (pavel@ucw.cz)
  * Copyright (C) 2005       Philippe De Muyter (phdm@macqel.be)
  * Copyright (C) 2008       Hans Verkuil <hverkuil@xs4all.nl>
+ * Copyright (c) 2016 NVIDIA CORPORATION.  All Rights Reserved.
  *
  * These routines maintain argument size conversion between 32bit and 64bit
  * ioctls.
@@ -199,7 +200,7 @@ static int __get_v4l2_format32(struct v4l2_format *kp, struct v4l2_format32 __us
 	case V4L2_BUF_TYPE_SLICED_VBI_OUTPUT:
 		return get_v4l2_sliced_vbi_format(&kp->fmt.sliced, &up->fmt.sliced);
 	default:
-		printk(KERN_INFO "compat_ioctl32: unexpected VIDIOC_FMT type %d\n",
+		printk(KERN_DEBUG "compat_ioctl32: unexpected VIDIOC_FMT type %d\n",
 								kp->type);
 		return -EINVAL;
 	}
@@ -222,6 +223,9 @@ static int get_v4l2_create32(struct v4l2_create_buffers *kp, struct v4l2_create_
 
 static int __put_v4l2_format32(struct v4l2_format *kp, struct v4l2_format32 __user *up)
 {
+	if (put_user(kp->type, &up->type))
+		return -EFAULT;
+
 	switch (kp->type) {
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
@@ -240,7 +244,7 @@ static int __put_v4l2_format32(struct v4l2_format *kp, struct v4l2_format32 __us
 	case V4L2_BUF_TYPE_SLICED_VBI_OUTPUT:
 		return put_v4l2_sliced_vbi_format(&kp->fmt.sliced, &up->fmt.sliced);
 	default:
-		printk(KERN_INFO "compat_ioctl32: unexpected VIDIOC_FMT type %d\n",
+		printk(KERN_DEBUG "compat_ioctl32: unexpected VIDIOC_FMT type %d\n",
 								kp->type);
 		return -EINVAL;
 	}
@@ -248,8 +252,7 @@ static int __put_v4l2_format32(struct v4l2_format *kp, struct v4l2_format32 __us
 
 static int put_v4l2_format32(struct v4l2_format *kp, struct v4l2_format32 __user *up)
 {
-	if (!access_ok(VERIFY_WRITE, up, sizeof(struct v4l2_format32)) ||
-		put_user(kp->type, &up->type))
+	if (!access_ok(VERIFY_WRITE, up, sizeof(struct v4l2_format32)))
 		return -EFAULT;
 	return __put_v4l2_format32(kp, up);
 }
@@ -257,8 +260,9 @@ static int put_v4l2_format32(struct v4l2_format *kp, struct v4l2_format32 __user
 static int put_v4l2_create32(struct v4l2_create_buffers *kp, struct v4l2_create_buffers32 __user *up)
 {
 	if (!access_ok(VERIFY_WRITE, up, sizeof(struct v4l2_create_buffers32)) ||
-	    copy_to_user(up, kp, offsetof(struct v4l2_create_buffers32, format.fmt)))
-			return -EFAULT;
+	    copy_to_user(up, kp, offsetof(struct v4l2_create_buffers32, format)) ||
+	    copy_to_user(up->reserved, kp->reserved, sizeof(kp->reserved)))
+		return -EFAULT;
 	return __put_v4l2_format32(&kp->format, &up->format);
 }
 
@@ -392,7 +396,8 @@ static int get_v4l2_buffer32(struct v4l2_buffer *kp, struct v4l2_buffer32 __user
 		get_user(kp->index, &up->index) ||
 		get_user(kp->type, &up->type) ||
 		get_user(kp->flags, &up->flags) ||
-		get_user(kp->memory, &up->memory))
+		get_user(kp->memory, &up->memory) ||
+		get_user(kp->length, &up->length))
 			return -EFAULT;
 
 	if (V4L2_TYPE_IS_OUTPUT(kp->type))
@@ -404,9 +409,6 @@ static int get_v4l2_buffer32(struct v4l2_buffer *kp, struct v4l2_buffer32 __user
 			return -EFAULT;
 
 	if (V4L2_TYPE_IS_MULTIPLANAR(kp->type)) {
-		if (get_user(kp->length, &up->length))
-			return -EFAULT;
-
 		num_planes = kp->length;
 		if (num_planes == 0) {
 			kp->m.planes = NULL;
@@ -439,16 +441,14 @@ static int get_v4l2_buffer32(struct v4l2_buffer *kp, struct v4l2_buffer32 __user
 	} else {
 		switch (kp->memory) {
 		case V4L2_MEMORY_MMAP:
-			if (get_user(kp->length, &up->length) ||
-				get_user(kp->m.offset, &up->m.offset))
+			if (get_user(kp->m.offset, &up->m.offset))
 				return -EFAULT;
 			break;
 		case V4L2_MEMORY_USERPTR:
 			{
 			compat_long_t tmp;
 
-			if (get_user(kp->length, &up->length) ||
-			    get_user(tmp, &up->m.userptr))
+			if (get_user(tmp, &up->m.userptr))
 				return -EFAULT;
 
 			kp->m.userptr = (unsigned long)compat_ptr(tmp);
@@ -490,7 +490,8 @@ static int put_v4l2_buffer32(struct v4l2_buffer *kp, struct v4l2_buffer32 __user
 		copy_to_user(&up->timecode, &kp->timecode, sizeof(struct v4l2_timecode)) ||
 		put_user(kp->sequence, &up->sequence) ||
 		put_user(kp->reserved2, &up->reserved2) ||
-		put_user(kp->reserved, &up->reserved))
+		put_user(kp->reserved, &up->reserved) ||
+		put_user(kp->length, &up->length))
 			return -EFAULT;
 
 	if (V4L2_TYPE_IS_MULTIPLANAR(kp->type)) {
@@ -513,13 +514,11 @@ static int put_v4l2_buffer32(struct v4l2_buffer *kp, struct v4l2_buffer32 __user
 	} else {
 		switch (kp->memory) {
 		case V4L2_MEMORY_MMAP:
-			if (put_user(kp->length, &up->length) ||
-				put_user(kp->m.offset, &up->m.offset))
+			if (put_user(kp->m.offset, &up->m.offset))
 				return -EFAULT;
 			break;
 		case V4L2_MEMORY_USERPTR:
-			if (put_user(kp->length, &up->length) ||
-				put_user(kp->m.userptr, &up->m.userptr))
+			if (put_user(kp->m.userptr, &up->m.userptr))
 				return -EFAULT;
 			break;
 		case V4L2_MEMORY_OVERLAY:
@@ -540,7 +539,16 @@ struct v4l2_framebuffer32 {
 	__u32			capability;
 	__u32			flags;
 	compat_caddr_t 		base;
-	struct v4l2_pix_format	fmt;
+	struct {
+		__u32		width;
+		__u32		height;
+		__u32		pixelformat;
+		__u32		field;
+		__u32		bytesperline;
+		__u32		sizeimage;
+		__u32		colorspace;
+		__u32		priv;
+	} fmt;
 };
 
 static int get_v4l2_framebuffer32(struct v4l2_framebuffer *kp, struct v4l2_framebuffer32 __user *up)
@@ -550,10 +558,10 @@ static int get_v4l2_framebuffer32(struct v4l2_framebuffer *kp, struct v4l2_frame
 	if (!access_ok(VERIFY_READ, up, sizeof(struct v4l2_framebuffer32)) ||
 		get_user(tmp, &up->base) ||
 		get_user(kp->capability, &up->capability) ||
-		get_user(kp->flags, &up->flags))
+		get_user(kp->flags, &up->flags) ||
+		copy_from_user(&kp->fmt, &up->fmt, sizeof(up->fmt)))
 			return -EFAULT;
 	kp->base = compat_ptr(tmp);
-	get_v4l2_pix_format(&kp->fmt, &up->fmt);
 	return 0;
 }
 
@@ -564,9 +572,9 @@ static int put_v4l2_framebuffer32(struct v4l2_framebuffer *kp, struct v4l2_frame
 	if (!access_ok(VERIFY_WRITE, up, sizeof(struct v4l2_framebuffer32)) ||
 		put_user(tmp, &up->base) ||
 		put_user(kp->capability, &up->capability) ||
-		put_user(kp->flags, &up->flags))
+		put_user(kp->flags, &up->flags) ||
+		copy_to_user(&up->fmt, &kp->fmt, sizeof(up->fmt)))
 			return -EFAULT;
-	put_v4l2_pix_format(&kp->fmt, &up->fmt);
 	return 0;
 }
 
@@ -742,7 +750,7 @@ static int put_v4l2_event32(struct v4l2_event *kp, struct v4l2_event32 __user *u
 	return 0;
 }
 
-struct v4l2_subdev_edid32 {
+struct v4l2_edid32 {
 	__u32 pad;
 	__u32 start_block;
 	__u32 blocks;
@@ -750,11 +758,11 @@ struct v4l2_subdev_edid32 {
 	compat_caddr_t edid;
 };
 
-static int get_v4l2_subdev_edid32(struct v4l2_subdev_edid *kp, struct v4l2_subdev_edid32 __user *up)
+static int get_v4l2_edid32(struct v4l2_edid *kp, struct v4l2_edid32 __user *up)
 {
 	u32 tmp;
 
-	if (!access_ok(VERIFY_READ, up, sizeof(struct v4l2_subdev_edid32)) ||
+	if (!access_ok(VERIFY_READ, up, sizeof(struct v4l2_edid32)) ||
 		get_user(kp->pad, &up->pad) ||
 		get_user(kp->start_block, &up->start_block) ||
 		get_user(kp->blocks, &up->blocks) ||
@@ -765,16 +773,16 @@ static int get_v4l2_subdev_edid32(struct v4l2_subdev_edid *kp, struct v4l2_subde
 	return 0;
 }
 
-static int put_v4l2_subdev_edid32(struct v4l2_subdev_edid *kp, struct v4l2_subdev_edid32 __user *up)
+static int put_v4l2_edid32(struct v4l2_edid *kp, struct v4l2_edid32 __user *up)
 {
 	u32 tmp = (u32)((unsigned long)kp->edid);
 
-	if (!access_ok(VERIFY_WRITE, up, sizeof(struct v4l2_subdev_edid32)) ||
+	if (!access_ok(VERIFY_WRITE, up, sizeof(struct v4l2_edid32)) ||
 		put_user(kp->pad, &up->pad) ||
 		put_user(kp->start_block, &up->start_block) ||
 		put_user(kp->blocks, &up->blocks) ||
 		put_user(tmp, &up->edid) ||
-		copy_to_user(kp->reserved, up->reserved, sizeof(kp->reserved)))
+		copy_to_user(up->reserved, kp->reserved, sizeof(up->reserved)))
 			return -EFAULT;
 	return 0;
 }
@@ -789,8 +797,8 @@ static int put_v4l2_subdev_edid32(struct v4l2_subdev_edid *kp, struct v4l2_subde
 #define VIDIOC_DQBUF32		_IOWR('V', 17, struct v4l2_buffer32)
 #define VIDIOC_ENUMSTD32	_IOWR('V', 25, struct v4l2_standard32)
 #define VIDIOC_ENUMINPUT32	_IOWR('V', 26, struct v4l2_input32)
-#define VIDIOC_SUBDEV_G_EDID32	_IOWR('V', 40, struct v4l2_subdev_edid32)
-#define VIDIOC_SUBDEV_S_EDID32	_IOWR('V', 41, struct v4l2_subdev_edid32)
+#define VIDIOC_G_EDID32		_IOWR('V', 40, struct v4l2_edid32)
+#define VIDIOC_S_EDID32		_IOWR('V', 41, struct v4l2_edid32)
 #define VIDIOC_TRY_FMT32      	_IOWR('V', 64, struct v4l2_format32)
 #define VIDIOC_G_EXT_CTRLS32    _IOWR('V', 71, struct v4l2_ext_controls32)
 #define VIDIOC_S_EXT_CTRLS32    _IOWR('V', 72, struct v4l2_ext_controls32)
@@ -818,7 +826,7 @@ static long do_video_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 		struct v4l2_ext_controls v2ecs;
 		struct v4l2_event v2ev;
 		struct v4l2_create_buffers v2crt;
-		struct v4l2_subdev_edid v2edid;
+		struct v4l2_edid v2edid;
 		unsigned long vx;
 		int vi;
 	} karg;
@@ -827,101 +835,101 @@ static long do_video_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 	long err = 0;
 
 	/* First, convert the command. */
-	switch (cmd) {
-	case VIDIOC_G_FMT32: cmd = VIDIOC_G_FMT; break;
-	case VIDIOC_S_FMT32: cmd = VIDIOC_S_FMT; break;
-	case VIDIOC_QUERYBUF32: cmd = VIDIOC_QUERYBUF; break;
-	case VIDIOC_G_FBUF32: cmd = VIDIOC_G_FBUF; break;
-	case VIDIOC_S_FBUF32: cmd = VIDIOC_S_FBUF; break;
-	case VIDIOC_QBUF32: cmd = VIDIOC_QBUF; break;
-	case VIDIOC_DQBUF32: cmd = VIDIOC_DQBUF; break;
-	case VIDIOC_ENUMSTD32: cmd = VIDIOC_ENUMSTD; break;
-	case VIDIOC_ENUMINPUT32: cmd = VIDIOC_ENUMINPUT; break;
-	case VIDIOC_TRY_FMT32: cmd = VIDIOC_TRY_FMT; break;
-	case VIDIOC_G_EXT_CTRLS32: cmd = VIDIOC_G_EXT_CTRLS; break;
-	case VIDIOC_S_EXT_CTRLS32: cmd = VIDIOC_S_EXT_CTRLS; break;
-	case VIDIOC_TRY_EXT_CTRLS32: cmd = VIDIOC_TRY_EXT_CTRLS; break;
-	case VIDIOC_DQEVENT32: cmd = VIDIOC_DQEVENT; break;
-	case VIDIOC_OVERLAY32: cmd = VIDIOC_OVERLAY; break;
-	case VIDIOC_STREAMON32: cmd = VIDIOC_STREAMON; break;
-	case VIDIOC_STREAMOFF32: cmd = VIDIOC_STREAMOFF; break;
-	case VIDIOC_G_INPUT32: cmd = VIDIOC_G_INPUT; break;
-	case VIDIOC_S_INPUT32: cmd = VIDIOC_S_INPUT; break;
-	case VIDIOC_G_OUTPUT32: cmd = VIDIOC_G_OUTPUT; break;
-	case VIDIOC_S_OUTPUT32: cmd = VIDIOC_S_OUTPUT; break;
-	case VIDIOC_CREATE_BUFS32: cmd = VIDIOC_CREATE_BUFS; break;
-	case VIDIOC_PREPARE_BUF32: cmd = VIDIOC_PREPARE_BUF; break;
-	case VIDIOC_SUBDEV_G_EDID32: cmd = VIDIOC_SUBDEV_G_EDID; break;
-	case VIDIOC_SUBDEV_S_EDID32: cmd = VIDIOC_SUBDEV_S_EDID; break;
+	switch (_IOC_NR(cmd)) {
+	case _IOC_NR(VIDIOC_G_FMT32): cmd = VIDIOC_G_FMT; break;
+	case _IOC_NR(VIDIOC_S_FMT32): cmd = VIDIOC_S_FMT; break;
+	case _IOC_NR(VIDIOC_QUERYBUF32): cmd = VIDIOC_QUERYBUF; break;
+	case _IOC_NR(VIDIOC_G_FBUF32): cmd = VIDIOC_G_FBUF; break;
+	case _IOC_NR(VIDIOC_S_FBUF32): cmd = VIDIOC_S_FBUF; break;
+	case _IOC_NR(VIDIOC_QBUF32): cmd = VIDIOC_QBUF; break;
+	case _IOC_NR(VIDIOC_DQBUF32): cmd = VIDIOC_DQBUF; break;
+	case _IOC_NR(VIDIOC_ENUMSTD32): cmd = VIDIOC_ENUMSTD; break;
+	case _IOC_NR(VIDIOC_ENUMINPUT32): cmd = VIDIOC_ENUMINPUT; break;
+	case _IOC_NR(VIDIOC_TRY_FMT32): cmd = VIDIOC_TRY_FMT; break;
+	case _IOC_NR(VIDIOC_G_EXT_CTRLS32): cmd = VIDIOC_G_EXT_CTRLS; break;
+	case _IOC_NR(VIDIOC_S_EXT_CTRLS32): cmd = VIDIOC_S_EXT_CTRLS; break;
+	case _IOC_NR(VIDIOC_TRY_EXT_CTRLS32): cmd = VIDIOC_TRY_EXT_CTRLS; break;
+	case _IOC_NR(VIDIOC_DQEVENT32): cmd = VIDIOC_DQEVENT; break;
+	case _IOC_NR(VIDIOC_OVERLAY32): cmd = VIDIOC_OVERLAY; break;
+	case _IOC_NR(VIDIOC_STREAMON32): cmd = VIDIOC_STREAMON; break;
+	case _IOC_NR(VIDIOC_STREAMOFF32): cmd = VIDIOC_STREAMOFF; break;
+	case _IOC_NR(VIDIOC_G_INPUT32): cmd = VIDIOC_G_INPUT; break;
+	case _IOC_NR(VIDIOC_S_INPUT32): cmd = VIDIOC_S_INPUT; break;
+	case _IOC_NR(VIDIOC_G_OUTPUT32): cmd = VIDIOC_G_OUTPUT; break;
+	case _IOC_NR(VIDIOC_S_OUTPUT32): cmd = VIDIOC_S_OUTPUT; break;
+	case _IOC_NR(VIDIOC_CREATE_BUFS32): cmd = VIDIOC_CREATE_BUFS; break;
+	case _IOC_NR(VIDIOC_PREPARE_BUF32): cmd = VIDIOC_PREPARE_BUF; break;
+	case _IOC_NR(VIDIOC_G_EDID32): cmd = VIDIOC_G_EDID; break;
+	case _IOC_NR(VIDIOC_S_EDID32): cmd = VIDIOC_S_EDID; break;
 	}
 
-	switch (cmd) {
-	case VIDIOC_OVERLAY:
-	case VIDIOC_STREAMON:
-	case VIDIOC_STREAMOFF:
-	case VIDIOC_S_INPUT:
-	case VIDIOC_S_OUTPUT:
+	switch (_IOC_NR(cmd)) {
+	case _IOC_NR(VIDIOC_OVERLAY):
+	case _IOC_NR(VIDIOC_STREAMON):
+	case _IOC_NR(VIDIOC_STREAMOFF):
+	case _IOC_NR(VIDIOC_S_INPUT):
+	case _IOC_NR(VIDIOC_S_OUTPUT):
 		err = get_user(karg.vi, (s32 __user *)up);
 		compatible_arg = 0;
 		break;
 
-	case VIDIOC_G_INPUT:
-	case VIDIOC_G_OUTPUT:
+	case _IOC_NR(VIDIOC_G_INPUT):
+	case _IOC_NR(VIDIOC_G_OUTPUT):
 		compatible_arg = 0;
 		break;
 
-	case VIDIOC_SUBDEV_G_EDID:
-	case VIDIOC_SUBDEV_S_EDID:
-		err = get_v4l2_subdev_edid32(&karg.v2edid, up);
+	case _IOC_NR(VIDIOC_G_EDID):
+	case _IOC_NR(VIDIOC_S_EDID):
+		err = get_v4l2_edid32(&karg.v2edid, up);
 		compatible_arg = 0;
 		break;
 
-	case VIDIOC_G_FMT:
-	case VIDIOC_S_FMT:
-	case VIDIOC_TRY_FMT:
+	case _IOC_NR(VIDIOC_G_FMT):
+	case _IOC_NR(VIDIOC_S_FMT):
+	case _IOC_NR(VIDIOC_TRY_FMT):
 		err = get_v4l2_format32(&karg.v2f, up);
 		compatible_arg = 0;
 		break;
 
-	case VIDIOC_CREATE_BUFS:
+	case _IOC_NR(VIDIOC_CREATE_BUFS):
 		err = get_v4l2_create32(&karg.v2crt, up);
 		compatible_arg = 0;
 		break;
 
-	case VIDIOC_PREPARE_BUF:
-	case VIDIOC_QUERYBUF:
-	case VIDIOC_QBUF:
-	case VIDIOC_DQBUF:
+	case _IOC_NR(VIDIOC_PREPARE_BUF):
+	case _IOC_NR(VIDIOC_QUERYBUF):
+	case _IOC_NR(VIDIOC_QBUF):
+	case _IOC_NR(VIDIOC_DQBUF):
 		err = get_v4l2_buffer32(&karg.v2b, up);
 		compatible_arg = 0;
 		break;
 
-	case VIDIOC_S_FBUF:
+	case _IOC_NR(VIDIOC_S_FBUF):
 		err = get_v4l2_framebuffer32(&karg.v2fb, up);
 		compatible_arg = 0;
 		break;
 
-	case VIDIOC_G_FBUF:
+	case _IOC_NR(VIDIOC_G_FBUF):
 		compatible_arg = 0;
 		break;
 
-	case VIDIOC_ENUMSTD:
+	case _IOC_NR(VIDIOC_ENUMSTD):
 		err = get_v4l2_standard32(&karg.v2s, up);
 		compatible_arg = 0;
 		break;
 
-	case VIDIOC_ENUMINPUT:
+	case _IOC_NR(VIDIOC_ENUMINPUT):
 		err = get_v4l2_input32(&karg.v2i, up);
 		compatible_arg = 0;
 		break;
 
-	case VIDIOC_G_EXT_CTRLS:
-	case VIDIOC_S_EXT_CTRLS:
-	case VIDIOC_TRY_EXT_CTRLS:
+	case _IOC_NR(VIDIOC_G_EXT_CTRLS):
+	case _IOC_NR(VIDIOC_S_EXT_CTRLS):
+	case _IOC_NR(VIDIOC_TRY_EXT_CTRLS):
 		err = get_v4l2_ext_controls32(&karg.v2ecs, up);
 		compatible_arg = 0;
 		break;
-	case VIDIOC_DQEVENT:
+	case _IOC_NR(VIDIOC_DQEVENT):
 		compatible_arg = 0;
 		break;
 	}
@@ -941,10 +949,10 @@ static long do_video_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 	/* Special case: even after an error we need to put the
 	   results back for these ioctls since the error_idx will
 	   contain information on which control failed. */
-	switch (cmd) {
-	case VIDIOC_G_EXT_CTRLS:
-	case VIDIOC_S_EXT_CTRLS:
-	case VIDIOC_TRY_EXT_CTRLS:
+	switch (_IOC_NR(cmd)) {
+	case _IOC_NR(VIDIOC_G_EXT_CTRLS):
+	case _IOC_NR(VIDIOC_S_EXT_CTRLS):
+	case _IOC_NR(VIDIOC_TRY_EXT_CTRLS):
 		if (put_v4l2_ext_controls32(&karg.v2ecs, up))
 			err = -EFAULT;
 		break;
@@ -952,48 +960,48 @@ static long do_video_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 	if (err)
 		return err;
 
-	switch (cmd) {
-	case VIDIOC_S_INPUT:
-	case VIDIOC_S_OUTPUT:
-	case VIDIOC_G_INPUT:
-	case VIDIOC_G_OUTPUT:
+	switch (_IOC_NR(cmd)) {
+	case _IOC_NR(VIDIOC_S_INPUT):
+	case _IOC_NR(VIDIOC_S_OUTPUT):
+	case _IOC_NR(VIDIOC_G_INPUT):
+	case _IOC_NR(VIDIOC_G_OUTPUT):
 		err = put_user(((s32)karg.vi), (s32 __user *)up);
 		break;
 
-	case VIDIOC_G_FBUF:
+	case _IOC_NR(VIDIOC_G_FBUF):
 		err = put_v4l2_framebuffer32(&karg.v2fb, up);
 		break;
 
-	case VIDIOC_DQEVENT:
+	case _IOC_NR(VIDIOC_DQEVENT):
 		err = put_v4l2_event32(&karg.v2ev, up);
 		break;
 
-	case VIDIOC_SUBDEV_G_EDID:
-	case VIDIOC_SUBDEV_S_EDID:
-		err = put_v4l2_subdev_edid32(&karg.v2edid, up);
+	case _IOC_NR(VIDIOC_G_EDID):
+	case _IOC_NR(VIDIOC_S_EDID):
+		err = put_v4l2_edid32(&karg.v2edid, up);
 		break;
 
-	case VIDIOC_G_FMT:
-	case VIDIOC_S_FMT:
-	case VIDIOC_TRY_FMT:
+	case _IOC_NR(VIDIOC_G_FMT):
+	case _IOC_NR(VIDIOC_S_FMT):
+	case _IOC_NR(VIDIOC_TRY_FMT):
 		err = put_v4l2_format32(&karg.v2f, up);
 		break;
 
-	case VIDIOC_CREATE_BUFS:
+	case _IOC_NR(VIDIOC_CREATE_BUFS):
 		err = put_v4l2_create32(&karg.v2crt, up);
 		break;
 
-	case VIDIOC_QUERYBUF:
-	case VIDIOC_QBUF:
-	case VIDIOC_DQBUF:
+	case _IOC_NR(VIDIOC_QUERYBUF):
+	case _IOC_NR(VIDIOC_QBUF):
+	case _IOC_NR(VIDIOC_DQBUF):
 		err = put_v4l2_buffer32(&karg.v2b, up);
 		break;
 
-	case VIDIOC_ENUMSTD:
+	case _IOC_NR(VIDIOC_ENUMSTD):
 		err = put_v4l2_standard32(&karg.v2s, up);
 		break;
 
-	case VIDIOC_ENUMINPUT:
+	case _IOC_NR(VIDIOC_ENUMINPUT):
 		err = put_v4l2_input32(&karg.v2i, up);
 		break;
 	}
@@ -1008,90 +1016,90 @@ long v4l2_compat_ioctl32(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!file->f_op->unlocked_ioctl)
 		return ret;
 
-	switch (cmd) {
-	case VIDIOC_QUERYCAP:
-	case VIDIOC_RESERVED:
-	case VIDIOC_ENUM_FMT:
-	case VIDIOC_G_FMT32:
-	case VIDIOC_S_FMT32:
-	case VIDIOC_REQBUFS:
-	case VIDIOC_QUERYBUF32:
-	case VIDIOC_G_FBUF32:
-	case VIDIOC_S_FBUF32:
-	case VIDIOC_OVERLAY32:
-	case VIDIOC_QBUF32:
-	case VIDIOC_EXPBUF:
-	case VIDIOC_DQBUF32:
-	case VIDIOC_STREAMON32:
-	case VIDIOC_STREAMOFF32:
-	case VIDIOC_G_PARM:
-	case VIDIOC_S_PARM:
-	case VIDIOC_G_STD:
-	case VIDIOC_S_STD:
-	case VIDIOC_ENUMSTD32:
-	case VIDIOC_ENUMINPUT32:
-	case VIDIOC_G_CTRL:
-	case VIDIOC_S_CTRL:
-	case VIDIOC_G_TUNER:
-	case VIDIOC_S_TUNER:
-	case VIDIOC_G_AUDIO:
-	case VIDIOC_S_AUDIO:
-	case VIDIOC_QUERYCTRL:
-	case VIDIOC_QUERYMENU:
-	case VIDIOC_G_INPUT32:
-	case VIDIOC_S_INPUT32:
-	case VIDIOC_G_OUTPUT32:
-	case VIDIOC_S_OUTPUT32:
-	case VIDIOC_ENUMOUTPUT:
-	case VIDIOC_G_AUDOUT:
-	case VIDIOC_S_AUDOUT:
-	case VIDIOC_G_MODULATOR:
-	case VIDIOC_S_MODULATOR:
-	case VIDIOC_S_FREQUENCY:
-	case VIDIOC_G_FREQUENCY:
-	case VIDIOC_CROPCAP:
-	case VIDIOC_G_CROP:
-	case VIDIOC_S_CROP:
-	case VIDIOC_G_SELECTION:
-	case VIDIOC_S_SELECTION:
-	case VIDIOC_G_JPEGCOMP:
-	case VIDIOC_S_JPEGCOMP:
-	case VIDIOC_QUERYSTD:
-	case VIDIOC_TRY_FMT32:
-	case VIDIOC_ENUMAUDIO:
-	case VIDIOC_ENUMAUDOUT:
-	case VIDIOC_G_PRIORITY:
-	case VIDIOC_S_PRIORITY:
-	case VIDIOC_G_SLICED_VBI_CAP:
-	case VIDIOC_LOG_STATUS:
-	case VIDIOC_G_EXT_CTRLS32:
-	case VIDIOC_S_EXT_CTRLS32:
-	case VIDIOC_TRY_EXT_CTRLS32:
-	case VIDIOC_ENUM_FRAMESIZES:
-	case VIDIOC_ENUM_FRAMEINTERVALS:
-	case VIDIOC_G_ENC_INDEX:
-	case VIDIOC_ENCODER_CMD:
-	case VIDIOC_TRY_ENCODER_CMD:
-	case VIDIOC_DECODER_CMD:
-	case VIDIOC_TRY_DECODER_CMD:
-	case VIDIOC_DBG_S_REGISTER:
-	case VIDIOC_DBG_G_REGISTER:
-	case VIDIOC_DBG_G_CHIP_IDENT:
-	case VIDIOC_S_HW_FREQ_SEEK:
-	case VIDIOC_S_DV_TIMINGS:
-	case VIDIOC_G_DV_TIMINGS:
-	case VIDIOC_DQEVENT:
-	case VIDIOC_DQEVENT32:
-	case VIDIOC_SUBSCRIBE_EVENT:
-	case VIDIOC_UNSUBSCRIBE_EVENT:
-	case VIDIOC_CREATE_BUFS32:
-	case VIDIOC_PREPARE_BUF32:
-	case VIDIOC_ENUM_DV_TIMINGS:
-	case VIDIOC_QUERY_DV_TIMINGS:
-	case VIDIOC_DV_TIMINGS_CAP:
-	case VIDIOC_ENUM_FREQ_BANDS:
-	case VIDIOC_SUBDEV_G_EDID32:
-	case VIDIOC_SUBDEV_S_EDID32:
+	switch (_IOC_NR(cmd)) {
+	case _IOC_NR(VIDIOC_QUERYCAP):
+	case _IOC_NR(VIDIOC_RESERVED):
+	case _IOC_NR(VIDIOC_ENUM_FMT):
+	case _IOC_NR(VIDIOC_G_FMT32):
+	case _IOC_NR(VIDIOC_S_FMT32):
+	case _IOC_NR(VIDIOC_REQBUFS):
+	case _IOC_NR(VIDIOC_QUERYBUF32):
+	case _IOC_NR(VIDIOC_G_FBUF32):
+	case _IOC_NR(VIDIOC_S_FBUF32):
+	case _IOC_NR(VIDIOC_OVERLAY32):
+	case _IOC_NR(VIDIOC_QBUF32):
+	case _IOC_NR(VIDIOC_EXPBUF):
+	case _IOC_NR(VIDIOC_DQBUF32):
+	case _IOC_NR(VIDIOC_STREAMON32):
+	case _IOC_NR(VIDIOC_STREAMOFF32):
+	case _IOC_NR(VIDIOC_G_PARM):
+	case _IOC_NR(VIDIOC_S_PARM):
+	case _IOC_NR(VIDIOC_G_STD):
+	case _IOC_NR(VIDIOC_S_STD):
+	case _IOC_NR(VIDIOC_ENUMSTD32):
+	case _IOC_NR(VIDIOC_ENUMINPUT32):
+	case _IOC_NR(VIDIOC_G_CTRL):
+	case _IOC_NR(VIDIOC_S_CTRL):
+	case _IOC_NR(VIDIOC_G_TUNER):
+	case _IOC_NR(VIDIOC_S_TUNER):
+	case _IOC_NR(VIDIOC_G_AUDIO):
+	case _IOC_NR(VIDIOC_S_AUDIO):
+	case _IOC_NR(VIDIOC_QUERYCTRL):
+	case _IOC_NR(VIDIOC_QUERYMENU):
+	case _IOC_NR(VIDIOC_G_INPUT32):
+	case _IOC_NR(VIDIOC_S_INPUT32):
+	case _IOC_NR(VIDIOC_G_OUTPUT32):
+	case _IOC_NR(VIDIOC_S_OUTPUT32):
+	case _IOC_NR(VIDIOC_ENUMOUTPUT):
+	case _IOC_NR(VIDIOC_G_AUDOUT):
+	case _IOC_NR(VIDIOC_S_AUDOUT):
+	case _IOC_NR(VIDIOC_G_MODULATOR):
+	case _IOC_NR(VIDIOC_S_MODULATOR):
+	case _IOC_NR(VIDIOC_S_FREQUENCY):
+	case _IOC_NR(VIDIOC_G_FREQUENCY):
+	case _IOC_NR(VIDIOC_CROPCAP):
+	case _IOC_NR(VIDIOC_G_CROP):
+	case _IOC_NR(VIDIOC_S_CROP):
+	case _IOC_NR(VIDIOC_G_SELECTION):
+	case _IOC_NR(VIDIOC_S_SELECTION):
+	case _IOC_NR(VIDIOC_G_JPEGCOMP):
+	case _IOC_NR(VIDIOC_S_JPEGCOMP):
+	case _IOC_NR(VIDIOC_QUERYSTD):
+	case _IOC_NR(VIDIOC_TRY_FMT32):
+	case _IOC_NR(VIDIOC_ENUMAUDIO):
+	case _IOC_NR(VIDIOC_ENUMAUDOUT):
+	case _IOC_NR(VIDIOC_G_PRIORITY):
+	case _IOC_NR(VIDIOC_S_PRIORITY):
+	case _IOC_NR(VIDIOC_G_SLICED_VBI_CAP):
+	case _IOC_NR(VIDIOC_LOG_STATUS):
+	case _IOC_NR(VIDIOC_G_EXT_CTRLS32):
+	case _IOC_NR(VIDIOC_S_EXT_CTRLS32):
+	case _IOC_NR(VIDIOC_TRY_EXT_CTRLS32):
+	case _IOC_NR(VIDIOC_ENUM_FRAMESIZES):
+	case _IOC_NR(VIDIOC_ENUM_FRAMEINTERVALS):
+	case _IOC_NR(VIDIOC_G_ENC_INDEX):
+	case _IOC_NR(VIDIOC_ENCODER_CMD):
+	case _IOC_NR(VIDIOC_TRY_ENCODER_CMD):
+	case _IOC_NR(VIDIOC_DECODER_CMD):
+	case _IOC_NR(VIDIOC_TRY_DECODER_CMD):
+	case _IOC_NR(VIDIOC_DBG_S_REGISTER):
+	case _IOC_NR(VIDIOC_DBG_G_REGISTER):
+	case _IOC_NR(VIDIOC_DBG_G_CHIP_IDENT):
+	case _IOC_NR(VIDIOC_S_HW_FREQ_SEEK):
+	case _IOC_NR(VIDIOC_S_DV_TIMINGS):
+	case _IOC_NR(VIDIOC_G_DV_TIMINGS):
+	case _IOC_NR(VIDIOC_DQEVENT):
+	case _IOC_NR(VIDIOC_SUBSCRIBE_EVENT):
+	case _IOC_NR(VIDIOC_UNSUBSCRIBE_EVENT):
+	case _IOC_NR(VIDIOC_CREATE_BUFS32):
+	case _IOC_NR(VIDIOC_PREPARE_BUF32):
+	case _IOC_NR(VIDIOC_ENUM_DV_TIMINGS):
+	case _IOC_NR(VIDIOC_QUERY_DV_TIMINGS):
+	case _IOC_NR(VIDIOC_DV_TIMINGS_CAP):
+	case _IOC_NR(VIDIOC_ENUM_FREQ_BANDS):
+	case _IOC_NR(VIDIOC_G_EDID32):
+	case _IOC_NR(VIDIOC_S_EDID32):
+	case _IOC_NR(VIDIOC_QUERY_EXT_CTRL):
 		ret = do_video_ioctl(file, cmd, arg);
 		break;
 
@@ -1100,7 +1108,7 @@ long v4l2_compat_ioctl32(struct file *file, unsigned int cmd, unsigned long arg)
 			ret = vdev->fops->compat_ioctl32(file, cmd, arg);
 
 		if (ret == -ENOIOCTLCMD)
-			printk(KERN_WARNING "compat_ioctl32: "
+			printk(KERN_DEBUG "compat_ioctl32: "
 				"unknown ioctl '%c', dir=%d, #%d (0x%08x)\n",
 				_IOC_TYPE(cmd), _IOC_DIR(cmd), _IOC_NR(cmd),
 				cmd);

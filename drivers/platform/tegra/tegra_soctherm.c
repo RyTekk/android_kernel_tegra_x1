@@ -1,7 +1,7 @@
 /*
  * drivers/platform/tegra/tegra_soctherm.c
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -70,7 +70,7 @@ static const int MIN_LOW_TEMP = -127000;
 /*
  * default 'max' value of the HW PLLX offsetting feature
  */
-#define PLLX_OFFSET_MAX			10
+#define PLLX_OFFSET_MAX			10000
 
 #define CTL_LVL0_CPU0			0x0
 #define CTL_LVL0_CPU0_STATUS_MASK	0x3
@@ -280,13 +280,14 @@ static const int MIN_LOW_TEMP = -127000;
 #define TH_TS_EN_HW_PLLX_OFFSET_CPU_SHIFT	0
 #define TH_TS_EN_HW_PLLX_OFFSET_CPU_MASK	1
 
+#define TH_TS_PLLX_OFFSET_MIN		0x1e8
 #define TH_TS_PLLX_OFFSET_MAX		0x1ec
-#define TH_TS_PLLX_MAX_MEM_OFFSET_SHIFT	16
-#define TH_TS_PLLX_MAX_MEM_OFFSET_MASK	0xff
-#define TH_TS_PLLX_MAX_GPU_OFFSET_SHIFT	8
-#define TH_TS_PLLX_MAX_GPU_OFFSET_MASK	0xff
-#define TH_TS_PLLX_MAX_CPU_OFFSET_SHIFT	0
-#define TH_TS_PLLX_MAX_CPU_OFFSET_MASK	0xff
+#define TH_TS_PLLX_MEM_OFFSET_SHIFT	16
+#define TH_TS_PLLX_MEM_OFFSET_MASK	0xff
+#define TH_TS_PLLX_GPU_OFFSET_SHIFT	8
+#define TH_TS_PLLX_GPU_OFFSET_MASK	0xff
+#define TH_TS_PLLX_CPU_OFFSET_SHIFT	0
+#define TH_TS_PLLX_CPU_OFFSET_MASK	0xff
 
 #define TH_TS_VALID			0x1e0
 #define TH_TS_VALID_GPU_SHIFT		9
@@ -489,6 +490,9 @@ static const int MIN_LOW_TEMP = -127000;
 #define IS_T13X		(tegra_chip_id == TEGRA_CHIPID_TEGRA13)
 #define IS_T21X		(tegra_chip_id == TEGRA_CHIPID_TEGRA21)
 
+#define T21X_GPU_TSENSE_VMIN_UV	824000
+#define CORE_TSENSE_VMIN_UV	900000
+
 static void __iomem *reg_soctherm_base;
 static void __iomem *clk_reset_base;
 static void __iomem *clk13_rst_base;
@@ -512,8 +516,9 @@ static bool read_hw_temp = true;
 static bool soctherm_suspended;
 
 #ifdef CONFIG_THERMAL
-static bool vdd_cpu_low_voltage;
-static bool vdd_core_low_voltage;
+static bool cpu_tsense_low_voltage;
+static bool mem_tsense_low_voltage;
+static bool gpu_tsense_low_voltage;
 #endif
 
 static u32 tegra_chip_id;
@@ -909,44 +914,6 @@ static int soctherm_get_mn_cpu_pskip_status(u8 *enabled, u8 *sw_override, u16 *m
 	return 0;
 }
 
-/**
- * soctherm_get_gpu_pskip_status() - read state of the GPU thermal pulse skipper
- * @enabled: pointer to a u8: return 0 if the skipper is disabled, 1 if enabled
- * @sw_override: ptr to a u8: return 0 if sw override is disabled, 1 if enabled
- * @m: pointer to a u8 to return the current pulse skipper ratio numerator into
- * @n: pointer to a u8 to return the current pulse skipper ratio denominator to
- *
- * Read the current status of the thermal throttling pulse skipper
- * attached to the GPU clock, and return the status into the variables
- * pointed to by @enabled, @sw_override, @m, and @n.  Note that the M
- * and N values are not what is stored in the register bitfields, but
- * instead are the actual values used by the pulse skipper -- i.e., they
- * are the bitfield values _plus one_; they have valid ranges of 1-256.
- *
- * Return: 0 upon success, -ENOTSUPP on chips with GPU-local
- * throttling status (e.g., T124, T132) or -EINVAL if any of the
- * arguments are NULL.
- */
-static int soctherm_get_gpu_pskip_status(u8 *enabled, u8 *sw_override, u16 *m, u16 *n)
-{
-	u32 v;
-
-	if (!enabled || !m || !n || !sw_override)
-		return -EINVAL;
-
-	v = soctherm_readl(GPU_PSKIP_STATUS);
-	if (REG_GET(v, XPU_PSKIP_STATUS_ENABLED)) {
-		*enabled = 1;
-		*sw_override = REG_GET(v, XPU_PSKIP_STATUS_SW_OVERRIDE);
-		*m = REG_GET(v, XPU_PSKIP_STATUS_M) + 1;
-		*n = REG_GET(v, XPU_PSKIP_STATUS_N) + 1;
-	} else {
-		*enabled = 0;
-	}
-
-	return 0;
-}
-
 #ifdef CONFIG_THERMAL
 /**
  * enforce_temp_range() - check and enforce temperature range [min, max]
@@ -1290,51 +1257,32 @@ static int soctherm_get_cpu_throt_state(u16 dividend, u16 divisor,
 }
 
 /**
- * soctherm_get_gpu_throt_state - read the current state of the GPU pulse skipper
- * @dividend: pulse skipper numerator value to test against (1-256)
- * @divisor: pulse skipper denominator value to test against (1-256)
- * @cur_state: ptr to the variable that the current throttle state is stored in
+ * soctherm_get_gpu_throt_state - read the GPU throttling state from HW
+ * throttling status registers and update the result to reflect the current
+ * throttled state of the system.
  *
- * Determine the current state of the GPU thermal throttling pulse
- * skipper, and if it's enabled and at its configured ending state,
- * set the appropriate 'enabled' bit in the variable pointed to by
- * @cur_state.  This works on T114 and T148 by comparing @dividend and
- * @divisor with the current state of the hardware - though note that
- * @dividend and @divisor must be the actual dividend and divisor
- * values.  That is, they must be in 1-256 range, not the 0-255 range used
- * by the hardware bitfields.
- *
- * Unfortunately, on T12x and T13x, the GPU manages its own thermal
- * throttling, and does not report its state to the SOC_THERM IP
- * block.  So on those chips, this function will return an error.
- *
- * Return: 0 upon success, -ENOTSUPP on T12x and T13x, or -EINVAL if
- * the arguments are invalid or out of range.
+ * @cur_state: ptr to hold the updated current state of GPU throttle action. this
+ * 	state is binary (throttled/not throttled), and doesn't reflect the actual
+ * 	throttle depth in effect.
  */
-static int soctherm_get_gpu_throt_state(u16 dividend, u16 divisor,
-					unsigned long *cur_state)
+static int soctherm_get_gpu_throt_state(unsigned long *cur_state)
 {
-	u16 m, n;
-	u8 enabled, sw_override;
-	int r;
+	int result, state, enabled;
+	u32 reg;
 
-	if (!cur_state || dividend == 0 || divisor == 0 ||
-	    dividend > 256 || divisor > 256)
+	if (!cur_state)
 		return -EINVAL;
 
-	r = soctherm_get_gpu_pskip_status(&enabled, &sw_override, &m, &n);
-	if (r) {
-		WARN_ON(1);
-		return r;
-	}
+	reg = soctherm_readl(GPU_PSKIP_STATUS);
+	enabled = REG_GET(reg, XPU_PSKIP_STATUS_ENABLED);
+	state = REG_GET(reg, GPU_PSKIP_STATUS_THROTTLE_DEPTH);
+	result = enabled ? (state ? (1 << THROTTLE_DEV_GPU) : 0) : 0;
 
 	if (!enabled)
-		return 0;
+		return -ENODEV;
 
-	*cur_state |= (m == dividend && n == divisor) ?
-		(1 << THROTTLE_DEV_GPU) : 0;
-
-	return r;
+	*cur_state |= result;
+	return 0;
 }
 
 /**
@@ -1352,20 +1300,14 @@ static int soctherm_get_gpu_throt_state(u16 dividend, u16 divisor,
 static int soctherm_hw_action_get_cur_state(struct thermal_cooling_device *cdev,
 					    unsigned long *cur_state)
 {
-	struct thermal_trip_info *trip_state = cdev->devdata;
+	char *type = (char *)cdev->devdata;
 	struct soctherm_throttle_dev *devs;
-	int i, r;
+	int i;
 
 	*cur_state = 0;
-	if (!trip_state)
-		return 0;
-
-	if (trip_state->trip_type != THERMAL_TRIP_HOT)
-		return 0;
 
 	for (i = THROTTLE_LIGHT; i <= THROTTLE_HEAVY; i++) {
-		if (!strnstr(trip_state->cdev_type, throt_names[i],
-			     THERMAL_NAME_LENGTH))
+		if (!strnstr(type, throt_names[i], THERMAL_NAME_LENGTH))
 			continue;
 
 		devs = &pp->throttle[i].devs[THROTTLE_DEV_CPU];
@@ -1375,33 +1317,8 @@ static int soctherm_hw_action_get_cur_state(struct thermal_cooling_device *cdev,
 						     cur_state);
 
 		devs = &pp->throttle[i].devs[THROTTLE_DEV_GPU];
-		if (devs->enable) {
-			r = soctherm_get_gpu_throt_state(devs->dividend + 1,
-							 devs->divisor + 1,
-							 cur_state);
-			/*
-			 * On some chips, the GPU thermal throttling
-			 * status isn't reported back to the SOC_THERM
-			 * hardware.  The ideal situation is for the
-			 * GPU driver to register its own cooling
-			 * device in that case; however, that code
-			 * isn't implemented AFAIK.  On those chips,
-			 * Diwakar's preferred approach is for the GPU
-			 * throttling status bit to follow the CPU
-			 * throttling status bit, since that's the
-			 * vendor- recommended thermal configuration.
-			 * Diwakar notes: On Tegra12x OC5 is a
-			 * reserved alarm. Hence GPU 'PSKIP' state
-			 * always shows ON. The real status register
-			 * 'NV_THERM_CLK_STATUS' can't be read safely
-			 * [from this code - pjw]. So we mirror the
-			 * CPU status.
-			 */
-			if (r == -ENOTSUPP)
-				if (*cur_state & (1 << THROTTLE_DEV_CPU))
-					*cur_state |= (1 << THROTTLE_DEV_GPU);
-		}
-
+		if (devs->enable)
+			soctherm_get_gpu_throt_state(cur_state);
 	}
 
 	return 0;
@@ -1789,7 +1706,7 @@ static void soctherm_hot_cdev_register(int i, int trip)
 			soctherm_hw_heavy_cdev =
 				thermal_cooling_device_register(
 					therm->trips[trip].cdev_type,
-					&therm->trips[trip],
+					therm->trips[trip].cdev_type,
 					&soctherm_hw_action_ops);
 			continue;
 		}
@@ -1802,7 +1719,7 @@ static void soctherm_hot_cdev_register(int i, int trip)
 			soctherm_hw_light_cdev =
 				thermal_cooling_device_register(
 					therm->trips[trip].cdev_type,
-					&therm->trips[trip],
+					therm->trips[trip].cdev_type,
 					&soctherm_hw_action_ops);
 			continue;
 		}
@@ -1847,7 +1764,7 @@ static int soctherm_thermal_sys_init(void)
 				soctherm_hw_critical_cdev =
 					thermal_cooling_device_register(
 						therm->trips[j].cdev_type,
-						&therm->trips[j],
+						therm->trips[j].cdev_type,
 						&soctherm_hw_action_ops);
 				break;
 
@@ -1902,7 +1819,7 @@ static int soctherm_thermal_sys_init(void)
  */
 static irqreturn_t soctherm_thermal_thread_func(int irq, void *arg)
 {
-	u32 st, ex = 0, cp = 0, gp = 0, pl = 0;
+	u32 st, ex = 0, cp = 0, gp = 0, pl = 0, me = 0;
 
 	st = soctherm_readl(TH_INTR_STATUS);
 
@@ -1919,6 +1836,10 @@ static irqreturn_t soctherm_thermal_thread_func(int irq, void *arg)
 	pl |= REG_GET_BIT(st, TH_INTR_POS_PU0);
 	ex |= pl;
 
+	me |= REG_GET_BIT(st, TH_INTR_POS_MD0);
+	me |= REG_GET_BIT(st, TH_INTR_POS_MU0);
+	ex |= me;
+
 	if (ex) {
 		soctherm_writel(ex, TH_INTR_STATUS);
 		st &= ~ex;
@@ -1928,12 +1849,11 @@ static irqreturn_t soctherm_thermal_thread_func(int irq, void *arg)
 			soctherm_update_zone(THERM_GPU);
 		if (pl)
 			soctherm_update_zone(THERM_PLL);
+		if (me)
+			soctherm_update_zone(THERM_MEM);
 	}
 
 	/* deliberately ignore expected interrupts NOT handled in SW */
-	ex |= REG_GET_BIT(st, TH_INTR_POS_MD0);
-	ex |= REG_GET_BIT(st, TH_INTR_POS_MU0);
-
 	ex |= REG_GET_BIT(st, TH_INTR_POS_CD1);
 	ex |= REG_GET_BIT(st, TH_INTR_POS_CU1);
 	ex |= REG_GET_BIT(st, TH_INTR_POS_CD2);
@@ -2497,7 +2417,7 @@ static void soctherm_tsense_program(enum soctherm_sense sensor,
 		return;
 
 	therm = &pp->therm[tz_id];
-	if (!therm->tz) {
+	if (!(therm->tz || therm->zone_enable)) {
 		pr_info("soctherm: skipping sensor %d programming\n", sensor);
 		return;
 	}
@@ -2728,14 +2648,15 @@ static int zone_invalidate(int zn, bool control)
 }
 
 /**
- * soctherm_adjust_cpu_zone() - Adjusts the soctherm CPU zone
- * @therm:	soctherm_therm_id specifying the sensor group to adjust
+ * soctherm_adjust_zone() - Adjusts the soctherm CPU/GPU/MEM zone
+ * @tz:	soctherm_therm_id specifying the sensor group to adjust
  *
  * Changes SOC_THERM registers based on the CPU and PLLX temperatures.
  * Programs hotspot offsets per CPU or GPU and PLLX difference of temperature,
  * stops or starts CPUn TSOSCs, and programs hotspot offsets per configuration.
  * This function is called in soctherm_init_platform_data(),
- * tegra_soctherm_adjust_cpu_zone() and tegra_soctherm_adjust_core_zone().
+ * tegra_soctherm_adjust_cpu_zone() and tegra_soctherm_adjust_mem_zone()
+ * tegra_soctherm_adjust_gpu_zone().
  */
 static void soctherm_adjust_zone(int tz)
 {
@@ -2751,11 +2672,11 @@ static void soctherm_adjust_zone(int tz)
 		return;
 
 	if (tz == THERM_CPU)
-		low_voltage = vdd_cpu_low_voltage;
+		low_voltage = cpu_tsense_low_voltage;
 	else if (tz == THERM_GPU)
-		low_voltage = vdd_core_low_voltage;
+		low_voltage = gpu_tsense_low_voltage;
 	else if (tz == THERM_MEM)
-		low_voltage = vdd_core_low_voltage;
+		low_voltage = mem_tsense_low_voltage;
 	else
 		return;
 
@@ -2895,12 +2816,13 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 	struct soctherm_therm *therm;
 	int i, j;
 	long rem;
-	u32 r, en_hw_off_reg, hw_off_max_reg;
+	u32 r, en_hw_off_reg, hw_off_max_reg, hw_off_min_reg;
 
 #ifdef CONFIG_THERMAL
 	struct soctherm_sensor_common_params *scp = &pp->sensor_params.scp;
 	int k;
 	long gsh = MAX_HIGH_TEMP;
+	int num_thermal_trip_critical = 0;
 
 	/* program pdiv register */
 	r = soctherm_readl(TS_PDIV);
@@ -2909,16 +2831,6 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 	r = REG_SET(r, TS_PDIV_MEM, scp->pdiv);
 	r = REG_SET(r, TS_PDIV_PLLX, scp->pdiv);
 	soctherm_writel(r, TS_PDIV);
-
-	/* Thermal Sensing programming */
-	if (soctherm_fuse_read_calib_base() < 0)
-		return -EINVAL;
-
-	for (i = 0; i < TSENSE_SIZE; i++) {
-		soctherm_tsense_program(i, scp);
-		if (soctherm_fuse_read_tsensor(i) < 0)
-			return -EINVAL;
-	}
 #endif
 
 	/* Sanitize therm trips */
@@ -2938,7 +2850,7 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 		}
 	}
 
-	r = en_hw_off_reg = hw_off_max_reg = 0;
+	r = en_hw_off_reg = hw_off_max_reg = hw_off_min_reg = 0;
 	/* Program hotspot offsets per THERM */
 	r = REG_SET(r, TS_HOTSPOT_OFF_CPU,
 		    plat->therm[THERM_CPU].hotspot_offset / 1000);
@@ -2961,27 +2873,37 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 		en_hw_off_reg = REG_SET(en_hw_off_reg,
 				TH_TS_EN_HW_PLLX_OFFSET_CPU, 1);
 		hw_off_max_reg = REG_SET(
-				hw_off_max_reg, TH_TS_PLLX_MAX_CPU_OFFSET,
-				plat->therm[THERM_CPU].pllx_offset_max / 1000);
+				hw_off_max_reg, TH_TS_PLLX_CPU_OFFSET,
+				plat->therm[THERM_CPU].pllx_offset_max / 500);
+		hw_off_min_reg = REG_SET(
+				hw_off_min_reg, TH_TS_PLLX_CPU_OFFSET,
+				plat->therm[THERM_CPU].pllx_offset_min / 500);
 	}
 
 	if (plat->therm[THERM_GPU].en_hw_pllx_offsetting) {
 		en_hw_off_reg = REG_SET(en_hw_off_reg,
 				TH_TS_EN_HW_PLLX_OFFSET_GPU, 1);
 		hw_off_max_reg = REG_SET(
-				hw_off_max_reg, TH_TS_PLLX_MAX_GPU_OFFSET,
-				plat->therm[THERM_GPU].pllx_offset_max / 1000);
+				hw_off_max_reg, TH_TS_PLLX_GPU_OFFSET,
+				plat->therm[THERM_GPU].pllx_offset_max / 500);
+		hw_off_min_reg = REG_SET(
+				hw_off_min_reg, TH_TS_PLLX_GPU_OFFSET,
+				plat->therm[THERM_CPU].pllx_offset_min / 500);
 	}
 
 	if (plat->therm[THERM_MEM].en_hw_pllx_offsetting) {
 		en_hw_off_reg = REG_SET(en_hw_off_reg,
 				TH_TS_EN_HW_PLLX_OFFSET_MEM, 1);
 		hw_off_max_reg = REG_SET(
-				hw_off_max_reg, TH_TS_PLLX_MAX_MEM_OFFSET,
-				plat->therm[THERM_MEM].pllx_offset_max / 1000);
+				hw_off_max_reg, TH_TS_PLLX_MEM_OFFSET,
+				plat->therm[THERM_MEM].pllx_offset_max / 500);
+		hw_off_min_reg = REG_SET(
+				hw_off_min_reg, TH_TS_PLLX_MEM_OFFSET,
+				plat->therm[THERM_CPU].pllx_offset_min / 500);
 	}
 
 	soctherm_writel(hw_off_max_reg, TH_TS_PLLX_OFFSET_MAX);
+	soctherm_writel(hw_off_min_reg, TH_TS_PLLX_OFFSET_MIN);
 	soctherm_writel(en_hw_off_reg, TH_TS_PLLX_OFFSETTING);
 
 	/* configure low, med and heavy levels for CCROC NV_THERM */
@@ -3054,12 +2976,11 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 	/* Thermtrip */
 	for (i = 0; i < THERM_SIZE; i++) {
 		therm = &plat->therm[i];
-		if (!therm->zone_enable)
-			continue;
 
 		for (j = 0; j < therm->num_trips; j++) {
 			if (therm->trips[j].trip_type != THERMAL_TRIP_CRITICAL)
 				continue;
+			num_thermal_trip_critical++;
 			if (i == THERM_GPU) {
 				gsh = therm->trips[j].trip_temp;
 			} else if ((i == THERM_MEM) &&
@@ -3070,7 +2991,27 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 			}
 			prog_hw_shutdown(therm->trips[j].trip_temp, i);
 		}
+
+		if (therm->tz) {
+			prog_therm_thresholds(therm);
+			pr_info("soctherm: prog thresholds\n");
+		} else
+			pr_info("soctherm: tz:%d not found, skip thresh prog\n",
+					i); /* continue */
 	}
+
+	/* Thermal Sensing programming */
+	if (soctherm_fuse_read_calib_base() < 0)
+		return -EINVAL;
+
+	for (i = 0; i < TSENSE_SIZE; i++) {
+		soctherm_fuse_read_tsensor(i);
+		soctherm_tsense_program(i, scp);
+	}
+
+	/* Disable H/W shutdown if there is no critical thermal trip. */
+	if (num_thermal_trip_critical == 0)
+		prog_hw_shutdown(MAX_HIGH_TEMP, THERM_NONE);
 
 	soctherm_adjust_zone(THERM_CPU);
 	soctherm_adjust_zone(THERM_GPU);
@@ -3130,15 +3071,18 @@ static int soctherm_suspend(struct device *dev)
  */
 static void soctherm_resume_locked(void)
 {
+	int ret = -ENODEV;
+
 	if (soctherm_suspended) {
 		/* soctherm_clk_enable(true);*/
 		soctherm_suspended = false;
-		soctherm_init_platform_data(pp);
+		ret = soctherm_init_platform_data(pp);
 		soctherm_init_platform_done = true;
 		soctherm_update();
 		enable_irq(INT_THERMAL);
 		enable_irq(INT_EDP);
 	}
+	pr_info("soctherm: resume status:%d\n", ret);
 }
 
 /**
@@ -3415,48 +3359,6 @@ static int soctherm_oc_int_init(int irq_base, int num_irqs,
 	return 0;
 }
 
-static int core_rail_regulator_notifier_cb(
-	struct notifier_block *nb, unsigned long event, void *v)
-{
-	int uv = (int)((long)v);
-	int rv = NOTIFY_DONE;
-	int core_vmin_limit_uv;
-
-	if (IS_T12X || IS_T21X) {
-		core_vmin_limit_uv = 900000;
-		if (event & REGULATOR_EVENT_OUT_POSTCHANGE) {
-			if (uv >= core_vmin_limit_uv) {
-				tegra_soctherm_adjust_core_zone(true);
-				rv = NOTIFY_OK;
-			}
-		} else if (event & REGULATOR_EVENT_OUT_PRECHANGE) {
-			if (uv < core_vmin_limit_uv) {
-				tegra_soctherm_adjust_core_zone(false);
-				rv = NOTIFY_OK;
-			}
-		}
-	}
-	return rv;
-}
-
-static int __init soctherm_core_rail_notify_init(void)
-{
-	int ret;
-	static struct notifier_block vmin_condition_nb;
-
-	vmin_condition_nb.notifier_call = core_rail_regulator_notifier_cb;
-	ret = tegra_dvfs_rail_register_notifier(tegra_core_rail,
-						&vmin_condition_nb);
-	if (ret) {
-		pr_err("%s: Failed to register core rail notifier\n",
-		       __func__);
-		return ret;
-	}
-
-	return 0;
-}
-late_initcall_sync(soctherm_core_rail_notify_init);
-
 /**
  * tegra_soctherm_adjust_cpu_zone() - Adjusts the CPU zone of Tegra soctherm
  * @high_voltage_range:		Flag indicating whether or not the system is
@@ -3470,23 +3372,112 @@ late_initcall_sync(soctherm_core_rail_notify_init);
 void tegra_soctherm_adjust_cpu_zone(bool high_voltage_range)
 {
 #ifdef CONFIG_THERMAL
-	if (!vdd_cpu_low_voltage != high_voltage_range) {
-		vdd_cpu_low_voltage = !high_voltage_range;
+	if (!cpu_tsense_low_voltage != high_voltage_range) {
+		cpu_tsense_low_voltage = !high_voltage_range;
 		soctherm_adjust_zone(THERM_CPU);
 	}
 #endif
 }
 
-void tegra_soctherm_adjust_core_zone(bool high_voltage_range)
+static void tegra_soctherm_adjust_mem_zone(bool high_voltage_range)
 {
 #ifdef CONFIG_THERMAL
-	if (!vdd_core_low_voltage != high_voltage_range) {
-		vdd_core_low_voltage = !high_voltage_range;
-		soctherm_adjust_zone(THERM_GPU);
+	if (!mem_tsense_low_voltage != high_voltage_range) {
+		mem_tsense_low_voltage = !high_voltage_range;
 		soctherm_adjust_zone(THERM_MEM);
 	}
 #endif
 }
+
+static void tegra_soctherm_adjust_gpu_zone(bool high_voltage_range)
+{
+#ifdef CONFIG_THERMAL
+	if (!gpu_tsense_low_voltage != high_voltage_range) {
+		gpu_tsense_low_voltage = !high_voltage_range;
+		soctherm_adjust_zone(THERM_GPU);
+	}
+#endif
+}
+
+static int core_rail_regulator_notifier_cb(
+	struct notifier_block *nb, unsigned long event, void *v)
+{
+	int uv = (int)((long)v);
+	int rv = NOTIFY_DONE;
+
+	if (!(IS_T12X || IS_T21X))
+		return NOTIFY_STOP;
+
+	if (event & REGULATOR_EVENT_OUT_POSTCHANGE) {
+		if (uv >= CORE_TSENSE_VMIN_UV) {
+			tegra_soctherm_adjust_mem_zone(true);
+			if (IS_T12X)
+				tegra_soctherm_adjust_gpu_zone(true);
+			rv = NOTIFY_OK;
+		}
+	} else if (event & REGULATOR_EVENT_OUT_PRECHANGE) {
+		if (uv < CORE_TSENSE_VMIN_UV) {
+			tegra_soctherm_adjust_mem_zone(false);
+			if (IS_T12X)
+				tegra_soctherm_adjust_gpu_zone(false);
+			rv = NOTIFY_OK;
+		}
+	}
+	return rv;
+}
+
+static int gpu_rail_regulator_notifier_cb(
+	struct notifier_block *nb, unsigned long event, void *v)
+{
+	int uv = (int)((long)v);
+	int rv = NOTIFY_DONE;
+
+	if (!IS_T21X)
+		return NOTIFY_STOP;
+
+	if (event & REGULATOR_EVENT_OUT_POSTCHANGE) {
+		if (uv >= T21X_GPU_TSENSE_VMIN_UV) {
+			tegra_soctherm_adjust_gpu_zone(true);
+			rv = NOTIFY_OK;
+		}
+	} else if (event & REGULATOR_EVENT_OUT_PRECHANGE) {
+		if (uv < T21X_GPU_TSENSE_VMIN_UV) {
+			tegra_soctherm_adjust_gpu_zone(false);
+			rv = NOTIFY_OK;
+		}
+	}
+	return rv;
+}
+
+static int __init soctherm_rail_notify_init(void)
+{
+	int ret;
+	static struct notifier_block core_vmin_condition_nb;
+	static struct notifier_block gpu_vmin_nb;
+
+	core_vmin_condition_nb.notifier_call = core_rail_regulator_notifier_cb;
+	ret = tegra_dvfs_rail_register_notifier(tegra_core_rail,
+						&core_vmin_condition_nb);
+	if (ret) {
+		pr_err("%s: Failed to register core rail notifier\n",
+				__func__);
+		return ret;
+	}
+
+	if (IS_T21X) {
+		gpu_vmin_nb.notifier_call = gpu_rail_regulator_notifier_cb;
+		ret = tegra_dvfs_rail_register_notifier(tegra_gpu_rail,
+						&gpu_vmin_nb);
+		if (ret) {
+			pr_err("%s: Failed to register gpu rail notifier\n",
+				__func__);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+late_initcall_sync(soctherm_rail_notify_init);
 
 /**
  * tegra_soctherm_gpu_tsens_invalidate() - Allow external clients (PG driver
@@ -4218,11 +4209,11 @@ static int tempoverride_set(void *data, u64 val)
 	return 0;
 }
 
-DEFINE_SIMPLE_ATTRIBUTE(convert_fops, convert_get, convert_set, "%llu\n");
-DEFINE_SIMPLE_ATTRIBUTE(cputemp_fops, cputemp_get, cputemp_set, "%llu\n");
-DEFINE_SIMPLE_ATTRIBUTE(gputemp_fops, gputemp_get, gputemp_set, "%llu\n");
-DEFINE_SIMPLE_ATTRIBUTE(memtemp_fops, memtemp_get, memtemp_set, "%llu\n");
-DEFINE_SIMPLE_ATTRIBUTE(plltemp_fops, plltemp_get, plltemp_set, "%llu\n");
+DEFINE_SIMPLE_ATTRIBUTE(convert_fops, convert_get, convert_set, "%lld\n");
+DEFINE_SIMPLE_ATTRIBUTE(cputemp_fops, cputemp_get, cputemp_set, "%lld\n");
+DEFINE_SIMPLE_ATTRIBUTE(gputemp_fops, gputemp_get, gputemp_set, "%lld\n");
+DEFINE_SIMPLE_ATTRIBUTE(memtemp_fops, memtemp_get, memtemp_set, "%lld\n");
+DEFINE_SIMPLE_ATTRIBUTE(plltemp_fops, plltemp_get, plltemp_set, "%lld\n");
 DEFINE_SIMPLE_ATTRIBUTE(tempoverride_fops, tempoverride_get, tempoverride_set,
 			"%llu\n");
 
@@ -4529,12 +4520,15 @@ static void soctherm_thermctl_parse(struct platform_device *pdev)
 				"enable-hw-pllx-offsetting");
 		if (pp->therm[id].en_hw_pllx_offsetting) {
 			/*
-			 * pllx-offset-max is an optional property in DT
+			 * pllx-offset-max/min is an optional property in DT
 			 */
 			if (!of_property_read_u32(np, "pllx-offset-max", &val))
 				pp->therm[id].pllx_offset_max = val;
 			else
 				pp->therm[id].pllx_offset_max = PLLX_OFFSET_MAX;
+
+			if (!of_property_read_u32(np, "pllx-offset-min", &val))
+				pp->therm[id].pllx_offset_min = val;
 		}
 	}
 }
@@ -4562,7 +4556,7 @@ static void soctherm_throttlectl_parse(struct platform_device *pdev)
 	struct thermal_cooling_device *cdev, **cdevp;
 	struct soctherm_throttle *throt;
 	struct soctherm_throttle_dev *dev_cpu, *dev_gpu;
-	const char *typ, *mod, *lvl;
+	const char *typ, *mod, *lvl, *data;
 
 	/* parse type 'throttlectl' for HW thermal throttle and OC alarms */
 	while ((np = of_get_next_child(pdev->dev.of_node, np))) {
@@ -4597,15 +4591,18 @@ static void soctherm_throttlectl_parse(struct platform_device *pdev)
 			if (strnstr(typ, "shutdown",
 						THERMAL_NAME_LENGTH)) {
 				cdevp = &soctherm_hw_critical_cdev;
+				data = "shutdown";
 				/* throt = &pp->throttle[none]; */
 			} else if (strnstr(typ, "heavy",
 						THERMAL_NAME_LENGTH)) {
 				cdevp = &soctherm_hw_heavy_cdev;
 				throt = &pp->throttle[THROTTLE_HEAVY];
+				data = throt_names[THROTTLE_HEAVY];
 			} else if (strnstr(typ, "light",
 						THERMAL_NAME_LENGTH)) {
 				cdevp = &soctherm_hw_light_cdev;
 				throt = &pp->throttle[THROTTLE_LIGHT];
+				data = throt_names[THROTTLE_LIGHT];
 			}
 			if (!cdevp) {
 				dev_err(&pdev->dev,
@@ -4617,7 +4614,7 @@ static void soctherm_throttlectl_parse(struct platform_device *pdev)
 #ifdef CONFIG_THERMAL
 			cdev = thermal_cooling_device_register(
 						(char *)typ,
-						NULL,
+						(void *)data,
 						&soctherm_hw_action_ops);
 			if (IS_ERR_OR_NULL(cdev)) {
 				dev_err(&pdev->dev,

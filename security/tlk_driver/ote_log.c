@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 NVIDIA Corporation. All rights reserved.
+ * Copyright (c) 2013-2014 NVIDIA Corporation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,7 +27,6 @@
 #include <asm/page.h>
 #include <linux/dma-mapping.h>
 #include <linux/string.h>
-#include <linux/of.h>
 
 #include "ote_protocol.h"
 
@@ -185,9 +184,6 @@ static int __init ote_logger_init(void)
 		return ret;
 	} else if (ret == -ENOTSUPP) {
 		/* Node is present, but logger is disabled */
-	if (of_machine_is_compatible("nvidia,foster-e"))
-		smc_args[0] = TE_SMC_INIT_LOGGER_LEGACY;
-	else
 		smc_args[0] = TE_SMC_INIT_LOGGER;
 		smc_args[1] = 0;
 		send_smc(smc_args[0], smc_args[1], 0);
@@ -198,10 +194,7 @@ static int __init ote_logger_init(void)
 	if (circ_buf_init(&cb) != 0)
 		return -1;
 
-	if (of_machine_is_compatible("nvidia,foster-e"))
-		smc_args[0] = TE_SMC_INIT_LOGGER_LEGACY;
-	else
-		smc_args[0] = TE_SMC_INIT_LOGGER;
+	smc_args[0] = TE_SMC_INIT_LOGGER;
 	smc_args[1] = (uintptr_t)cb;
 
 	/* enable logging only if secure firmware supports it */

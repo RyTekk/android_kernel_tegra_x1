@@ -20,7 +20,9 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/hrtimer.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
@@ -722,16 +724,18 @@ static int bpmp_mem_init(void)
 
 static int bpmp_probe(struct platform_device *pdev)
 {
-	int r;
+	int r = 0;
 
 	device = &pdev->dev;
 
-	r = bpmp_mem_init();
+	r = bpmp_linear_map_init();
+	r = r ?: bpmp_mem_init();
 	r = r ?: bpmp_clk_init(pdev);
 	r = r ?: bpmp_init_debug(pdev);
 	r = r ?: bpmp_init_modules(pdev);
-	r = r ?: bpmp_mail_init(pdev);
+	r = r ?: bpmp_mail_init();
 	r = r ?: bpmp_get_fwtag();
+	r = r ?: of_platform_populate(device->of_node, NULL, NULL, device);
 
 	return r;
 }

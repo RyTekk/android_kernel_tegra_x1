@@ -25,6 +25,11 @@ DHDCFLAGS += -DCUSTOM_KEEP_ALIVE_SETTING=28000
 
 DHDCFLAGS += -DVSDB
 
+# Print 802.1X packets
+DHDCFLAGS += -DDHD_8021X_DUMP
+# Print DHCP packets
+DHDCFLAGS += -DDHD_DHCP_DUMP
+
 # For p2p connection issue
 DHDCFLAGS += -DWL_SCB_TIMEOUT=10
 
@@ -50,6 +55,10 @@ DHDCFLAGS += -DSUPPORT_PM2_ONLY
 # For special PNO Event keep wake lock for 10sec
 DHDCFLAGS += -DCUSTOM_PNO_EVENT_LOCK_xTIME=10
 DHDCFLAGS += -DMIRACAST_AMPDU_SIZE=8
+
+# GScan and Vendor Ext support
+DHDCFLAGS += -DWL_VENDOR_EXT_SUPPORT
+DHDCFLAGS += -DGSCAN_SUPPORT
 
 # Early suspend
 DHDCFLAGS += -DDHD_USE_EARLYSUSPEND
@@ -178,7 +187,7 @@ ifneq ($(CONFIG_BCM4354),)
   DHDCFLAGS += -DCUSTOM_SDIO_F2_BLKSIZE=256
 
 # Make same as proven good value from other platform
-  DHDCFLAGS += -DCUSTOM_DPC_PRIO_SETTING=45
+  DHDCFLAGS += -DCUSTOM_DPC_PRIO_SETTING=99
 
 # Define on/off delay
   DHDCFLAGS += -DWIFI_TURNON_DELAY=200
@@ -227,7 +236,7 @@ endif
 
 #EXTRA_LDFLAGS += --strip-debug
 
-EXTRA_CFLAGS += $(DHDCFLAGS) -DDHD_DEBUG
+EXTRA_CFLAGS += $(DHDCFLAGS) -DDHD_DEBUG -include dhd_nv_dbg.h
 EXTRA_CFLAGS += -DSRCBASE=\"$(src)\"
 EXTRA_CFLAGS += -I$(src)/include/ -I$(src)/
 KBUILD_CFLAGS += -I$(LINUXDIR)/include -I$(shell pwd)
@@ -237,7 +246,7 @@ DHDOFILES := dhd_pno.o dhd_common.o dhd_ip.o dhd_custom_gpio.o \
 	bcmutils.o bcmwifi_channels.o hndpmu.o linux_osl.o sbutils.o siutils.o \
 	wl_android.o wl_cfg80211.o wl_cfgp2p.o wl_cfg_btcoex.o wldev_common.o wl_linux_mon.o  \
 	dhd_linux_platdev.o dhd_pno.o dhd_linux_wq.o wl_cfg_btcoex.o \
-	hnd_pktq.o hnd_pktpool.o
+	hnd_pktq.o hnd_pktpool.o wl_cfgvendor.o
 
 ifneq ($(CONFIG_BCMDHD_SDIO),)
   DHDOFILES += bcmsdh.o bcmsdh_linux.o bcmsdh_sdmmc.o bcmsdh_sdmmc_linux.o
@@ -256,6 +265,7 @@ ifneq ($(CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA),)
   DHDOFILES += dhd_custom_sysfs_tegra_scan.o
   DHDOFILES += dhd_custom_sysfs_tegra_stat.o
   DHDOFILES += dhd_custom_sysfs_tegra_tcpdump.o
+  DHDOFILES += dhd_custom_sysfs_tegra_rf_test.o
 endif
 
 ifneq ($(CONFIG_BCMDHD_CUSTOM_NET_PERF_TEGRA),)

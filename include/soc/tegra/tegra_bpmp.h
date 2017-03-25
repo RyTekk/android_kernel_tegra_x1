@@ -38,6 +38,7 @@
 #define MRQ_ENABLE_SUSPEND	17
 #define MRQ_PASR_MASK		18
 #define MRQ_DEBUGFS		19
+#define MRQ_THERMAL		27
 
 /* Tegra PM states as known to BPMP */
 #define TEGRA_PM_CC1	9
@@ -52,14 +53,9 @@
 
 typedef void (*bpmp_mrq_handler)(int mrq, void *data, int ch);
 
-#if defined(CONFIG_TEGRA_BPMP) && defined(CONFIG_ARCH_TEGRA_21x_SOC)
-void tegra_bpmp_get_smmu_data(phys_addr_t *start, size_t *size);
-#else
-static inline void tegra_bpmp_get_smmu_data(phys_addr_t *start, size_t *size) {}
-#endif
-
 #ifdef CONFIG_TEGRA_BPMP
 void tegra_bpmp_init_early(void);
+int tegra_bpmp_running(void);
 void tegra_bpmp_trace_printk(void);
 int tegra_bpmp_send(int mrq, void *data, int sz);
 int tegra_bpmp_send_receive_atomic(int mrq, void *ob_data, int ob_sz,
@@ -72,10 +68,12 @@ int tegra_bpmp_request_module_mrq(uint32_t module_base,
 		bpmp_mrq_handler handler, void *data);
 void tegra_bpmp_cancel_module_mrq(uint32_t module_base);
 uint32_t tegra_bpmp_mail_readl(int ch, int offset);
+int tegra_bpmp_read_data(unsigned int ch, void *data, size_t sz);
 void tegra_bpmp_mail_return(int ch, int code, int v);
 void tegra_bpmp_mail_return_data(int ch, int code, void *data, int sz);
 #else
 static inline void tegra_bpmp_init_early(void) {}
+static inline int tegra_bpmp_running(void) { return 0; }
 static inline void tegra_bpmp_trace_printk(void) {}
 static inline int tegra_bpmp_send(int mrq, void *data, int sz)
 { return -ENODEV; }
@@ -90,6 +88,8 @@ static inline int tegra_bpmp_request_module_mrq(uint32_t module_base,
 		bpmp_mrq_handler handler, void *data) { return -ENODEV; }
 static inline void tegra_bpmp_cancel_module_mrq(uint32_t module_base) {}
 static inline uint32_t tegra_bpmp_mail_readl(int ch, int offset) { return 0; }
+static inline int tegra_bpmp_read_data(unsigned int ch, void *data, size_t sz)
+{ return -ENODEV; }
 static inline void tegra_bpmp_mail_return(int ch, int code, int v) {}
 static inline void tegra_bpmp_mail_return_data(int ch, int code,
 		void *data, int sz) { }

@@ -52,6 +52,13 @@ extern void tlk_fiq_glue_aarch64(void);
 uint32_t send_smc(uint32_t arg0, uintptr_t arg1, uintptr_t arg2);
 uint32_t _tlk_generic_smc(uint32_t arg0, uintptr_t arg1, uintptr_t arg2);
 void tlk_irq_handler(void);
+struct te_oper_param *te_get_free_params(struct tlk_device *dev,
+	unsigned int nparams);
+void te_put_free_params(struct tlk_device *dev,
+	struct te_oper_param *params, uint32_t nparams);
+struct te_cmd_req_desc *te_get_free_cmd_desc(struct tlk_device *dev);
+void te_put_used_cmd_desc(struct tlk_device *dev,
+	struct te_cmd_req_desc *cmd_desc);
 
 /* errors returned by secure world in reponse to SMC calls */
 enum {
@@ -113,19 +120,6 @@ struct tlk_context {
 };
 
 enum {
-	/* Trusted Application Calls (legacy) */
-	TE_SMC_OPEN_SESSION_LEGACY		= 0x30000001,
-	TE_SMC_CLOSE_SESSION_LEGACY		= 0x30000002,
-	TE_SMC_LAUNCH_OPERATION_LEGACY		= 0x30000003,
-	TE_SMC_TA_EVENT_LEGACY			= 0x30000004,
-
-	/* Trusted OS calls (legacy) */
-	TE_SMC_REGISTER_REQ_BUF_LEGACY		= 0x32000002,
-	TE_SMC_INIT_LOGGER_LEGACY		= 0x32000007,
-	TE_SMC_SS_REQ_COMPLETE_LEGACY		= 0x32000009,
-	TE_SMC_SS_REGISTER_HANDLER_LEGACY	= 0x32000010,
-	TE_SMC_RESTART_LEGACY			= 0x3C000000,
-
 	/* Trusted Application Calls */
 	TE_SMC_OPEN_SESSION		= 0x70000001,
 	TE_SMC_CLOSE_SESSION		= 0x70000002,
@@ -135,7 +129,6 @@ enum {
 	/* Trusted OS (64-bit) calls */
 	TE_SMC_REGISTER_REQ_BUF		= 0x72000001,
 	TE_SMC_INIT_LOGGER		= 0x72000002,
-	TE_SMC_SS_REGISTER_HANDLER	= 0x72000003,
 	TE_SMC_RESTART			= 0x72000100,
 
 	/* SIP (SOC specific) calls.  */
@@ -155,6 +148,11 @@ enum {
 	TE_PARAM_TYPE_PERSIST_MEM_RW	= 0x101,
 };
 
+enum {
+       TE_MEM_TYPE_NS_USER	= 0x0,
+       TE_MEM_TYPE_NS_KERNEL	= 0x1,
+};
+
 struct te_oper_param {
 	uint32_t index;
 	uint32_t type;
@@ -165,6 +163,7 @@ struct te_oper_param {
 		struct {
 			uint64_t base;
 			uint32_t len;
+			uint32_t type;
 		} Mem;
 	} u;
 	uint64_t next_ptr_user;
@@ -246,14 +245,6 @@ void te_close_session(struct te_closesession *cmd,
 void te_launch_operation(struct te_launchop *cmd,
 	struct te_request *request,
 	struct tlk_context *context);
-
-/* defines max space available for secure storage requests */
-#define SS_OP_MAX_DATA_SIZE	0x4000
-
-struct te_ss_op {
-	uint32_t	req_size;
-	uint8_t		data[SS_OP_MAX_DATA_SIZE];
-};
 
 enum ta_event_id {
 	TA_EVENT_RESTORE_KEYS = 0,

@@ -13,7 +13,7 @@
  */
 
 /*
- * DVFS overrides for T210 T670D UCM1 (4/4/16) personality in commercial
+ * DVFS overrides for T210 sku 0x7/0x17 UCM1 (4/4/16) personality in commercial
  * temperature range.
  *
  * Recommended to copy the contents of this file to final .dts file for

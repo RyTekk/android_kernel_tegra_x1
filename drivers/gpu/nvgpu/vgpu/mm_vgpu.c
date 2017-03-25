@@ -34,9 +34,12 @@ static int vgpu_init_mm_setup_sw(struct gk20a *g)
 	mm->g = g;
 
 	/*TBD: make channel vm size configurable */
-	mm->channel.size = 1ULL << NV_GMMU_VA_RANGE;
+	mm->channel.user_size = NV_MM_DEFAULT_USER_SIZE;
+	mm->channel.kernel_size = NV_MM_DEFAULT_KERNEL_SIZE;
 
-	gk20a_dbg_info("channel vm size: %dMB", (int)(mm->channel.size >> 20));
+	gk20a_dbg_info("channel vm size: user %dMB  kernel %dMB",
+		       (int)(mm->channel.user_size >> 20),
+		       (int)(mm->channel.kernel_size >> 20));
 
 	/* gk20a_init_gpu_characteristics expects this to be populated */
 	vm->big_page_size = big_page_size;
@@ -66,7 +69,9 @@ static u64 vgpu_locked_gmmu_map(struct vm_gk20a *vm,
 				u32 flags,
 				int rw_flag,
 				bool clear_ctags,
-				bool sparse)
+				bool sparse,
+				bool priv,
+				struct vm_gk20a_mapping_batch *batch)
 {
 	int err = 0;
 	struct device *d = dev_from_vm(vm);
@@ -75,7 +80,7 @@ static u64 vgpu_locked_gmmu_map(struct vm_gk20a *vm,
 	struct dma_iommu_mapping *mapping = to_dma_iommu_mapping(d);
 	struct tegra_vgpu_cmd_msg msg;
 	struct tegra_vgpu_as_map_params *p = &msg.params.as_map;
-	u64 addr = gk20a_mm_iova_addr(g, sgt->sgl);
+	u64 addr = g->ops.mm.get_iova_addr(g, sgt->sgl, flags);
 	u8 prot;
 
 	gk20a_dbg_fn("");
@@ -130,7 +135,8 @@ static void vgpu_locked_gmmu_unmap(struct vm_gk20a *vm,
 				int pgsz_idx,
 				bool va_allocated,
 				int rw_flag,
-				bool sparse)
+				bool sparse,
+				struct vm_gk20a_mapping_batch *batch)
 {
 	struct gk20a *g = gk20a_from_vm(vm);
 	struct gk20a_platform *platform = gk20a_get_platform(g->dev);
@@ -182,7 +188,7 @@ static void vgpu_vm_remove_support(struct vm_gk20a *vm)
 	while (node) {
 		mapped_buffer =
 			container_of(node, struct mapped_buffer_node, node);
-		gk20a_vm_unmap_locked(mapped_buffer);
+		gk20a_vm_unmap_locked(mapped_buffer, NULL);
 		node = rb_first(&vm->mapped_buffers);
 	}
 
@@ -213,7 +219,7 @@ u64 vgpu_bar1_map(struct gk20a *g, struct sg_table **sgt, u64 size)
 	struct gk20a_platform *platform = gk20a_get_platform(g->dev);
 	struct dma_iommu_mapping *mapping =
 			to_dma_iommu_mapping(dev_from_gk20a(g));
-	u64 addr = gk20a_mm_iova_addr(g, (*sgt)->sgl);
+	u64 addr = g->ops.mm.get_iova_addr(g, (*sgt)->sgl, 0);
 	struct tegra_vgpu_cmd_msg msg;
 	struct tegra_vgpu_as_map_params *p = &msg.params.as_map;
 	int err;
@@ -234,7 +240,7 @@ u64 vgpu_bar1_map(struct gk20a *g, struct sg_table **sgt, u64 size)
 
 /* address space interfaces for the gk20a module */
 static int vgpu_vm_alloc_share(struct gk20a_as_share *as_share,
-		u32 big_page_size)
+			       u32 big_page_size, u32 flags)
 {
 	struct gk20a_as *as = as_share->as;
 	struct gk20a *g = gk20a_from_as(as);
@@ -243,11 +249,11 @@ static int vgpu_vm_alloc_share(struct gk20a_as_share *as_share,
 	struct tegra_vgpu_as_share_params *p = &msg.params.as_share;
 	struct mm_gk20a *mm = &g->mm;
 	struct vm_gk20a *vm;
-	u32 num_small_pages, num_large_pages, low_hole_pages;
 	u64 small_vma_size, large_vma_size;
 	char name[32];
 	int err, i;
-	u32 start;
+	const bool userspace_managed =
+		(flags & NVGPU_GPU_IOCTL_ALLOC_AS_FLAGS_USERSPACE_MANAGED) != 0;
 
 	/* note: keep the page sizes sorted lowest to highest here */
 	u32 gmmu_page_sizes[gmmu_nr_page_sizes] = {
@@ -257,12 +263,13 @@ static int vgpu_vm_alloc_share(struct gk20a_as_share *as_share,
 
 	gk20a_dbg_fn("");
 
-	big_page_size = gmmu_page_sizes[gmmu_page_size_big];
+	if (userspace_managed) {
+		gk20a_err(dev_from_gk20a(g),
+			  "userspace-managed address spaces not yet supported");
+		return -ENOSYS;
+	}
 
-	if (!is_power_of_2(big_page_size))
-		return -EINVAL;
-	if (!(big_page_size & g->gpu_characteristics.available_big_page_sizes))
-		return -EINVAL;
+	big_page_size = gmmu_page_sizes[gmmu_page_size_big];
 
 	vm = kzalloc(sizeof(*vm), GFP_KERNEL);
 	if (!vm)
@@ -280,8 +287,8 @@ static int vgpu_vm_alloc_share(struct gk20a_as_share *as_share,
 	vm->big_page_size = big_page_size;
 
 	vm->va_start  = big_page_size << 10;   /* create a one pde hole */
-	vm->va_limit  = mm->channel.size; /* note this means channel.size is
-					     really just the max */
+	vm->va_limit  = mm->channel.user_size; /* note this means channel.size
+						  is really just the max */
 
 	msg.cmd = TEGRA_VGPU_CMD_AS_ALLOC_SHARE;
 	msg.handle = platform->virt_handle;
@@ -299,33 +306,27 @@ static int vgpu_vm_alloc_share(struct gk20a_as_share *as_share,
 	small_vma_size = (u64)16 << 30;
 	large_vma_size = vm->va_limit - small_vma_size;
 
-	num_small_pages = (u32)(small_vma_size >>
-		    ilog2(vm->gmmu_page_sizes[gmmu_page_size_small]));
-
-	/* num_pages above is without regard to the low-side hole. */
-	low_hole_pages = (vm->va_start >>
-			  ilog2(vm->gmmu_page_sizes[gmmu_page_size_small]));
-
 	snprintf(name, sizeof(name), "gk20a_as_%d-%dKB", as_share->id,
 		 gmmu_page_sizes[gmmu_page_size_small]>>10);
-	err = gk20a_allocator_init(&vm->vma[gmmu_page_size_small],
-			     name,
-			     low_hole_pages,		 /*start*/
-			     num_small_pages - low_hole_pages);/* length*/
+	err = __gk20a_allocator_init(&vm->vma[gmmu_page_size_small],
+				     vm, name,
+				     vm->va_start,
+				     small_vma_size - vm->va_start,
+				     SZ_4K,
+				     GPU_BALLOC_MAX_ORDER,
+				     GPU_BALLOC_GVA_SPACE);
 	if (err)
 		goto clean_up_share;
 
-	start = (u32)(small_vma_size >>
-		    ilog2(vm->gmmu_page_sizes[gmmu_page_size_big]));
-	num_large_pages = (u32)(large_vma_size >>
-			    ilog2(vm->gmmu_page_sizes[gmmu_page_size_big]));
-
 	snprintf(name, sizeof(name), "gk20a_as_%d-%dKB", as_share->id,
 		gmmu_page_sizes[gmmu_page_size_big]>>10);
-	err = gk20a_allocator_init(&vm->vma[gmmu_page_size_big],
-			      name,
-			      start,			/* start */
-			      num_large_pages);		/* length */
+	err = __gk20a_allocator_init(&vm->vma[gmmu_page_size_big],
+				     vm, name,
+				     small_vma_size,
+				     large_vma_size,
+				     big_page_size,
+				     GPU_BALLOC_MAX_ORDER,
+				     GPU_BALLOC_GVA_SPACE);
 	if (err)
 		goto clean_up_small_allocator;
 
@@ -455,4 +456,5 @@ void vgpu_init_mm_ops(struct gpu_ops *gops)
 	gops->mm.l2_flush = vgpu_mm_l2_flush;
 	gops->mm.tlb_invalidate = vgpu_mm_tlb_invalidate;
 	gops->mm.get_physical_addr_bits = gk20a_mm_get_physical_addr_bits;
+	gops->mm.get_iova_addr = gk20a_mm_iova_addr;
 }

@@ -25,4 +25,11 @@
 
 	#address-cells = <2>;
 	#size-cells = <2>;
+
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "jetson_e";
+		};
+	};
 };

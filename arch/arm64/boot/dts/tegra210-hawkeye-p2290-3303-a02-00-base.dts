@@ -37,12 +37,4 @@
 		   };
 		};
 	};
-
-	udc@7d000000 {
-		status = "okay";
-	};
-
-	otg@7d000000 {
-		status = "okay";
-	};
 };

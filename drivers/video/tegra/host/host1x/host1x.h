@@ -23,6 +23,7 @@
 
 #include <linux/cdev.h>
 #include <linux/nvhost.h>
+#include <linux/nvhost_ioctl.h>
 
 #include "nvhost_syncpt.h"
 #include "nvhost_channel.h"
@@ -72,10 +73,10 @@ struct host1x_device_info {
 	int		pts_base;	/* host1x: syncpoint base */
 	int		pts_limit;	/* host1x: syncpoint limit */
 	enum nvhost_syncpt_policy syncpt_policy; /* host1x: syncpoint policy */
-
 	int		nb_mlocks;	/* host1x: number of mlocks */
 	int		(*initialize_chip_support)(struct nvhost_master *,
 						struct nvhost_chip_support *);
+	int		nb_actmons;
 };
 
 struct nvhost_master {
@@ -89,6 +90,7 @@ struct nvhost_master {
 	struct platform_device *dev;
 	atomic_t clientid;
 	struct host1x_device_info info;
+	struct nvhost_characteristics nvhost_char;
 	struct kobject *caps_kobj;
 	struct nvhost_capability_node *caps_nodes;
 	struct mutex timeout_mutex;
@@ -104,8 +106,6 @@ struct nvhost_master {
 	struct mutex vm_mutex;
 };
 
-extern struct nvhost_master *nvhost;
-
 void nvhost_debug_init(struct nvhost_master *master);
 void nvhost_device_debug_init(struct platform_device *dev);
 void nvhost_device_debug_deinit(struct platform_device *dev);
@@ -118,17 +118,7 @@ void nvhost_set_chanops(struct nvhost_channel *ch);
 
 int nvhost_gather_filter_enabled(struct nvhost_syncpt *sp);
 
-static inline enum nvhost_syncpt_policy nvhost_get_syncpt_policy(void)
-{
-	struct nvhost_master *host = nvhost;
-	return host->info.syncpt_policy;
-}
-
-static inline enum nvhost_channel_policy nvhost_get_channel_policy(void)
-{
-	struct nvhost_master *host = nvhost;
-	return host->info.channel_policy;
-}
+int nvhost_update_characteristics(struct platform_device *dev);
 
 static inline void *nvhost_get_private_data(struct platform_device *_dev)
 {

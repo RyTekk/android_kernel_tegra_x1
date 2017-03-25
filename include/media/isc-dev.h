@@ -23,21 +23,19 @@
 #define MAX_ISC_DEV_PAK_SIZE	32
 #define ISC_DEV_PKG_FLAG_WR	1
 
-struct __attribute__ ((__packed__)) isc_dev_pkg {
+struct isc_dev_pkg {
 	__u16 offset;
-	__u16 offset_len;
 	__u16 size;
 	__u32 flags;
 	unsigned long buffer;
-};
+} __packed;
 
-struct __attribute__ ((__packed__)) isc_dev_pkg32 {
+struct isc_dev_pkg32 {
 	__u16 offset;
-	__u16 offset_len;
 	__u16 size;
 	__u32 flags;
 	__u32 buffer;
-};
+} __packed;
 
 #ifdef __KERNEL__
 #include <linux/ioctl.h>  /* For IOCTL macros */

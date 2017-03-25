@@ -35,7 +35,9 @@
 #include <linux/pm_runtime.h>
 #include <mach/tegra_asoc_pdata.h>
 #include <mach/tegra_rt5640_pdata.h>
-
+#ifdef CONFIG_NVS_IQS2X3
+#include <linux/nvs_iqs2x3.h>
+#endif
 #include <sound/core.h>
 #include <sound/jack.h>
 #include <sound/pcm.h>
@@ -539,6 +541,10 @@ static int tegra_t210ref_event_int_spk(struct snd_soc_dapm_widget *w,
 				sysedp_set_state(machine->sysedpc, 0);
 		}
 	}
+#ifdef CONFIG_NVS_IQS2X3
+	/* Notify SAR about speaker enable/disable */
+	sar_external_status(!!SND_SOC_DAPM_EVENT_ON(event));
+#endif
 
 	if (!(machine->gpio_requested & GPIO_SPKR_EN))
 		return 0;
@@ -644,7 +650,6 @@ static const struct snd_kcontrol_new tegra_t210ref_controls[] = {
 
 static int tegra_t210ref_suspend_pre(struct snd_soc_card *card)
 {
-	struct snd_soc_jack_gpio *gpio = &tegra_t210ref_hp_jack_gpio;
 	unsigned int idx;
 
 	/* DAPM dai link stream work for non pcm links */
@@ -652,9 +657,6 @@ static int tegra_t210ref_suspend_pre(struct snd_soc_card *card)
 		if (card->rtd[idx].dai_link->params)
 			INIT_DELAYED_WORK(&card->rtd[idx].delayed_work, NULL);
 	}
-
-	if (gpio_is_valid(gpio->gpio))
-		disable_irq(gpio_to_irq(gpio->gpio));
 
 	return 0;
 }
@@ -677,19 +679,10 @@ static int tegra_t210ref_suspend_post(struct snd_soc_card *card)
 static int tegra_t210ref_resume_pre(struct snd_soc_card *card)
 {
 	struct tegra_t210ref *machine = snd_soc_card_get_drvdata(card);
-	struct snd_soc_jack_gpio *gpio = &tegra_t210ref_hp_jack_gpio;
-	int ret, val;
+	int ret;
 
 	if (machine->digital_reg)
 		ret = regulator_enable(machine->digital_reg);
-
-	if (gpio_is_valid(gpio->gpio)) {
-		val = gpio_get_value(gpio->gpio);
-		val = gpio->invert ? !val : val;
-		if (gpio->jack)
-			snd_soc_jack_report(gpio->jack, val, gpio->report);
-		enable_irq(gpio_to_irq(gpio->gpio));
-	}
 
 	if (!machine->clock_enabled) {
 		machine->clock_enabled = 1;
@@ -805,8 +798,11 @@ static int tegra_t210ref_driver_probe(struct platform_device *pdev)
 		tegra_machine_set_dai_ops(i, &tegra_t210ref_ops);
 
 	/* set ADSP PCM */
-	tegra_machine_set_dai_ops(TEGRA210_DAI_LINK_ADSP_PCM,
+	for (i = TEGRA210_DAI_LINK_ADSP_PCM1;
+		i <= TEGRA210_DAI_LINK_ADSP_PCM2; i++) {
+		tegra_machine_set_dai_ops(i,
 			&tegra_t210ref_ops);
+	}
 
 	/* set ADSP COMPR */
 	for (i = TEGRA210_DAI_LINK_ADSP_COMPR1;

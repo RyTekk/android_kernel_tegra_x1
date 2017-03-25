@@ -31,7 +31,7 @@
 	};
 
 	i2c@7000c400 {
-		ina3221x_40: ina3221x@40 {
+		ina3221x: ina3221x@40 {
 			compatible = "ti,ina3221x";
 			reg = <0x40>;
 			ti,trigger-config = <0x7003>;
@@ -40,7 +40,7 @@
 			#io-channel-cells = <1>;
 			#address-cells = <1>;
 			#size-cells = <0>;
-			status = "okay";
+			status = "disabled";
 
 			channel@0 {
 				reg = <0x0>;

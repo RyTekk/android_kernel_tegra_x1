@@ -74,7 +74,6 @@ struct nvmap_heap {
 	size_t len;
 	struct device *cma_dev;
 	struct device *dma_dev;
-	struct device dev;
 	bool is_ivm;
 	bool can_alloc; /* Used only if is_ivm == true */
 	int peer; /* Used only if is_ivm == true */
@@ -121,10 +120,6 @@ static phys_addr_t nvmap_alloc_mem(struct nvmap_heap *h, size_t len,
 		if (IS_ERR(ret)) {
 			dev_err(dev, "Failed to reserve (%pa) len(%zu)\n",
 					&pa, len);
-			return DMA_ERROR_CODE;
-		} else {
-			dev_dbg(dev, "reserved (%pa) len(%zu)\n",
-				&pa, len);
 		}
 	} else {
 		(void)dma_alloc_attrs(dev, len, &pa,
@@ -143,15 +138,11 @@ static void nvmap_free_mem(struct nvmap_heap *h, phys_addr_t base,
 	struct device *dev = h->dma_dev;
 	DEFINE_DMA_ATTRS(attrs);
 
-	dev_dbg(dev, "Free base (%pa) size (%zu)\n", &base, len);
-	if (h->is_ivm && !h->can_alloc) {
-		dma_mark_declared_memory_unoccupied(dev, base, len);
-	} else {
-		dma_set_attr(DMA_ATTR_ALLOC_EXACT_SIZE, &attrs);
-		dma_free_attrs(dev, len,
-				(void *)(uintptr_t)base,
-				(dma_addr_t)base, &attrs);
-	}
+	dma_set_attr(DMA_ATTR_ALLOC_EXACT_SIZE, &attrs);
+	dev_dbg(dev,
+		"Free base (%pa) size (%zu)\n", &base, len);
+	dma_free_attrs(dev, len,
+		(void *)(uintptr_t)base, (dma_addr_t)base, &attrs);
 }
 
 /*
@@ -332,6 +323,7 @@ struct nvmap_heap *nvmap_heap_create(struct device *parent,
 		return NULL;
 	}
 
+	h->dma_dev = co->dma_dev;
 	if (co->cma_dev) {
 #ifdef CONFIG_CMA
 		struct dma_contiguous_stats stats;
@@ -342,22 +334,13 @@ struct nvmap_heap *nvmap_heap_create(struct device *parent,
 		base = stats.base;
 		len = stats.size;
 		h->cma_dev = co->cma_dev;
-		h->dma_dev = co->dma_dev;
 #else
 		dev_err(parent, "invalid resize config for carveout %s\n",
 				co->name);
 		goto fail;
 #endif
-	} else {
+	} else if (!co->init_done) {
 		int err;
-
-		if (co->dma_dev)
-			h->dma_dev = co->dma_dev;
-		else
-			/* To continue working with bsp that doesn't
-			 * pass dma_dev ptr.
-			 */
-			h->dma_dev = &h->dev;
 
 		/* declare Non-CMA heap */
 		err = dma_declare_coherent_memory(h->dma_dev, 0, base, len,
@@ -401,6 +384,9 @@ struct nvmap_heap *nvmap_heap_create(struct device *parent,
 				&attrs);
 #endif
 finish:
+	if (co->disable_dynamic_dma_map)
+		nvmap_dev->dynamic_dma_map_mask &= ~co->usage_mask;
+
 	dev_info(parent, "created heap %s base 0x%p size (%zuKiB)\n",
 		co->name, (void *)(uintptr_t)base, len/1024);
 	return h;

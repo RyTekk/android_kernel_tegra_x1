@@ -72,6 +72,9 @@ _________________________________________________________
 #define AFREADY_LOOP_MAX 100
 #define AFREADY_LOOP_MS 4
 
+#define CPU_DUMP_BUFF_SZ 64    /* size of dump buffer in bytes
+				  (word size * reg num) */
+
 /* PTM tracer state */
 struct tracectx {
 	struct device	*dev;
@@ -110,6 +113,7 @@ struct tracectx {
 	uintptr_t	trigger_address[ADDR_REGS];
 	u8		trigger_mask;
 	unsigned int	cycle_count;
+	char		cpu_dump_buffer[CPU_DUMP_BUFF_SZ];
 };
 
 /* initialising some values of the structure */
@@ -128,7 +132,8 @@ static struct tracectx tracer = {
 	.etr			=	0,
 	.ape				=	0,
 	.start_stop_mask		=	0x3,
-	.trigger_mask			=	0
+	.trigger_mask			=	0,
+	.cpu_dump_buffer		=	{ 0 }
 };
 
 static struct clk *csite_clk;
@@ -270,6 +275,7 @@ static inline void ptm_check_trace_stable(struct tracectx *t, int id, int bit)
 #define SAVE_RESTORE_PTM(reg) \
 	(addr[cnt++] = readl_relaxed(reg_base + reg))
 
+#ifdef CONFIG_CPU_PM
 static void ptm_save(struct tracectx *t)
 {
 	u32 *addr;
@@ -288,10 +294,12 @@ static void ptm_save(struct tracectx *t)
 	PTM_REG_SAVE_RESTORE_LIST;
 	rmb();
 }
+#endif
 
 #undef SAVE_RESTORE_PTM
 #define SAVE_RESTORE_PTM(reg) ptm_writel(t, id, addr[cnt++], reg)
 
+#ifdef CONFIG_CPU_PM
 static void ptm_restore(struct tracectx *t)
 {
 	u32 *addr;
@@ -307,6 +315,7 @@ static void ptm_restore(struct tracectx *t)
 
 	ptm_os_unlock(t, id);
 }
+#endif
 
 /* Initialise the PTM registers */
 static void ptm_init(void *p_info)
@@ -684,34 +693,47 @@ static int trace_t210_stop(struct tracectx *t)
 	return 0;
 }
 
-/* This function transfers the traces from kernel space to user space */
+
+/* This function transfers the traces from kernel space to user space
+ * data: The destination of trace data in user space
+ * offset: Position in the trace to begin reading from
+ * len: total amount of data to read
+ */
 static ssize_t trc_read(struct file *file, char __user *data,
-	size_t len, loff_t *ppos)
+	size_t len, loff_t *offset)
 {
 	struct tracectx *t = file->private_data;
-	u8 *start = t->etr_buf;
-	loff_t pos = *ppos;
+	loff_t len_t = len; /* length of trace data */
+	loff_t len_w = 0; /* length of wrap around data (etr only) */
+	u8 *start;
 
-	if ((pos + len) >= t->buf_size)
-		len = t->buf_size - pos;
+	if (*offset + len_t >= t->buf_size)
+		len_t = t->buf_size - *offset;
 
-	if (len > 0) {
-		if (t->etr) {
-			if (start + pos + len > t->etr_address + ETR_SIZE)
-				len = t->etr_address + ETR_SIZE - start -
-					pos;
-			if (copy_to_user(data, t->etr_buf+pos, len))
-				return -EFAULT;
-			if (start + pos + len == t->etr_address + ETR_SIZE)
-				t->etr_buf = t->etr_address;
-		} else {
-			if (copy_to_user(data, (u8 *) t->trc_buf+pos, len))
-				return -EFAULT;
+	if (t->etr)
+		start = t->etr_buf;
+	else
+		start = (u8 *)t->trc_buf;
+
+	if (t->etr)
+		if (start + *offset + len_t > t->etr_address + ETR_SIZE) {
+			len_w = (start + *offset + len_t) -
+			(t->etr_address + ETR_SIZE);
+			len_t = (t->etr_address + ETR_SIZE) - (start + *offset);
 		}
-	}
 
-	*ppos = pos + len;
-	return len;
+	/* read trace data */
+	if (len_t > 0)
+		if (copy_to_user(data, start + *offset, len_t))
+			return -EFAULT;
+
+	/* read wrap around data (etr only) */
+	if (len_w > 0)
+		if (copy_to_user(data + len_t, t->etr_address, len_w))
+			return -EFAULT;
+
+	*offset += (len_t + len_w);
+	return len_t + len_w;
 }
 
 /* this function copies traces from the ETF to an array */
@@ -1022,6 +1044,18 @@ static ssize_t trace_cycle_count_show(struct kobject *kobj,
 	return sprintf(buf, "%u\n", tracer.cycle_count);
 }
 
+static ssize_t trace_config_show(struct kobject *kobj,
+	struct kobj_attribute *attr, char *buf)
+{
+	return 0;
+}
+
+static ssize_t trace_config_store(struct kobject *kobj,
+	struct kobj_attribute *attr,
+	const char *buf, size_t n)
+{
+	return 0;
+}
 static ssize_t trace_enable_store(struct kobject *kobj,
 	struct kobj_attribute *attr,
 	const char *buf, size_t n)
@@ -1270,6 +1304,7 @@ define_store_state_func(ape)
 	trace_##c##_show, trace_##d##_store)
 static const struct kobj_attribute trace_attr[] = {
 	A(enable,		0644,	enable,		enable),
+	A(config,		0444,	config,		config),
 	A(userspace,		0644,	userspace,	userspace),
 	A(branch_broadcast,	0644,	branch_broadcast, branch_broadcast),
 	A(return_stack,		0644,	return_stack, return_stack),

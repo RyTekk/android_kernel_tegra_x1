@@ -74,6 +74,7 @@
 /* SMMU global address space */
 #define ARM_SMMU_GR0(smmu)		((smmu)->base)
 #define ARM_SMMU_GR1(smmu)		((smmu)->base + (1 << (smmu)->pgshift))
+#define ARM_SMMU_PME(smmu)		((smmu)->base + (3 << (smmu)->pgshift))
 
 /*
  * SMMU global address space with conditional offset to access secure
@@ -200,9 +201,9 @@
 #define ARM_SMMU_GR0_SMR(n)		(0x800 + ((n) << 2))
 #define SMR_VALID			(1 << 31)
 #define SMR_MASK_SHIFT			16
-#define SMR_MASK_MASK			0x7fff
+#define SMR_MASK_MASK			0x7f80
 #define SMR_ID_SHIFT			0
-#define SMR_ID_MASK			0x7fff
+#define SMR_ID_MASK			0x7f80
 
 #define ARM_SMMU_GR0_S2CR(n)		(0xc00 + ((n) << 2))
 #define S2CR_CBNDX_SHIFT		0
@@ -340,6 +341,8 @@
 
 #define FSYNR0_WNR			(1 << 4)
 
+#define NUM_SID				64
+
 static int force_stage;
 module_param_named(force_stage, force_stage, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(force_stage,
@@ -386,6 +389,7 @@ struct arm_smmu_device {
 	u32				features;
 
 #define ARM_SMMU_OPT_SECURE_CFG_ACCESS (1 << 0)
+#define ARM_SMMU_OPT_BROKEN_SIM_IRQ    (1 << 1)
 	u32				options;
 	enum arm_smmu_arch_version	version;
 
@@ -431,8 +435,15 @@ struct arm_smmu_cfg {
 struct arm_smmu_domain {
 	struct arm_smmu_device		*smmu;
 	struct arm_smmu_cfg		cfg;
+	struct page *arm_dummy_page;   /* dummy page for faulted address*/
 	spinlock_t			lock;
+
+	dma_addr_t			inquired_iova;
+	phys_addr_t			inquired_phys;
 };
+
+static struct iommu_domain *iommu_domains[NUM_SID]; /* To keep all allocated domains */
+static struct arm_smmu_master_cfg *arm_smmu_master_cfgs[NUM_SID];
 
 static DEFINE_SPINLOCK(arm_smmu_devices_lock);
 static LIST_HEAD(arm_smmu_devices);
@@ -507,6 +518,9 @@ void __weak platform_override_streamid(int streamid)
 {
 }
 
+static phys_addr_t arm_smmu_iova_to_phys(struct iommu_domain *domain,
+					dma_addr_t iova);
+
 struct arm_smmu_option_prop {
 	u32 opt;
 	const char *prop;
@@ -514,6 +528,8 @@ struct arm_smmu_option_prop {
 
 static struct arm_smmu_option_prop arm_smmu_options[] = {
 	{ ARM_SMMU_OPT_SECURE_CFG_ACCESS, "calxeda,smmu-secure-config-access" },
+	{ ARM_SMMU_OPT_SECURE_CFG_ACCESS, "-calxeda,smmu-secure-config-access" },
+	{ ARM_SMMU_OPT_BROKEN_SIM_IRQ, "linsim,smmu-broken-sim-irq" },
 	{ 0, NULL},
 };
 
@@ -524,7 +540,10 @@ static void parse_driver_options(struct arm_smmu_device *smmu)
 	do {
 		if (of_property_read_bool(smmu->dev->of_node,
 						arm_smmu_options[i].prop)) {
-			smmu->options |= arm_smmu_options[i].opt;
+			if (arm_smmu_options[i].prop[0] == '-')
+				smmu->options &= ~arm_smmu_options[i].opt;
+			else
+				smmu->options |= arm_smmu_options[i].opt;
 			dev_notice(smmu->dev, "option %s\n",
 				arm_smmu_options[i].prop);
 		}
@@ -645,6 +664,11 @@ static int register_smmu_master(struct arm_smmu_device *smmu,
 		}
 		master->cfg.streamids[i] = streamid;
 		platform_override_streamid(streamid);
+		if (!arm_smmu_master_cfgs[streamid]) {
+			arm_smmu_master_cfgs[streamid] = &master->cfg;
+			dev_dbg(dev, "%s() streamid=%x sets cfg=%p\n",
+				__func__, streamid, &master->cfg);
+		}
 	}
 	return insert_smmu_master(smmu, master);
 }
@@ -726,7 +750,7 @@ static void arm_smmu_tlb_inv_context(struct arm_smmu_domain *smmu_domain)
 	arm_smmu_tlb_sync(smmu);
 }
 
-static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
+static irqreturn_t __arm_smmu_context_fault(int irq, void *dev)
 {
 	int flags, ret;
 	u32 fsr, far, fsynr, resume;
@@ -779,6 +803,32 @@ static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 	return ret;
 }
 
+static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
+{
+	int i;
+	struct arm_smmu_device *smmu = dev;
+
+	for (i = 0; i < smmu->num_context_banks; i++) {
+		void __iomem *cb_base;
+		struct iommu_domain *domain;
+		u32 fsr;
+
+		cb_base = ARM_SMMU_CB_BASE(smmu) + ARM_SMMU_CB(smmu, i);
+		fsr = readl_relaxed(cb_base + ARM_SMMU_CB_FSR);
+		if (fsr & FSR_FAULT) {
+			domain = iommu_domains[i];
+			if (!domain) {
+				pr_err("domain(%d) doesn't exist\n", i);
+				continue;
+			}
+			return __arm_smmu_context_fault(irq, domain);
+		}
+	}
+
+	pr_err("unexpected smmu error: neither global fault not context fault\n");
+	return IRQ_NONE;
+}
+
 static irqreturn_t arm_smmu_global_fault(int irq, void *dev)
 {
 	u32 gfsr, gfsynr0, gfsynr1, gfsynr2;
@@ -791,7 +841,7 @@ static irqreturn_t arm_smmu_global_fault(int irq, void *dev)
 	gfsynr2 = readl_relaxed(gr0_base + ARM_SMMU_GR0_sGFSYNR2);
 
 	if (!gfsr)
-		return IRQ_NONE;
+		return arm_smmu_context_fault(irq, dev);
 
 	dev_err_ratelimited(smmu->dev,
 		"Unexpected global fault, this could be serious\n");
@@ -983,7 +1033,7 @@ static void arm_smmu_init_context_bank(struct arm_smmu_domain *smmu_domain)
 	}
 
 	/* SCTLR */
-	reg = SCTLR_CFCFG | SCTLR_CFIE | SCTLR_CFRE | SCTLR_M | SCTLR_EAE_SBOP;
+	reg = SCTLR_CFIE | SCTLR_CFRE | SCTLR_M | SCTLR_EAE_SBOP;
 	if (stage1)
 		reg |= SCTLR_S1_ASIDPNE;
 #ifdef __BIG_ENDIAN
@@ -1038,15 +1088,21 @@ static int arm_smmu_init_domain_context(struct iommu_domain *domain,
 	arm_smmu_init_context_bank(smmu_domain);
 	spin_unlock_irqrestore(&smmu_domain->lock, flags);
 
-	irq = smmu->irqs[smmu->num_global_irqs + cfg->irptndx];
-	ret = request_irq(irq, arm_smmu_context_fault, IRQF_SHARED,
+	if (smmu->num_context_irqs) {
+
+		irq = smmu->irqs[smmu->num_global_irqs + cfg->irptndx];
+		ret = request_irq(irq, arm_smmu_context_fault, IRQF_SHARED,
 			  "arm-smmu-context-fault", domain);
-	if (IS_ERR_VALUE(ret)) {
-		dev_err(smmu->dev, "failed to request context IRQ %d (%u)\n",
-			cfg->irptndx, irq);
-		cfg->irptndx = INVALID_IRPTNDX;
+		if (IS_ERR_VALUE(ret)) {
+			dev_err(smmu->dev,
+				"failed to request context IRQ %d (%u)\n",
+				cfg->irptndx, irq);
+			cfg->irptndx = INVALID_IRPTNDX;
+		}
 	}
 
+	BUG_ON(iommu_domains[cfg->cbndx]);
+	iommu_domains[cfg->cbndx] = domain;
 	return 0;
 
 out_unlock:
@@ -1070,12 +1126,29 @@ static void arm_smmu_destroy_domain_context(struct iommu_domain *domain)
 	writel_relaxed(0, cb_base + ARM_SMMU_CB_SCTLR);
 	arm_smmu_tlb_inv_context(smmu_domain);
 
-	if (cfg->irptndx != INVALID_IRPTNDX) {
+	if ((smmu->num_context_irqs) &&
+		(cfg->irptndx != INVALID_IRPTNDX)) {
 		irq = smmu->irqs[smmu->num_global_irqs + cfg->irptndx];
 		free_irq(irq, domain);
 	}
 
 	__arm_smmu_free_bitmap(smmu->context_map, cfg->cbndx);
+	iommu_domains[cfg->cbndx] = NULL;
+}
+
+static int arm_smmu_get_hwid(struct iommu_domain *domain,
+			     struct device *dev, unsigned int id)
+{
+	struct arm_smmu_master_cfg *cfg;
+
+	cfg = find_smmu_master_cfg(dev);
+	if (!cfg)
+		return -EINVAL;
+
+	if (id >= cfg->num_streamids)
+		return -EINVAL;
+
+	return cfg->streamids[id];
 }
 
 static int arm_smmu_domain_init(struct iommu_domain *domain)
@@ -1098,6 +1171,11 @@ static int arm_smmu_domain_init(struct iommu_domain *domain)
 	smmu_domain->cfg.pgd = pgd;
 
 	spin_lock_init(&smmu_domain->lock);
+
+	smmu_domain->arm_dummy_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!smmu_domain->arm_dummy_page)
+		return -ENOMEM;
+
 	domain->priv = smmu_domain;
 	return 0;
 
@@ -1179,6 +1257,7 @@ static void arm_smmu_domain_destroy(struct iommu_domain *domain)
 	 */
 	arm_smmu_destroy_domain_context(domain);
 	arm_smmu_free_pgtables(smmu_domain);
+	__free_page(smmu_domain->arm_dummy_page);
 	kfree(smmu_domain);
 }
 
@@ -1192,8 +1271,10 @@ static int arm_smmu_master_configure_smrs(struct arm_smmu_device *smmu,
 	if (!(smmu->features & ARM_SMMU_FEAT_STREAM_MATCH))
 		return 0;
 
-	if (cfg->smrs)
+	if (cfg->smrs) {
+		pr_debug("%s() cfg->smrs=%p exists\n", __func__, cfg->smrs);
 		return -EEXIST;
+	}
 
 	smrs = kmalloc_array(cfg->num_streamids, sizeof(*smrs), GFP_KERNEL);
 	if (!smrs) {
@@ -1213,7 +1294,7 @@ static int arm_smmu_master_configure_smrs(struct arm_smmu_device *smmu,
 
 		smrs[i] = (struct arm_smmu_smr) {
 			.idx	= idx,
-			.mask	= 0, /* We don't currently share SMRs */
+			.mask	= SMR_ID_MASK,
 			.id	= cfg->streamids[i],
 		};
 	}
@@ -1226,6 +1307,7 @@ static int arm_smmu_master_configure_smrs(struct arm_smmu_device *smmu,
 	}
 
 	cfg->smrs = smrs;
+	pr_debug("%s() set cfg->smrs=%p\n", __func__, cfg->smrs);
 	return 0;
 
 err_free_smrs:
@@ -1412,12 +1494,71 @@ static const struct debugfs_reg32 arm_smmu_cb_regs[] = {
 	defreg_cb(FSYNR0),
 };
 
-static void debugfs_create_smmu_cb(struct arm_smmu_domain *smmu_domain,
+static ssize_t smmu_debugfs_iova2phys_write(struct file *file,
+					    const char __user *buffer,
+					    size_t count, loff_t *pos)
+{
+	int ret;
+	struct iommu_domain *domain = file_inode(file)->i_private;
+	struct arm_smmu_domain *smmu_domain = domain->priv;
+	char str[] = "0x0123456789abcdef";
+	unsigned long flags;
+	dma_addr_t tmp;
+
+	count = min_t(size_t, strlen(str), count);
+	if (copy_from_user(str, buffer, count))
+		return -EINVAL;
+
+	ret = sscanf(str, "0x%llx", &tmp);
+	if (ret != 1)
+		return -EINVAL;
+
+	spin_lock_irqsave(&smmu_domain->lock, flags);
+	smmu_domain->inquired_iova = tmp;
+	smmu_domain->inquired_phys =
+		arm_smmu_iova_to_phys(domain, smmu_domain->inquired_iova);
+	pr_info("iova=%pa pa=%pa\n",
+		&smmu_domain->inquired_iova, &smmu_domain->inquired_phys);
+	spin_unlock_irqrestore(&smmu_domain->lock, flags);
+	return count;
+}
+
+static int smmu_iova2phys_show(struct seq_file *m, void *v)
+{
+	struct iommu_domain *domain = m->private;
+	struct arm_smmu_domain *smmu_domain = domain->priv;
+	unsigned long flags;
+
+	spin_lock_irqsave(&smmu_domain->lock, flags);
+
+	seq_printf(m, "iova=%pa pa=%pa\n",
+		   &smmu_domain->inquired_iova,
+		   &smmu_domain->inquired_phys);
+
+	spin_unlock_irqrestore(&smmu_domain->lock, flags);
+	return 0;
+}
+
+static int smmu_iova2phys_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, smmu_iova2phys_show, inode->i_private);
+}
+
+static const struct file_operations smmu_iova2phys_fops = {
+	.open		= smmu_iova2phys_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+	.write		= smmu_debugfs_iova2phys_write,
+};
+
+static void debugfs_create_smmu_cb(struct iommu_domain *domain,
 				   struct device *dev)
 {
 	struct dentry *dent;
 	char name[] = "cb000";
 	struct debugfs_regset32	*cb;
+	struct arm_smmu_domain *smmu_domain = domain->priv;
 	u8 cbndx = smmu_domain->cfg.cbndx;
 	struct arm_smmu_device *smmu = smmu_domain->smmu;
 
@@ -1433,6 +1574,8 @@ static void debugfs_create_smmu_cb(struct arm_smmu_domain *smmu_domain,
 	debugfs_create_regset32("regdump", S_IRUGO, dent, cb);
 	debugfs_create_file("ptdump", S_IRUGO, dent, smmu_domain,
 			    &smmu_ptdump_fops);
+	debugfs_create_file("iova_to_phys", S_IRUSR, dent, domain,
+			    &smmu_iova2phys_fops);
 }
 
 static int smmu_master_show(struct seq_file *s, void *unused)
@@ -1461,11 +1604,12 @@ static const struct file_operations smmu_master_fops = {
 	.release        = single_release,
 };
 
-static void add_smmu_master_debugfs(struct arm_smmu_domain *smmu_domain,
+static void add_smmu_master_debugfs(struct iommu_domain *domain,
 				    struct device *dev,
 				    struct arm_smmu_master *master)
 {
 	struct dentry *dent;
+	struct arm_smmu_domain *smmu_domain = domain->priv;
 	struct arm_smmu_device *smmu = smmu_domain->smmu;
 	char name[] = "cb000";
 	char target[] = "../../cb000";
@@ -1477,7 +1621,7 @@ static void add_smmu_master_debugfs(struct arm_smmu_domain *smmu_domain,
 
 	debugfs_create_file("streamids", 0444, dent, master, &smmu_master_fops);
 	debugfs_create_u8("cbndx", 0444, dent, &smmu_domain->cfg.cbndx);
-	debugfs_create_smmu_cb(smmu_domain, dev);
+	debugfs_create_smmu_cb(domain, dev);
 	sprintf(name, "cb%03d", cbndx);
 	sprintf(target, "../../cb%03d", cbndx);
 	debugfs_create_symlink(name, dent, target);
@@ -1531,7 +1675,7 @@ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
 	ret = arm_smmu_domain_add_master(smmu_domain, cfg);
 	if (!ret) {
 		dev->archdata.iommu = domain;
-		add_smmu_master_debugfs(smmu_domain, dev,
+		add_smmu_master_debugfs(domain, dev,
 					find_smmu_master(smmu, dev->of_node));
 	}
 	return ret;
@@ -1552,10 +1696,11 @@ static void arm_smmu_detach_dev(struct iommu_domain *domain, struct device *dev)
 }
 
 static bool arm_smmu_pte_is_contiguous_range(unsigned long addr,
-					     unsigned long end)
+					unsigned long end, unsigned long phys)
 {
 	return !(addr & ~ARM_SMMU_PTE_CONT_MASK) &&
-		(addr + ARM_SMMU_PTE_CONT_SIZE <= end);
+		(addr + ARM_SMMU_PTE_CONT_SIZE <= end) &&
+		!(phys & ~ARM_SMMU_PTE_CONT_MASK);
 }
 
 static int arm_smmu_alloc_init_pte(struct arm_smmu_device *smmu, pmd_t *pmd,
@@ -1633,7 +1778,7 @@ static int arm_smmu_alloc_init_pte(struct arm_smmu_device *smmu, pmd_t *pmd,
 
 		pteval &= ~ARM_SMMU_PTE_CONT;
 
-		if (arm_smmu_pte_is_contiguous_range(addr, end)) {
+		if (arm_smmu_pte_is_contiguous_range(addr, end, __pfn_to_phys(pfn))) {
 			i = ARM_SMMU_PTE_CONT_ENTRIES;
 			pteval |= ARM_SMMU_PTE_CONT;
 		} else if (pte_val(*pte) &
@@ -1651,6 +1796,13 @@ static int arm_smmu_alloc_init_pte(struct arm_smmu_device *smmu, pmd_t *pmd,
 			arm_smmu_flush_pgtable(smmu, cont_start,
 					       sizeof(*pte) *
 					       ARM_SMMU_PTE_CONT_ENTRIES);
+		}
+
+		if (!pfn) {
+			memset(pte, 0, i * sizeof(*pte));
+			addr += i * PAGE_SIZE;
+			pte += i;
+			break;
 		}
 
 		do {
@@ -1689,7 +1841,8 @@ static int arm_smmu_alloc_init_pmd(struct arm_smmu_device *smmu, pud_t *pud,
 		next = pmd_addr_end(addr, end);
 		ret = arm_smmu_alloc_init_pte(smmu, pmd, addr, next, pfn,
 					      prot, stage);
-		phys += next - addr;
+		if (phys)
+			phys += next - addr;
 		pfn = __phys_to_pfn(phys);
 	} while (pmd++, addr = next, addr < end);
 
@@ -1723,11 +1876,14 @@ static int arm_smmu_alloc_init_pud(struct arm_smmu_device *smmu, pgd_t *pgd,
 		next = pud_addr_end(addr, end);
 		ret = arm_smmu_alloc_init_pmd(smmu, pud, addr, next, phys,
 					      prot, stage);
-		phys += next - addr;
+		if (phys)
+			phys += next - addr;
 	} while (pud++, addr = next, addr < end);
 
 	return ret;
 }
+
+#define FLUSH_TLB_AFTER_MAP 1
 
 static int arm_smmu_handle_mapping(struct arm_smmu_domain *smmu_domain,
 				   unsigned long iova, phys_addr_t paddr,
@@ -1790,12 +1946,15 @@ static int arm_smmu_handle_mapping(struct arm_smmu_domain *smmu_domain,
 		if (ret)
 			goto out_unlock;
 
-		paddr += next - iova;
+		if (paddr)
+			paddr += next - iova;
 		iova = next;
 	} while (pgd++, iova != end);
 
 out_unlock:
 	spin_unlock_irqrestore(&smmu_domain->lock, flags);
+	if (FLUSH_TLB_AFTER_MAP)
+		arm_smmu_tlb_inv_context(smmu_domain);
 
 	return ret;
 }
@@ -1843,7 +2002,8 @@ static size_t arm_smmu_unmap(struct iommu_domain *domain, unsigned long iova,
 	struct arm_smmu_domain *smmu_domain = domain->priv;
 
 	ret = arm_smmu_handle_mapping(smmu_domain, iova, 0, size, 0);
-	arm_smmu_tlb_inv_context(smmu_domain);
+	if (!FLUSH_TLB_AFTER_MAP)
+		arm_smmu_tlb_inv_context(smmu_domain);
 	return ret ? 0 : size;
 }
 
@@ -1907,6 +2067,29 @@ static void __arm_smmu_release_pci_iommudata(void *data)
 	kfree(data);
 }
 
+static int arm_iommu_fault(struct iommu_domain *domain, struct device *dev,
+		unsigned long iova, int flags, void *token)
+{
+	struct arm_smmu_domain *smmu_domain = domain->priv;
+	phys_addr_t dummy = page_to_phys(smmu_domain->arm_dummy_page);
+	phys_addr_t pa = arm_smmu_iova_to_phys(domain, iova);
+
+	dev_err(dev, "%s: iova=0x%lx pa=%pa flags=0x%x cb=%d\n",
+		__func__, iova, &pa, flags, smmu_domain->cfg.cbndx);
+
+	if (arm_smmu_skip_mapping)
+		arm_smmu_skip_mapping = 0;
+
+	dev_err(dev, "%s: iova=0x%lx dummy=%pa flags=0x%x cb=%d\n",
+		__func__, iova, &dummy, flags, smmu_domain->cfg.cbndx);
+
+	arm_smmu_handle_mapping(smmu_domain, iova, dummy, PAGE_SIZE, 0);
+	if (!FLUSH_TLB_AFTER_MAP)
+		arm_smmu_tlb_inv_context(smmu_domain);
+
+	return 0;
+}
+
 static int arm_smmu_add_device(struct device *dev)
 {
 	struct arm_smmu_device *smmu;
@@ -1946,7 +2129,7 @@ static int arm_smmu_add_device(struct device *dev)
 				       &cfg->streamids[0]);
 		releasefn = __arm_smmu_release_pci_iommudata;
 	} else {
-		int i;
+		int i, sid;
 		struct arm_smmu_master *master;
 
 		master = find_smmu_master(smmu, dev->of_node);
@@ -1955,7 +2138,12 @@ static int arm_smmu_add_device(struct device *dev)
 			goto out_put_group;
 		}
 
-		cfg = &master->cfg;
+		sid = master->cfg.streamids[0];
+		BUG_ON(sid < 0);
+		BUG_ON(sid >= NUM_SID);
+		cfg = arm_smmu_master_cfgs[sid];
+		BUG_ON(!cfg);
+		master->cfg.smrs = cfg->smrs;
 
 		for (i = 0; i < cfg->num_streamids; i++)
 			swgids |= BIT(cfg->streamids[i]);
@@ -1981,6 +2169,9 @@ out_put_group:
 	if (ret)
 		goto err_attach_dev;
 
+	if (smmu->options & ARM_SMMU_OPT_BROKEN_SIM_IRQ)
+		iommu_set_fault_handler(mapping->domain, arm_iommu_fault, 0);
+
 	return 0;
 
 err_attach_dev:
@@ -2002,6 +2193,7 @@ static struct iommu_ops arm_smmu_ops = {
 	.domain_destroy	= arm_smmu_domain_destroy,
 	.attach_dev	= arm_smmu_attach_dev,
 	.detach_dev	= arm_smmu_detach_dev,
+	.get_hwid	= arm_smmu_get_hwid,
 	.map_sg		= arm_smmu_map_sg,
 	.map		= arm_smmu_map,
 	.unmap		= arm_smmu_unmap,
@@ -2415,6 +2607,9 @@ static int arm_smmu_device_dt_probe(struct platform_device *pdev)
 	struct of_phandle_args masterspec;
 	int num_irqs, i, err, count;
 
+	if (tegra_platform_is_unit_fpga())
+		return -ENODEV;
+
 	smmu = devm_kzalloc(dev, sizeof(*smmu), GFP_KERNEL);
 	if (!smmu) {
 		dev_err(dev, "failed to allocate arm_smmu_device\n");
@@ -2455,7 +2650,6 @@ static int arm_smmu_device_dt_probe(struct platform_device *pdev)
 	if (!smmu->num_context_irqs) {
 		dev_err(dev, "found %d interrupts but expected at least %d\n",
 			num_irqs, smmu->num_global_irqs + 1);
-		return -ENODEV;
 	}
 
 	smmu->irqs = devm_kzalloc(dev, sizeof(*smmu->irqs) * num_irqs,
@@ -2484,6 +2678,10 @@ static int arm_smmu_device_dt_probe(struct platform_device *pdev)
 	while (!of_parse_phandle_with_args(dev->of_node, "mmu-masters",
 					   "#stream-id-cells", i,
 					   &masterspec)) {
+
+		dev_dbg(dev, "%s() masterspec.np->name=%s\n",
+			__func__, masterspec.np->name);
+
 		err = register_smmu_master(smmu, dev, &masterspec);
 		if (err) {
 			dev_err(dev, "failed to add master %s\n",

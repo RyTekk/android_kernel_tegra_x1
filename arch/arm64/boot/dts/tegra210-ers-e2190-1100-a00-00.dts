@@ -3,7 +3,7 @@
  *
  * arch/arm64/boot/dts/tegra210-ers-e2190-1100-a00-00.dts
  *
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,8 +29,8 @@
 #include "tegra210-platforms/tegra210-ers-power-tree-e2174-1101-a00.dtsi"
 #include "tegra210-platforms/tegra210-ers-sensor-e2160-1000-a00.dtsi"
 #include "tegra210-platforms/tegra210-ers-gpio-e2190-1100-a00.dtsi"
-#include "tegra210-platforms/tegra210-ers-pinmux-e2190-1100-a00.dtsi"
 #include "tegra210-platforms/tegra210-pinmux-drive-sdmmc-common.dtsi"
+#include "tegra210-platforms/tegra210-ers-pinmux-e2190-1100-a00.dtsi"
 #include "tegra210-platforms/tegra210-comms.dtsi"
 #include "tegra210-platforms/tegra210-sdhci.dtsi"
 #include "tegra210-platforms/tegra210-audio.dtsi"
@@ -56,6 +56,13 @@
 	chosen {
         };
 
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "e2190";
+		};
+	};
+
 	pmc@7000e400 {
 		nvidia,invert-interrupt;
 		io-pad-defaults {
@@ -69,6 +76,12 @@
 
 			gpio {
 				nvidia,io-pad-init-voltage = <IO_PAD_VOLTAGE_1_8V>;
+			};
+			sdmmc1 {
+				nvidia,enable-dynamic-pad-voltage;
+			};
+			sdmmc3 {
+				nvidia,enable-dynamic-pad-voltage;
 			};
 		};
 	};

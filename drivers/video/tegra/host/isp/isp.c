@@ -1,7 +1,7 @@
 /*
  * Tegra Graphics ISP
  *
- * Copyright (c) 2012-2015, NVIDIA Corporation.  All rights reserved.
+ * Copyright (c) 2012-2016, NVIDIA Corporation.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -40,7 +40,7 @@
 #include <linux/uaccess.h>
 #include <linux/fs.h>
 #include <linux/nvhost_isp_ioctl.h>
-#include <mach/latency_allowance.h>
+#include <linux/platform/tegra/latency_allowance.h>
 #include "isp.h"
 
 #define T12_ISP_CG_CTRL		0x74
@@ -115,7 +115,6 @@ static int isp_isomgr_register(struct isp *tegra_isp)
 {
 	int iso_client_id = TEGRA_ISO_CLIENT_ISP_A;
 	struct clk *isp_clk;
-	unsigned long max_bw = 0;
 	struct nvhost_device_data *pdata =
 				platform_get_drvdata(tegra_isp->ndev);
 
@@ -131,11 +130,12 @@ static int isp_isomgr_register(struct isp *tegra_isp)
 
 	/* Get max ISP BW */
 	isp_clk = pdata->clk[0];
-	max_bw = (clk_round_rate(isp_clk, UINT_MAX) / 1000) * ISP_MAX_BPP;
+	tegra_isp->max_bw =
+		(clk_round_rate(isp_clk, UINT_MAX) / 1000) * ISP_MAX_BPP;
 
 	/* Register with max possible BW for ISP usecases.*/
 	tegra_isp->isomgr_handle = tegra_isomgr_register(iso_client_id,
-					max_bw,
+					tegra_isp->max_bw,
 					NULL,	/* tegra_isomgr_renegotiate */
 					NULL);	/* *priv */
 
@@ -429,48 +429,33 @@ static struct platform_driver isp_driver = {
 };
 
 #ifdef CONFIG_TEGRA_MC
-
-static int isp_set_la(struct isp *tegra_isp, uint isp_bw, uint la_client)
+static int isp_set_la(struct isp *tegra_isp, u32 isp_bw, u32 la_client)
 {
 	int ret = 0;
+	int la_id;
+	/* BW needs to be in MBps */
+	u32 isp_bw_mbps = isp_bw / 1000;
 
-	if (tegra_isp->dev_id == ISPB_DEV_ID) {
-		ret = tegra_set_camera_ptsa(TEGRA_LA_ISP_WAB,
-				isp_bw, la_client);
+	if (tegra_isp->dev_id == ISPB_DEV_ID)
+		la_id = TEGRA_LA_ISP_WAB;
+	else
+		la_id = TEGRA_LA_ISP_WA;
 
-		if (!ret) {
-			ret = tegra_set_latency_allowance(TEGRA_LA_ISP_WAB,
-				isp_bw);
-
-			if (ret)
-				pr_err("%s: set latency failed for %d: %d\n",
-					__func__, tegra_isp->dev_id, ret);
-		} else {
-			pr_err("%s: set ptsa failed for %d: %d\n", __func__,
-				tegra_isp->dev_id, ret);
-		}
+	ret = tegra_set_camera_ptsa(la_id, isp_bw_mbps, la_client);
+	if (!ret) {
+		ret = tegra_set_latency_allowance(la_id, isp_bw_mbps);
+		if (ret)
+			pr_err("%s: set latency failed for ISP %d: %d\n",
+				__func__, tegra_isp->dev_id, ret);
 	} else {
-		ret = tegra_set_camera_ptsa(TEGRA_LA_ISP_WA,
-				isp_bw, la_client);
-
-		if (!ret) {
-			ret = tegra_set_latency_allowance(TEGRA_LA_ISP_WA,
-				isp_bw);
-
-			if (ret)
-				pr_err("%s: set latency failed for %d: %d\n",
-					__func__, tegra_isp->dev_id, ret);
-		} else {
-			pr_err("%s: set ptsa failed for %d: %d\n", __func__,
-				tegra_isp->dev_id, ret);
-		}
+		pr_err("%s: set ptsa failed for ISP %d: %d\n", __func__,
+			tegra_isp->dev_id, ret);
 	}
 
 	return ret;
 }
-
 #else
-static int isp_set_la(struct isp *tegra_isp, uint isp_bw, uint la_client)
+static int isp_set_la(struct isp *tegra_isp, u32 isp_bw, u32 la_client)
 {
 	return 0;
 }
@@ -485,6 +470,56 @@ static long isp_ioctl(struct file *file,
 		return -EFAULT;
 
 	switch (_IOC_NR(cmd)) {
+	case _IOC_NR(NVHOST_ISP_IOCTL_GET_ISP_CLK): {
+		int ret;
+		u64 isp_clk_rate = 0;
+
+		ret = nvhost_module_get_rate(tegra_isp->ndev,
+			(unsigned long *)&isp_clk_rate, 0);
+		if (ret) {
+			dev_err(&tegra_isp->ndev->dev,
+			"%s: failed to get isp clk\n",
+			__func__);
+			return ret;
+		}
+
+		if (copy_to_user((void __user *)arg,
+			&isp_clk_rate, sizeof(isp_clk_rate))) {
+			dev_err(&tegra_isp->ndev->dev,
+			"%s:Failed to copy isp clk rate to user\n",
+			__func__);
+			return -EFAULT;
+		}
+
+		return 0;
+	}
+	case _IOC_NR(NVHOST_ISP_IOCTL_SET_ISP_LA_BW): {
+		u32 ret = 0;
+		struct isp_la_bw isp_info;
+
+		if (copy_from_user(&isp_info,
+			(const void __user *)arg,
+				sizeof(struct isp_la_bw))) {
+			dev_err(&tegra_isp->ndev->dev,
+				"%s: Failed to copy arg from user\n", __func__);
+			return -EFAULT;
+			}
+
+		/* Set latency allowance for ISP, BW is in MBps */
+		ret = isp_set_la(tegra_isp,
+			isp_info.isp_la_bw,
+			(isp_info.is_iso) ?
+				ISP_HARD_ISO_CLIENT : ISP_SOFT_ISO_CLIENT);
+		if (ret) {
+			dev_err(&tegra_isp->ndev->dev,
+			"%s: failed to set la isp_bw %u KBps\n",
+			__func__, isp_info.isp_la_bw);
+			return -ENOMEM;
+		}
+
+		return 0;
+
+	}
 	case _IOC_NR(NVHOST_ISP_IOCTL_SET_EMC): {
 		int ret;
 		uint la_client = 0;
@@ -508,7 +543,7 @@ static long isp_ioctl(struct file *file,
 		ret = isp_set_la(tegra_isp, isp_bw, la_client);
 		if (ret) {
 			dev_err(&tegra_isp->ndev->dev,
-			"%s: failed to set la for isp_bw %u MBps\n",
+			"%s: failed to set la for isp_bw %u KBps\n",
 			__func__, isp_bw);
 			return -ENOMEM;
 		}
@@ -541,6 +576,14 @@ static long isp_ioctl(struct file *file,
 
 			/* isomgr driver expects BW in KBps */
 			isp_bw = isp_bw * 1000;
+
+			if (isp_bw > tegra_isp->max_bw) {
+				dev_err(&tegra_isp->ndev->dev,
+				"%s: Requested ISO BW %u is more than "
+				"ISP's max BW %u possible\n",
+				__func__, isp_bw, tegra_isp->max_bw);
+				return -EINVAL;
+			}
 
 			ret = isp_isomgr_request(tegra_isp, isp_bw, 4);
 			if (ret) {
@@ -638,11 +681,15 @@ const struct file_operations tegra_isp_ctrl_ops = {
 	.release = isp_release,
 };
 
-static struct of_device_id tegra21x_isp_domain_match[] = {
+static struct of_device_id tegra_isp_domain_match[] = {
 	{.compatible = "nvidia,tegra210-ve-pd",
 	 .data = (struct nvhost_device_data *)&t21_isp_info},
 	{.compatible = "nvidia,tegra210-ve2-pd",
 	 .data = (struct nvhost_device_data *)&t21_ispb_info},
+	{.compatible = "nvidia,tegra132-ve-pd",
+	.data = (struct nvhost_device_data *)&t124_isp_info},
+	{.compatible = "nvidia,tegra124-ve-pd",
+	 .data = (struct nvhost_device_data *)&t124_isp_info},
 	{},
 };
 
@@ -650,7 +697,7 @@ static int __init isp_init(void)
 {
 	int ret;
 
-	ret = nvhost_domain_init(tegra21x_isp_domain_match);
+	ret = nvhost_domain_init(tegra_isp_domain_match);
 	if (ret)
 		return ret;
 

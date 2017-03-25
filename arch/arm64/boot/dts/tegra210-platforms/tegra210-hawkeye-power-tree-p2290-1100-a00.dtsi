@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -82,6 +82,8 @@
 				};
 
 				ldo7 {
+					maxim,fps-source = <FPS_SRC_1>;
+					maxim,suspend-fps-source = <FPS_SRC_NONE>;
 					regulator-enable-ramp-delay = <74>;
 					regulator-disable-ramp-delay = <7125>;
 					regulator-ramp-delay = <100000>;
@@ -172,6 +174,21 @@
 		};
 	};
 
+	xudc@700d0000 {
+		hvdd_usb-supply = <&vdd_3v3>;
+		avdd_pll_utmip-supply = <&max77620_sd3>;
+		avddio_usb-supply = <&vdd_3v3>;
+		avddio_pll_uerefe-supply = <&max77620_ldo7>;
+	};
+
+	xotg {
+		usb_vbus-supply = <&usb0_vbus>;
+	};
+
+	usb_cd@7009f000 {
+		usb_bat_chg-supply = <&battery_charger>;
+	};
+
 	udc@7d000000 {
 		avdd_usb-supply = <&vdd_3v3>;
 		avdd_pll_utmip-supply = <&max77620_sd3>;
@@ -219,8 +236,6 @@
 			avdd_dsi_csi-supply = <&mipi_1v2>;
 			avdd_lcd-supply = <&vdd_lcd_3v0>;
 			dvdd_lcd-supply = <&vdd_lcd_1v8>;
-			outn-supply = <&tps65132_outn>;
-			outp-supply = <&tps65132_outp>;
 		};
 
 		/* tegradc.1 */

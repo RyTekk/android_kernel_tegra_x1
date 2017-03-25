@@ -42,6 +42,13 @@
 	compatible = "nvidia,p1859", "nvidia,tegra124";
 	nvidia,dtsfilename = __FILE__;
 
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "p1859";
+		};
+	};
+
 	tegra_hv_wdt {
 		compatible = "nvidia,tegra-hv-wdt";
 		status = "okay";
@@ -73,7 +80,7 @@
 			gpu_as: gpu {
 				iova-start = <0x0 0x80100000>;
 				iova-size = <0x0 0x7BEFFFFF>;
-				alignment = <0xFFFFF>;
+				alignment = <0x20000>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
@@ -81,7 +88,6 @@
 			host1x_as: host1x {
 				iova-start = <0x0 0x80000000>;
 				iova-size = <0x0 0x77EFFFFF>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
@@ -89,50 +95,10 @@
 			nvavp_as: nvavp {
 				iova-start = <0x0 0x80000000>;
 				iova-size = <0x0 0x67FFFFFF>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
 		};
-	};
-
-	i2c@7000c000 {
-		compatible = "nvidia,tegra124-i2c-hv";
-		ivc_queue = <&tegra_hv 11>;
-	};
-
-	i2c@7000c400 {
-		compatible = "nvidia,tegra124-i2c-hv";
-		ivc_queue = <&tegra_hv 11>;
-	};
-
-	i2c@7000c500 {
-		compatible = "nvidia,tegra124-i2c-hv";
-		ivc_queue = <&tegra_hv 11>;
-	};
-
-	i2c@7000c700 {
-		compatible = "nvidia,tegra124-i2c-hv";
-		ivc_queue = <&tegra_hv 11>;
-	};
-
-	i2c@7000d000 {
-		compatible = "nvidia,tegra124-i2c-hv";
-		ivc_queue = <&tegra_hv 11>;
-		status = "okay";
-
-		max16989@3a {
-			status = "disabled";
-		};
-
-		max16989@38 {
-			status = "disabled";
-		};
-	};
-
-	i2c@7000d100 {
-		compatible = "nvidia,tegra124-i2c-hv";
-		ivc_queue = <&tegra_hv 11>;
 	};
 
 	chosen {
@@ -142,6 +108,18 @@
 
 	soctherm@0x700E2000 {
 		status = "disabled";
+	};
+
+	i2c@7000d000 {
+		status = "okay";
+
+		max16989@3a {
+			status = "disabled";
+		};
+
+		max16989@38 {
+			status = "disabled";
+		};
 	};
 
 	dfll@70110000 {
@@ -170,26 +148,6 @@
 			compatible = "nvidia,tegra124-vhost-vic";
 		};
 
-		vi {
-			compatible = "nvidia,tegra124-vhost-vi";
-		};
-
-		isp@54600000 {
-			compatible = "nvidia,tegra124-vhost-isp";
-		};
-
-		isp@54680000 {
-			compatible = "nvidia,tegra124-vhost-isp";
-		};
-
-		msenc {
-			compatible = "nvidia,tegra124-vhost-msenc";
-		};
-
-		nvavp {
-			status = "disabled";
-		};
-
 		tsec {
 			status = "disabled";
 		};
@@ -209,18 +167,7 @@
 		ivc-queue4 = <&tegra_hv 7>;
 	};
 
-	avp-virt {
-		status = "okay";
-		compatible = "nvidia,tegra124-avp-virt";
-		iommus = <&smmu TEGRA_SWGROUP_AVPC>,
-			 <&smmu TEGRA_SWGROUP_A9AVP>,
-			 <&smmu TEGRA_SWGROUP_VDE>;
-		ivc_queue = <&tegra_hv 21>;
-	};
-
-	tegra_carveouts {
-		compatible = "nvidia,carveouts";
+	tegra-carveouts {
 		iommus = <&smmu TEGRA_SWGROUP_HC>;
-		status = "okay";
 	};
 };

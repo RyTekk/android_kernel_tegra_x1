@@ -5,7 +5,7 @@ NVIDIA TEGRA210 DisplayPort
  dp-display node must be contained in sor1 parent node. This node represents NVIDIA TEGRA210 DisplayPort.
 
  Required properties:
- - name: hdmi-display
+ - name: dp-display
  - compatible: Should contain "dp, display".
 
  Optional properties:
@@ -13,6 +13,7 @@ NVIDIA TEGRA210 DisplayPort
    This GPIO is used internally by the DPAUX and should not be explicitly
    touched by the DP driver itself.
  - nvidia,tx-pu-disable: Specifies whether TX_PU is disabled.
+ - nvidia,lanes: Specifies the number of connected data lanes
 
  1.A) NVIDIA Display Default Output Settings
  This must be contained in dp-display parent node. This is default output settings.
@@ -30,6 +31,8 @@ NVIDIA TEGRA210 DisplayPort
    TEGRA_DC_OUT_N_SHOT_MODE, TEGRA_DC_OUT_ONE_SHOT_LP_MODE,
    TEGRA_DC_OUT_INITIALIZED_MODE and TEGRA_DC_OUT_HOTPLUG_WAKE_LP0.
    If several items are written, bitwise OR is operated for them, internally.
+ - nvidia,out-hdcp-policy: One of TEGRA_DC_OUT_HDCP_POLICY_ALWAYS_ON,
+   TEGRA_DC_OUT_HDCP_POLICY_ALWAYS_OFF
  - nvidia,out-parent-clk: Parent clk for display controller.
  - nvidia,out-max-pixclk: Maximum pixel clock in pico-seconds.
  - nvidia,dither: Dither option. Should be TEGRA_DC_UNDEFINED_DITHER or
@@ -46,7 +49,10 @@ NVIDIA TEGRA210 DisplayPort
  - nvidia,out-yres: Visible resolution for height.
  Optional properties:
  - is_ext_dp_panel: Specifies whether this is an external panel or an eDP panel.
- - nvidia,link-bw: Specifies the preferred link bandwidth to use for main DP link.
+ - nvidia,enable-fast-lt-pdata: Determines whether DP driver will attempt fast LT with
+   the precalibrated settings listed under the dp-lt-settings node.
+ - nvidia,lanes: Specifies the max lane count to use for main DP link.
+ - nvidia,link-bw: Specifies the max link bandwidth to use for main DP link.
 
  1.B) the dp-lt-settings node:
  The dp-lt-settings node holds link training settings for dp.
@@ -65,8 +71,7 @@ NVIDIA TEGRA210 DisplayPort
    POST_CURSOR2_L1, POST_CURSOR2_L2, or POST_CURSOR2_L3.
  Optional properties:
  - nvidia,tx-pu: Specifies TX_PU value.
- - nvidia,load-adj: Specifies LOADADJ value. Can be 0x3, 0x4, or 0x6.
-
+ - nvidia,load-adj: Specifies LOADADJ value.
 
 Example
 

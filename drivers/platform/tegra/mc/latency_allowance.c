@@ -31,9 +31,9 @@
 #include <asm/bug.h>
 #include <asm/io.h>
 #include <asm/string.h>
-#include <mach/latency_allowance.h>
 
-#include <tegra/mc.h>
+#include <linux/platform/tegra/latency_allowance.h>
+#include <linux/platform/tegra/mc.h>
 
 #include "la_priv.h"
 
@@ -283,6 +283,22 @@ int tegra_set_disp_latency_allowance(enum tegra_la_id id,
 		return cs.set_disp_la(id, emc_freq_hz, bw_mbps, disp_params);
 	else if (cs.set_la)
 		return cs.set_la(id, bw_mbps);
+	return 0;
+}
+
+/*
+ * Check if the passed bandwidth is possible.
+ *
+ * Returns zero if there is a possible LA value that can satifsy @bw_mbps at
+ * @emc_freq_hz. If no function has been defined for the active chip then this
+ * this function returns true (i.e 0).
+ */
+int tegra_check_disp_latency_allowance(enum tegra_la_id id,
+				       unsigned long emc_freq_hz,
+				       unsigned int bw_mbps,
+				       struct dc_to_la_params disp_params) {
+	if (cs.check_disp_la)
+		return cs.check_disp_la(id, emc_freq_hz, bw_mbps, disp_params);
 	return 0;
 }
 

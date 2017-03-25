@@ -44,12 +44,14 @@ struct nvhost_syncpt_attr {
 
 struct nvhost_syncpt {
 	bool *assigned;
+	bool *in_use;
 	bool *client_managed;
 	struct kobject *kobj;
 	struct mutex syncpt_mutex;
 	atomic_t *min_val;
 	atomic_t *max_val;
 	atomic_t *lock_counts;
+	atomic_t *ref;
 	const char **syncpt_names;
 	const char **last_used_by;
 	struct nvhost_syncpt_attr *syncpt_attrs;
@@ -145,7 +147,7 @@ const char *nvhost_syncpt_get_last_client(struct platform_device *pdev, int id);
 void nvhost_syncpt_reset(struct nvhost_syncpt *sp);
 void nvhost_syncpt_reset_client(struct platform_device *pdev);
 
-const char *nvhost_syncpt_get_name_from_id(int id);
+const char *nvhost_syncpt_get_name_from_id(struct nvhost_syncpt *sp, int id);
 int nvhost_syncpt_read_check(struct nvhost_syncpt *sp, u32 id, u32 *val);
 u32 nvhost_syncpt_read(struct nvhost_syncpt *sp, u32 id);
 
@@ -175,5 +177,9 @@ struct nvhost_sync_timeline *nvhost_syncpt_timeline(struct nvhost_syncpt *sp,
 int nvhost_syncpt_mark_unused(struct nvhost_syncpt *sp, u32 syncptid);
 int nvhost_syncpt_mark_used(struct nvhost_syncpt *sp,
 			    u32 chid, u32 syncptid);
+
+int nvhost_syncpt_get_ref(struct nvhost_syncpt *sp, u32 id);
+void nvhost_syncpt_put_ref(struct nvhost_syncpt *sp, u32 id);
+int nvhost_syncpt_read_ref(struct nvhost_syncpt *sp, u32 id);
 
 #endif

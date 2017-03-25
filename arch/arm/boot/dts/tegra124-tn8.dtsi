@@ -67,7 +67,7 @@
 	pmc@7000e400 {
 		status = "okay";
 		nvidia,invert-interrupt;
-		nvidia,cpu-suspend-freq = <204000>;
+		nvidia,cpu-suspend-freq = <1044000>;
 	};
 
 	xusb@70090000 {
@@ -124,11 +124,15 @@
 		nvidia,port-otg;
 		nvidia,charging-supported;
 		nvidia,turn-off-vbus-in-lp0;
-		nvidia,dcp-current-limit-ma = <3000>;
+		nvidia,dcp-current-limit-ua = <3000000>;
 	};
 
 	watchdog@60005100 {
 		nvidia,enable-on-init;
-		nvidia,heartbeat-init = <200>;
+		nvidia,heartbeat-init = <120>;
+	};
+
+	otg@7d000000 {
+		nvidia,turn-off-vbus-in-lp0;
 	};
 };

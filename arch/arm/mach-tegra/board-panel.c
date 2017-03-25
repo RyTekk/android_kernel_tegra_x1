@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -33,6 +33,9 @@
 #include "iomap.h"
 #include <linux/platform/tegra/dvfs.h>
 #include <linux/platform_data/lp855x.h>
+
+#define DC0_ID			0
+#define DC1_ID			1
 
 #define PRISM_THRESHOLD		50
 #define HYST_VAL		25
@@ -200,6 +203,9 @@ int tegra_panel_gpio_get_dt(const char *comp_str,
 	panel->panel_gpio[TEGRA_GPIO_PANEL_EN] =
 		of_get_named_gpio(node, "nvidia,panel-en-gpio", 0);
 
+	panel->panel_gpio[TEGRA_GPIO_PANEL_EN_1] =
+		of_get_named_gpio(node, "nvidia,panel-en-1-gpio", 0);
+
 	panel->panel_gpio[TEGRA_GPIO_BL_ENABLE] =
 		of_get_named_gpio(node, "nvidia,panel-bl-en-gpio", 0);
 
@@ -224,6 +230,9 @@ int tegra_panel_gpio_get_dt(const char *comp_str,
 				break;
 			case TEGRA_GPIO_PANEL_EN:
 				label = "tegra-panel-en";
+				break;
+			case TEGRA_GPIO_PANEL_EN_1:
+				label = "tegra-panel-en-1";
 				break;
 			case TEGRA_GPIO_BL_ENABLE:
 				label = "tegra-panel-bl-enable";
@@ -333,6 +342,10 @@ static bool tegra_available_pwm_bl_ops_register(struct device *dev)
 		dev_set_drvdata(dev, dsi_l_720p_5_loki_ops.pwm_bl_ops);
 	} else if (of_device_is_compatible(np_bl, "s-edp,uhdtv-15-6-bl")) {
 		dev_set_drvdata(dev, edp_s_uhdtv_15_6_ops.pwm_bl_ops);
+	} else if (of_device_is_compatible(np_bl, "o,720-1280-6-0-bl")) {
+		dev_set_drvdata(dev, dsi_o_720p_6_0_ops.pwm_bl_ops);
+	} else if (of_device_is_compatible(np_bl, "o,720-1280-6-0-01-bl")) {
+		dev_set_drvdata(dev, dsi_o_720p_6_0_01_ops.pwm_bl_ops);
 	} else {
 		pr_info("invalid compatible for backlight node\n");
 		goto end;
@@ -404,8 +417,12 @@ static void tegra_pwm_bl_ops_reg_based_on_disp_board_id(struct device *dev)
 		break;
 	case BOARD_PM363:
 	case BOARD_E1824:
-		if (of_machine_is_compatible("nvidia,jetson-cv"))
-			is_edp_s_2160p_15_6 = true;
+		if (of_machine_is_compatible("nvidia,jetson-cv")) {
+			if (display_board.sku == 0x123)
+				is_edp_a_1080p_14_0 = true;
+			else
+				is_edp_s_2160p_15_6 = true;
+		}
 		else if (display_board.sku == 1200)
 			is_edp_i_1080p_11_6 = true;
 		else
@@ -488,7 +505,7 @@ static struct device_node *available_internal_panel_select(
 	}
 
 	if (!np_panel) {
-		np_sor = of_find_node_by_path(SOR_NODE);
+		np_sor = of_find_node_by_path(dc_or_node_names[DC0_ID]);
 		if (np_sor) {
 			for_each_available_child_of_node(np_sor, np_panel) {
 				if (np_panel && of_get_child_by_name(
@@ -567,6 +584,12 @@ static struct device_node *available_internal_panel_select(
 	} else if (of_device_is_compatible(np_panel, "s-edp,uhdtv-15-6")) {
 		tegra_panel_register_ops(dc_out,
 			&edp_s_uhdtv_15_6_ops);
+	} else if (of_device_is_compatible(np_panel, "o,720-1280-6-0")) {
+		tegra_panel_register_ops(dc_out,
+			&dsi_o_720p_6_0_ops);
+	} else if (of_device_is_compatible(np_panel, "o,720-1280-6-0-01")) {
+		tegra_panel_register_ops(dc_out,
+			&dsi_o_720p_6_0_01_ops);
 	} else {
 		pr_info("invalid panel compatible\n");
 		of_node_put(np_panel);
@@ -677,8 +700,12 @@ static struct device_node
 		break;
 	case BOARD_PM363:
 	case BOARD_E1824:
-		if (of_machine_is_compatible("nvidia,jetson-cv"))
-			is_edp_s_2160p_15_6 = true;
+		if (of_machine_is_compatible("nvidia,jetson-cv")) {
+			if (display_board.sku == 0x123)
+				is_edp_a_1080p_14_0 = true;
+			else
+				is_edp_s_2160p_15_6 = true;
+		}
 		else if (display_board.sku == 1200)
 			is_edp_i_1080p_11_6 = true;
 		else
@@ -745,8 +772,7 @@ struct device_node *tegra_primary_panel_get_dt_node(
 {
 	struct device_node *np_panel = NULL;
 	struct tegra_dc_out *dc_out = NULL;
-	struct device_node *np_hdmi =
-		of_find_node_by_path(HDMI_NODE);
+	struct device_node *np_hdmi = tegra_dc_get_hdmi_node(DC0_ID);
 
 	if (pdata)
 		dc_out = pdata->default_out;
@@ -764,6 +790,7 @@ struct device_node *tegra_primary_panel_get_dt_node(
 
 	np_panel =
 		available_internal_panel_select(pdata);
+
 	if (np_panel) {
 		/*
 		 * search internal panel node by
@@ -802,7 +829,7 @@ struct device_node *tegra_secondary_panel_get_dt_node(
 				tegra_panel_register_ops(dc_out,
 					fixed_secondary_panel_ops);
 	} else {
-		np_display = of_find_node_by_path(SOR1_NODE);
+		np_display = of_find_node_by_path(dc_or_node_names[DC1_ID]);
 		if (!of_property_read_string(np_display,
 			"nvidia,sor1-output-type", &sor1_output_type)) {
 			if (strcmp(sor1_output_type, "dp") == 0) {
@@ -814,42 +841,12 @@ struct device_node *tegra_secondary_panel_get_dt_node(
 	}
 
 	of_node_put(np_display);
-	np_display = of_find_node_by_path(HDMI_NODE);
+	np_display = tegra_dc_get_hdmi_node(DC1_ID);
 	np_panel = of_get_child_by_name(np_display, "hdmi-display");
 
 success:
 	of_node_put(np_display);
 	return of_device_is_available(np_panel) ? np_panel : NULL;
-}
-
-void tegra_fb_copy_or_clear(void)
-{
-	bool fb_existed = (tegra_fb_start && tegra_fb_size) ?
-		true : false;
-	bool fb2_existed = (tegra_fb2_start && tegra_fb2_size) ?
-		true : false;
-
-	/* Copy the bootloader fb to the fb. */
-	if (fb_existed) {
-		if (tegra_bootloader_fb_size)
-			__tegra_move_framebuffer(NULL,
-				tegra_fb_start, tegra_bootloader_fb_start,
-				min(tegra_fb_size, tegra_bootloader_fb_size));
-		else
-			__tegra_clear_framebuffer(NULL,
-				tegra_fb_start, tegra_fb_size);
-	}
-
-	/* Copy the bootloader fb2 to the fb2. */
-	if (fb2_existed) {
-		if (tegra_bootloader_fb2_size)
-			__tegra_move_framebuffer(NULL,
-				tegra_fb2_start, tegra_bootloader_fb2_start,
-				min(tegra_fb2_size, tegra_bootloader_fb2_size));
-		else
-			__tegra_clear_framebuffer(NULL,
-				tegra_fb2_start, tegra_fb2_size);
-	}
 }
 
 int tegra_disp_defer_vcore_override(void)

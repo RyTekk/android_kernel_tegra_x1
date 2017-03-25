@@ -74,6 +74,8 @@ NVIDIA TEGRA210 High Definition Multimedia Interface
    TEGRA_DC_OUT_N_SHOT_MODE, TEGRA_DC_OUT_ONE_SHOT_LP_MODE,
    TEGRA_DC_OUT_INITIALIZED_MODE and TEGRA_DC_OUT_HOTPLUG_WAKE_LP0.
    If several items are written, bitwise OR is operated for them, internally.
+ - nvidia,out-hdcp-policy: One of TEGRA_DC_OUT_HDCP_POLICY_ALWAYS_ON,
+   TEGRA_DC_OUT_HDCP_POLICY_ALWAYS_OFF
  - nvidia,out-parent-clk: Parent clk for display controller.
  - nvidia,out-max-pixclk: Maximum pixel clock in pico-seconds.
  - nvidia,dither: Dither option. Should be TEGRA_DC_UNDEFINED_DITHER or
@@ -137,6 +139,10 @@ NVIDIA TEGRA210 High Definition Multimedia Interface
  - nvidia,use-vpulse2: With enabled, run histogram on vpulse2 rather than vsync.
  - nvidia,bl-device-name: Backlight device name.
 
+ Optional properties:
+ - nvidia,sd-enable: By default, smartdimmer will be enabled if its device tree node
+   is present. This node can be used to override it by specifiying a value of 0.
+
  1.A.l) NVIDIA Display Controller Color Management Unit Settings
  This must be contained in hdmi-display node. This is color management unit settings.
 
@@ -144,6 +150,17 @@ NVIDIA TEGRA210 High Definition Multimedia Interface
  - name: Should be "cmu".
  - nvidia,cmu-csc: CMU color space conversion matrix. It is 3X3 matrix.
  - nvidia,cmu-lut2: CMU LUT2. Should be 960 u8 arrays.
+
+ 1.A.m) NVIDIA Source Product Description InfoFrame Settings
+ This must be contained in hdmi-display parent node. This is SPD InfoFrame settings.
+
+ Required properties:
+ - name: Should be "spd-infoframe".
+ - vendor-name: A string containing the name of the vendor. It consists of eight 7-bit ASCII
+   characters.
+ - product-description: A string containing the product description. It consists of siteen
+   7-bit ASCII characters.
+ - source-information: A code classifies the source.
 
  1.B) the prod-settings node:
  the prod-settings node holds prod settings for hdmi tmds.
@@ -186,6 +203,11 @@ Example
 					nvidia,out-order = <TEGRA_DC_ORDER_RED_BLUE>;
 					nvidia,out-xres = <1920>;
 					nvidia,out-yres = <1080>;
+				};
+				spd-infoframe {
+					vendor-name = "NVIDIA";
+					product-description = "Jetson-CV TX1";
+					source-information = <1>;
 				};
 			};
 			prod-settings {

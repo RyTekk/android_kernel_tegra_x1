@@ -27,6 +27,8 @@ struct gk20a_semaphore;
 struct gk20a_fence;
 
 struct gk20a_channel_sync {
+	atomic_t refcount;
+
 	/* Generate a gpu wait cmdbuf from syncpoint.
 	 * Returns
 	 *  - a gpu cmdbuf that performs the wait when executed,
@@ -88,10 +90,14 @@ struct gk20a_channel_sync {
 	 * expired. */
 	void (*signal_timeline)(struct gk20a_channel_sync *s);
 
+	/* Returns the sync point id or negative number if no syncpt*/
+	int (*syncpt_id)(struct gk20a_channel_sync *s);
+
 	/* Free the resources allocated by gk20a_channel_sync_create. */
 	void (*destroy)(struct gk20a_channel_sync *s);
 };
 
+void gk20a_channel_sync_destroy(struct gk20a_channel_sync *sync);
 struct gk20a_channel_sync *gk20a_channel_sync_create(struct channel_gk20a *c);
 
 #endif

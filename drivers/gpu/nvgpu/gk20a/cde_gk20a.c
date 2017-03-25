@@ -1,7 +1,7 @@
 /*
  * Color decompression engine support
  *
- * Copyright (c) 2014-2015, NVIDIA Corporation.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA Corporation.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -76,7 +76,7 @@ __must_hold(&cde_app->mutex)
 	/* release mapped memory */
 	gk20a_deinit_cde_img(cde_ctx);
 	gk20a_gmmu_unmap(vm, cde_ctx->backing_store_vaddr,
-			 g->gr.compbit_store.size, 1);
+			 g->gr.compbit_store.mem.size, 1);
 
 	/* free the channel */
 	gk20a_channel_close(ch);
@@ -392,7 +392,7 @@ static int gk20a_cde_patch_params(struct gk20a_cde_ctx *cde_ctx)
 			new_data = cde_ctx->compbit_size;
 			break;
 		case TYPE_PARAM_BACKINGSTORE_SIZE:
-			new_data = g->gr.compbit_store.size;
+			new_data = g->gr.compbit_store.mem.size;
 			break;
 		case TYPE_PARAM_SOURCE_SMMU_ADDR:
 			new_data = gk20a_mm_gpuva_to_iova_base(cde_ctx->vm,
@@ -488,7 +488,7 @@ static int gk20a_init_cde_required_class(struct gk20a_cde_ctx *cde_ctx,
 	alloc_obj_ctx.flags = 0;
 
 	/* CDE enabled */
-	cde_ctx->ch->cde = 1;
+	cde_ctx->ch->cde = true;
 
 	err = gk20a_alloc_obj_ctx(cde_ctx->ch, &alloc_obj_ctx);
 	if (err) {
@@ -955,7 +955,8 @@ __releases(&cde_app->mutex)
 				 NVGPU_MAP_BUFFER_FLAGS_CACHEABLE_TRUE,
 				 compbits_kind, NULL, true,
 				 gk20a_mem_flag_none,
-				 map_offset, map_size);
+				 map_offset, map_size,
+				 NULL);
 	if (!map_vaddr) {
 		dma_buf_put(compbits_buf);
 		err = -EINVAL;
@@ -1001,7 +1002,7 @@ __releases(&cde_app->mutex)
 	}
 
 	gk20a_dbg(gpu_dbg_cde, "cde: buffer=cbc, size=%zu, gpuva=%llx\n",
-		 g->gr.compbit_store.size, cde_ctx->backing_store_vaddr);
+		 g->gr.compbit_store.mem.size, cde_ctx->backing_store_vaddr);
 	gk20a_dbg(gpu_dbg_cde, "cde: buffer=compbits, size=%llu, gpuva=%llx\n",
 		 cde_ctx->compbit_size, cde_ctx->compbit_vaddr);
 
@@ -1039,9 +1040,9 @@ __releases(&cde_app->mutex)
 	struct gk20a_cde_app *cde_app = &g->cde_app;
 	bool channel_idle;
 
-	mutex_lock(&ch->jobs_lock);
+	spin_lock(&ch->jobs_lock);
 	channel_idle = list_empty(&ch->jobs);
-	mutex_unlock(&ch->jobs_lock);
+	spin_unlock(&ch->jobs_lock);
 
 	if (!channel_idle)
 		return;
@@ -1125,10 +1126,11 @@ static int gk20a_cde_load(struct gk20a_cde_ctx *cde_ctx)
 	}
 
 	/* map backing store to gpu virtual space */
-	vaddr = gk20a_gmmu_map(ch->vm, &gr->compbit_store.sgt,
-			       g->gr.compbit_store.size,
+	vaddr = gk20a_gmmu_map(ch->vm, &gr->compbit_store.mem.sgt,
+			       g->gr.compbit_store.mem.size,
 			       NVGPU_MAP_BUFFER_FLAGS_CACHEABLE_TRUE,
-			       gk20a_mem_flag_read_only);
+			       gk20a_mem_flag_read_only,
+			       false);
 
 	if (!vaddr) {
 		gk20a_warn(&cde_ctx->pdev->dev, "cde: cannot map compression bit backing store");
@@ -1154,7 +1156,7 @@ static int gk20a_cde_load(struct gk20a_cde_ctx *cde_ctx)
 	return 0;
 
 err_init_cde_img:
-	gk20a_gmmu_unmap(ch->vm, vaddr, g->gr.compbit_store.size, 1);
+	gk20a_gmmu_unmap(ch->vm, vaddr, g->gr.compbit_store.mem.size, 1);
 err_map_backingstore:
 err_alloc_gpfifo:
 	gk20a_vm_put(ch->vm);
@@ -1260,17 +1262,6 @@ enum cde_launch_patch_id {
 	PATCH_V_QMD_REGISTER_COUNT_ID       = 1056,
 };
 
-enum programs {
-	PROG_HPASS              = 0,
-	PROG_VPASS_LARGE        = 1,
-	PROG_VPASS_SMALL        = 2,
-	PROG_HPASS_DEBUG        = 3,
-	PROG_VPASS_LARGE_DEBUG  = 4,
-	PROG_VPASS_SMALL_DEBUG  = 5,
-	PROG_PASSTHROUGH        = 6,
-	NUM_PROGRAMS            = 7
-};
-
 /* maximum number of WRITE_PATCHes in the below function */
 #define MAX_CDE_LAUNCH_PATCHES		  32
 
@@ -1302,17 +1293,20 @@ static int gk20a_buffer_convert_gpu_to_cde_v1(
 	const int xblocks = (xtiles + 1) >> 1;
 	const int voffset = compbits_voffset - compbits_hoffset;
 
-	int hprog = PROG_HPASS;
-	int vprog = (block_height_log2 >= 2) ?
-		PROG_VPASS_LARGE : PROG_VPASS_SMALL;
-	if (g->cde_app.shader_parameter == 1) {
-		hprog = PROG_PASSTHROUGH;
-		vprog = PROG_PASSTHROUGH;
-	} else if (g->cde_app.shader_parameter == 2) {
-		hprog = PROG_HPASS_DEBUG;
-		vprog = (block_height_log2 >= 2) ?
-			PROG_VPASS_LARGE_DEBUG :
-			PROG_VPASS_SMALL_DEBUG;
+	int hprog = -1;
+	int vprog = -1;
+
+	if (g->ops.cde.get_program_numbers)
+		g->ops.cde.get_program_numbers(g, block_height_log2,
+					       &hprog, &vprog);
+	else {
+		gk20a_warn(&g->dev->dev, "cde: chip not supported");
+		return -ENOSYS;
+	}
+
+	if (hprog < 0 || vprog < 0) {
+		gk20a_warn(&g->dev->dev, "cde: could not determine programs");
+		return -ENOSYS;
 	}
 
 	if (xtiles > 8192 / 8 || ytiles > 8192 / 8)

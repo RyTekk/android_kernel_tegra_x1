@@ -30,6 +30,7 @@
 #include <linux/platform_data/tegra_edp.h>
 #include <linux/pm_qos.h>
 #include <trace/events/nvhost.h>
+#include <linux/uaccess.h>
 
 #include <governor.h>
 
@@ -49,7 +50,8 @@ static ssize_t nvhost_scale_load_show(struct device *dev,
 	u32 busy_time;
 	ssize_t res;
 
-	actmon_op().read_avg_norm(profile->actmon, &busy_time);
+	actmon_op().read_avg_norm(profile->actmon[ENGINE_ACTMON],
+				&busy_time);
 	res = snprintf(buf, PAGE_SIZE, "%u\n", busy_time);
 
 	return res;
@@ -66,7 +68,7 @@ static DEVICE_ATTR(load, S_IRUGO, nvhost_scale_load_show, NULL);
 static int nvhost_scale_make_freq_table(struct nvhost_device_profile *profile)
 {
 	unsigned long *freqs;
-	int num_freqs, err;
+	int num_freqs, err, low_end_cnt = 0;
 	unsigned long max_freq =  clk_round_rate(profile->clk, UINT_MAX);
 	unsigned long min_freq =  clk_round_rate(profile->clk, 0);
 
@@ -80,17 +82,18 @@ static int nvhost_scale_make_freq_table(struct nvhost_device_profile *profile)
 		return -ENOSYS;
 
 	/* check for duplicate frequencies at higher end */
-	while ((num_freqs >= 2 &&
-		freqs[num_freqs - 2] == freqs[num_freqs - 1]) ||
-	       (num_freqs && max_freq < freqs[num_freqs - 1]))
+	while (((num_freqs >= 2) &&
+		(freqs[num_freqs - 2] == freqs[num_freqs - 1])) ||
+	       (num_freqs && (max_freq < freqs[num_freqs - 1])))
 		num_freqs--;
 
 	/* check low end */
-	while ((num_freqs >= 2 && freqs[0] == freqs[1]) ||
-	       (num_freqs && freqs[0] < min_freq)) {
-		freqs++;
+	while (((num_freqs >= 2) && (freqs[low_end_cnt] == freqs[low_end_cnt + 1])) ||
+	       (num_freqs && (freqs[low_end_cnt] < min_freq))) {
+		low_end_cnt++;
 		num_freqs--;
 	}
+	freqs += low_end_cnt;
 
 	if (!num_freqs)
 		dev_warn(&profile->pdev->dev, "dvfs table had no applicable frequencies!\n");
@@ -126,7 +129,8 @@ static int nvhost_scale_target(struct device *dev, unsigned long *freq,
 	if (clk_get_rate(profile->clk) == *freq)
 		return 0;
 
-	nvhost_module_set_devfreq_rate(profile->pdev, 0, *freq);
+	nvhost_module_set_rate(profile->pdev, pdata->power_manager,
+				*freq, 0, NVHOST_CLOCK);
 	if (pdata->scaling_post_cb)
 		pdata->scaling_post_cb(profile, *freq);
 
@@ -167,30 +171,6 @@ static int nvhost_scale_qos_notify(struct notifier_block *nb,
 }
 
 /*
- * update_load_estimate(profile)
- *
- * Update load estimate using busy/idle flag.
- */
-
-static void update_load_estimate(struct nvhost_device_profile *profile,
-				 bool busy)
-{
-	ktime_t t;
-	unsigned long dt;
-
-	t = ktime_get();
-	dt = ktime_us_delta(t, profile->last_event_time);
-
-	profile->dev_stat.total_time += dt;
-	profile->last_event_time = t;
-
-	if (profile->busy)
-		profile->dev_stat.busy_time += dt;
-
-	profile->busy = busy;
-}
-
-/*
  * update_load_estimate_actmon(profile)
  *
  * Update load estimate using hardware actmon. The actmon value is normalised
@@ -208,7 +188,8 @@ static void update_load_estimate_actmon(struct nvhost_device_profile *profile)
 
 	profile->dev_stat.total_time = dt;
 	profile->last_event_time = t;
-	actmon_op().read_avg_norm(profile->actmon, &busy_time);
+	actmon_op().read_avg_norm(profile->actmon[ENGINE_ACTMON],
+				&busy_time);
 	profile->dev_stat.busy_time = (busy_time * dt) / 1000;
 }
 
@@ -231,8 +212,11 @@ static void nvhost_scale_notify(struct platform_device *pdev, bool busy)
 
 	if (nvhost_debug_trace_actmon) {
 		u32 load;
-		actmon_op().read_avg_norm(profile->actmon, &load);
-		trace_nvhost_scale_notify(pdev->name, load, busy);
+
+		actmon_op().read_avg_norm(profile->actmon[ENGINE_ACTMON],
+					&load);
+		if (load)
+			trace_nvhost_scale_notify(pdev->name, load, busy);
 	}
 
 	/* If defreq is disabled, set the freq to max or min */
@@ -243,8 +227,6 @@ static void nvhost_scale_notify(struct platform_device *pdev, bool busy)
 	}
 
 	mutex_lock(&devfreq->lock);
-	if (!profile->actmon)
-		update_load_estimate(profile, busy);
 	profile->dev_stat.busy = busy;
 	update_devfreq(devfreq);
 	mutex_unlock(&devfreq->lock);
@@ -276,7 +258,7 @@ static int nvhost_scale_get_dev_status(struct device *dev,
 	/* Make sure there are correct values for the current frequency */
 	profile->dev_stat.current_frequency = clk_get_rate(profile->clk);
 
-	if (profile->actmon)
+	if (profile->actmon[ENGINE_ACTMON])
 		update_load_estimate_actmon(profile);
 
 	/* Copy the contents of the current device status */
@@ -302,7 +284,8 @@ static int nvhost_scale_set_low_wmark(struct device *dev,
 	struct nvhost_device_data *pdata = dev_get_drvdata(dev);
 	struct nvhost_device_profile *profile = pdata->power_profile;
 
-	actmon_op().set_low_wmark(profile->actmon, threshold);
+	actmon_op().set_low_wmark(profile->actmon[ENGINE_ACTMON],
+			threshold);
 
 	return 0;
 }
@@ -320,7 +303,8 @@ static int nvhost_scale_set_high_wmark(struct device *dev,
 	struct nvhost_device_data *pdata = dev_get_drvdata(dev);
 	struct nvhost_device_profile *profile = pdata->power_profile;
 
-	actmon_op().set_high_wmark(profile->actmon, threshold);
+	actmon_op().set_high_wmark(profile->actmon[ENGINE_ACTMON],
+			threshold);
 
 	return 0;
 }
@@ -333,7 +317,8 @@ void nvhost_scale_init(struct platform_device *pdev)
 {
 	struct nvhost_device_data *pdata = platform_get_drvdata(pdev);
 	struct nvhost_device_profile *profile;
-	int err;
+	int err, i;
+	struct host1x_actmon *actmon;
 
 	if (pdata->power_profile)
 		return;
@@ -345,6 +330,7 @@ void nvhost_scale_init(struct platform_device *pdev)
 	profile->pdev = pdev;
 	profile->clk = pdata->clk[0];
 	profile->dev_stat.busy = false;
+	profile->num_actmons = nvhost_get_host(pdev)->info.nb_actmons;
 
 	/* Create frequency table */
 	err = nvhost_scale_make_freq_table(profile);
@@ -364,19 +350,32 @@ void nvhost_scale_init(struct platform_device *pdev)
 		    &dev_attr_load))
 			goto err_create_sysfs_entry;
 
-		profile->actmon = kzalloc(sizeof(struct host1x_actmon),
+		profile->actmon = kzalloc(profile->num_actmons *
+					sizeof(struct host1x_actmon *),
 					  GFP_KERNEL);
 		if (!profile->actmon)
-			goto err_allocate_actmon;
+			goto err_allocate_actmons;
 
-		profile->actmon->host = nvhost_get_host(pdev);
-		profile->actmon->regs = nvhost_get_host(pdev)->aperture +
-			pdata->actmon_regs;
-		profile->actmon->pdev = pdev;
+		for (i = 0; i < profile->num_actmons; i++) {
+			profile->actmon[i] = kzalloc(
+					sizeof(struct host1x_actmon),
+					GFP_KERNEL);
 
-		actmon_op().init(profile->actmon);
-		actmon_op().debug_init(profile->actmon, pdata->debugfs);
-		actmon_op().deinit(profile->actmon);
+			if (!profile->actmon[i])
+				goto err_allocate_actmon;
+
+			actmon = profile->actmon[i];
+			actmon->host = nvhost_get_host(pdev);
+			actmon->pdev = pdev;
+
+			actmon->type = i;
+
+			actmon->regs = actmon_op().get_actmon_regs(actmon);
+
+			actmon_op().init(actmon);
+			nvhost_actmon_debug_init(actmon, pdata->debugfs);
+			actmon_op().deinit(actmon);
+		}
 	}
 
 	if (pdata->devfreq_governor) {
@@ -400,6 +399,10 @@ void nvhost_scale_init(struct platform_device *pdev)
 			devfreq = NULL;
 
 		pdata->power_manager = devfreq;
+		if (nvhost_module_add_client(pdev, devfreq)) {
+			nvhost_err(&pdev->dev,
+				"failed to register devfreq as acm client");
+		}
 	}
 
 	/* Should we register QoS callback for this device? */
@@ -416,6 +419,8 @@ void nvhost_scale_init(struct platform_device *pdev)
 	return;
 
 err_allocate_actmon:
+	kfree(profile->actmon);
+err_allocate_actmons:
 	nvhost_module_idle(nvhost_get_host(pdev)->dev);
 err_module_busy:
 err_get_freqs:
@@ -438,6 +443,9 @@ void nvhost_scale_deinit(struct platform_device *pdev)
 
 	if (!profile)
 		return;
+
+	/* Remove devfreq from acm client list */
+	nvhost_module_remove_client(pdev, pdata->power_manager);
 
 	if (pdata->power_manager)
 		devfreq_remove_device(pdata->power_manager);
@@ -470,12 +478,14 @@ int nvhost_scale_hw_init(struct platform_device *pdev)
 {
 	struct nvhost_device_data *pdata = platform_get_drvdata(pdev);
 	struct nvhost_device_profile *profile = pdata->power_profile;
+	int i;
 
 	if (!(profile && profile->actmon))
 		return 0;
 
 	/* initialize actmon */
-	actmon_op().init(profile->actmon);
+	for (i = 0; i < profile->num_actmons; i++)
+		actmon_op().init(profile->actmon[i]);
 
 	/* load engine specific actmon settings */
 	if (pdata->mamask_addr)
@@ -498,6 +508,7 @@ void nvhost_scale_hw_deinit(struct platform_device *pdev)
 {
 	struct nvhost_device_data *pdata = platform_get_drvdata(pdev);
 	struct nvhost_device_profile *profile = pdata->power_profile;
+	int i;
 
 	if (profile && profile->actmon) {
 		if (pdata->mamask_addr)
@@ -506,6 +517,240 @@ void nvhost_scale_hw_deinit(struct platform_device *pdev)
 		if (pdata->borps_addr)
 			host1x_writel(pdev, pdata->borps_addr, 0x0);
 
-		actmon_op().deinit(profile->actmon);
+		for (i = 0; i < profile->num_actmons; i++)
+			actmon_op().deinit(profile->actmon[i]);
 	}
 }
+
+/* activity monitor */
+static int actmon_count_norm_show(struct seq_file *s, void *unused)
+{
+	struct host1x_actmon *actmon = s->private;
+	u32 avg;
+	int err;
+
+	err = actmon_op().read_count_norm(actmon, &avg);
+	if (!err)
+		seq_printf(s, "%d\n", avg);
+	return err;
+}
+
+static int actmon_count_norm_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, actmon_count_norm_show, inode->i_private);
+}
+
+static const struct file_operations actmon_count_norm_fops = {
+	.open		= actmon_count_norm_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int actmon_count_show(struct seq_file *s, void *unused)
+{
+	struct host1x_actmon *actmon = s->private;
+	u32 avg;
+	int err;
+
+	err = actmon_op().read_count(actmon, &avg);
+	if (!err)
+		seq_printf(s, "%d\n", avg);
+	return err;
+}
+
+static int actmon_count_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, actmon_count_show, inode->i_private);
+}
+
+static const struct file_operations actmon_count_fops = {
+	.open		= actmon_count_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int actmon_avg_show(struct seq_file *s, void *unused)
+{
+	struct host1x_actmon *actmon = s->private;
+	u32 avg;
+	int err;
+
+	err = actmon_op().read_avg(actmon, &avg);
+	if (!err)
+		seq_printf(s, "%d\n", avg);
+	return err;
+}
+
+static int actmon_avg_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, actmon_avg_show, inode->i_private);
+}
+
+static const struct file_operations actmon_avg_fops = {
+	.open		= actmon_avg_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int actmon_avg_norm_show(struct seq_file *s, void *unused)
+{
+	struct host1x_actmon *actmon = s->private;
+	u32 avg;
+	int err;
+
+	err = actmon_op().read_avg_norm(actmon, &avg);
+	if (!err)
+		seq_printf(s, "%d\n", avg);
+	return err;
+}
+
+static int actmon_avg_norm_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, actmon_avg_norm_show, inode->i_private);
+}
+
+static const struct file_operations actmon_avg_norm_fops = {
+	.open		= actmon_avg_norm_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int actmon_sample_period_norm_show(struct seq_file *s, void *unused)
+{
+	struct host1x_actmon *actmon = s->private;
+	long period = actmon_op().get_sample_period_norm(actmon);
+	seq_printf(s, "%ld\n", period);
+	return 0;
+}
+
+static int actmon_sample_period_norm_open(struct inode *inode,
+						struct file *file)
+{
+	return single_open(file, actmon_sample_period_norm_show,
+		inode->i_private);
+}
+
+static ssize_t actmon_sample_period_norm_write(struct file *file,
+				const char __user *user_buf,
+				size_t count, loff_t *ppos)
+{
+	struct seq_file *s = file->private_data;
+	struct host1x_actmon *actmon = s->private;
+	char buffer[40];
+	int buf_size;
+	unsigned long period;
+
+	memset(buffer, 0, sizeof(buffer));
+	buf_size = min(count, (sizeof(buffer)-1));
+
+	if (copy_from_user(buffer, user_buf, buf_size))
+		return -EFAULT;
+
+	if (kstrtoul(buffer, 10, &period))
+		return -EINVAL;
+
+	actmon_op().set_sample_period_norm(actmon, period);
+
+	return count;
+}
+
+static const struct file_operations actmon_sample_period_norm_fops = {
+	.open		= actmon_sample_period_norm_open,
+	.read		= seq_read,
+	.write          = actmon_sample_period_norm_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int actmon_sample_period_show(struct seq_file *s, void *unused)
+{
+	struct host1x_actmon *actmon = s->private;
+	long period = actmon_op().get_sample_period(actmon);
+	seq_printf(s, "%ld\n", period);
+	return 0;
+}
+
+static int actmon_sample_period_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, actmon_sample_period_show, inode->i_private);
+}
+
+static const struct file_operations actmon_sample_period_fops = {
+	.open		= actmon_sample_period_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int actmon_k_show(struct seq_file *s, void *unused)
+{
+	struct host1x_actmon *actmon = s->private;
+	long period = actmon_op().get_k(actmon);
+	seq_printf(s, "%ld\n", period);
+	return 0;
+}
+
+static int actmon_k_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, actmon_k_show, inode->i_private);
+}
+
+static ssize_t actmon_k_write(struct file *file,
+				const char __user *user_buf,
+				size_t count, loff_t *ppos)
+{
+	struct seq_file *s = file->private_data;
+	struct host1x_actmon *actmon = s->private;
+	char buffer[40];
+	int buf_size;
+	unsigned long k;
+
+	memset(buffer, 0, sizeof(buffer));
+	buf_size = min(count, (sizeof(buffer)-1));
+
+	if (copy_from_user(buffer, user_buf, buf_size))
+		return -EFAULT;
+
+	if (kstrtoul(buffer, 10, &k))
+		return -EINVAL;
+
+	actmon_op().set_k(actmon, k);
+
+	return count;
+}
+
+static const struct file_operations actmon_k_fops = {
+	.open		= actmon_k_open,
+	.read		= seq_read,
+	.write          = actmon_k_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+void nvhost_actmon_debug_init(struct host1x_actmon *actmon,
+				     struct dentry *de)
+{
+	BUG_ON(!actmon);
+	debugfs_create_file("actmon_k", S_IRUGO, de,
+			actmon, &actmon_k_fops);
+	debugfs_create_file("actmon_sample_period", S_IRUGO, de,
+			actmon, &actmon_sample_period_fops);
+	debugfs_create_file("actmon_sample_period_norm", S_IRUGO, de,
+			actmon, &actmon_sample_period_norm_fops);
+	debugfs_create_file("actmon_avg_norm", S_IRUGO, de,
+			actmon, &actmon_avg_norm_fops);
+	debugfs_create_file("actmon_avg", S_IRUGO, de,
+			actmon, &actmon_avg_fops);
+	debugfs_create_file("actmon_count", S_IRUGO, de,
+			actmon, &actmon_count_fops);
+	debugfs_create_file("actmon_count_norm", S_IRUGO, de,
+			actmon, &actmon_count_norm_fops);
+	/* additional hardware specific debugfs nodes */
+	if (actmon_op().debug_init)
+		actmon_op().debug_init(actmon, de);
+}
+

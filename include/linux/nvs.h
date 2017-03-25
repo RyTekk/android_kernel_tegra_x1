@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+/* Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -25,12 +25,13 @@
 #define NVS_STS_SPEW_DATA		(1 << (NVS_STS_SYS_N + 1))
 #define NVS_STS_SPEW_BUF		(1 << (NVS_STS_SYS_N + 2))
 #define NVS_STS_SPEW_IRQ		(1 << (NVS_STS_SYS_N + 3))
-#define NVS_STS_SPEW_COMMON		(NVS_STS_SPEW_MSG | \
+#define NVS_STS_SPEW_MSK		(NVS_STS_SPEW_MSG | \
 					NVS_STS_SPEW_DATA | \
 					NVS_STS_SPEW_BUF | \
 					NVS_STS_SPEW_IRQ)
 #define NVS_STS_DBG_N			(NVS_STS_SYS_N + 4)
 #define NVS_STS_EXT_N			(NVS_STS_DBG_N)
+#define NVS_STS_MSK			((1 << NVS_STS_DBG_N) - 1)
 
 #define NVS_CHANNEL_N_MAX		(5)
 #define NVS_FLOAT_SIGNIFICANCE_MICRO	(1000000) /* IIO_VAL_INT_PLUS_MICRO */
@@ -67,8 +68,11 @@
 #define SENSOR_FLAG_ON_CHANGE_MODE		(0x2)
 #define SENSOR_FLAG_ONE_SHOT_MODE		(0x4)
 #define SENSOR_FLAG_SPECIAL_REPORTING_MODE	(0x6)
+#define REPORTING_MODE_MASK			(0xE)
+#define REPORTING_MODE_SHIFT			(1)
 /* end AOS sensors.h */
-#define SENSOR_FLAG_READONLY_MASK	(0xE) /* unconfigurable flags */
+/* unconfigurable flags */
+#define SENSOR_FLAG_READONLY_MASK	(REPORTING_MODE_MASK)
 
 enum nvs_float_significance {
 	NVS_FLOAT_MICRO			= 0, /* IIO_VAL_INT_PLUS_MICRO */

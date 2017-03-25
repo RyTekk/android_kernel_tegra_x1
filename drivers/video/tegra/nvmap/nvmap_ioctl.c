@@ -3,7 +3,7 @@
  *
  * User-space interface to nvmap
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -208,27 +208,6 @@ out:
 	return err;
 }
 
-static int nvmap_share_release(struct inode *inode, struct file *file)
-{
-	struct nvmap_handle *h = file->private_data;
-
-	nvmap_handle_put(h);
-	return 0;
-}
-
-static int nvmap_share_mmap(struct file *file, struct vm_area_struct *vma)
-{
-	/* unsupported operation */
-	WARN(1, "mmap is not supported on fd, which shares nvmap handle");
-	return -EPERM;
-}
-
-static const struct file_operations nvmap_fd_fops = {
-	.owner		= THIS_MODULE,
-	.release	= nvmap_share_release,
-	.mmap		= nvmap_share_mmap,
-};
-
 int nvmap_ioctl_getfd(struct file *filp, void __user *arg)
 {
 	struct nvmap_handle *handle;
@@ -355,7 +334,7 @@ int nvmap_ioctl_vpr_floor_size(struct file *filp, void __user *arg)
 	return err;
 }
 
-int nvmap_create_fd(struct nvmap_client *client, struct nvmap_handle *h)
+static int nvmap_create_fd(struct nvmap_client *client, struct nvmap_handle *h)
 {
 	int fd;
 
@@ -413,100 +392,6 @@ int nvmap_ioctl_create(struct file *filp, unsigned int cmd, void __user *arg)
 
 	if (err && fd > 0)
 		sys_close(fd);
-	return err;
-}
-
-int nvmap_map_into_caller_ptr(struct file *filp, void __user *arg, bool is32)
-{
-	struct nvmap_client *client = filp->private_data;
-	struct nvmap_map_caller op;
-#ifdef CONFIG_COMPAT
-	struct nvmap_map_caller_32 op32;
-#endif
-	struct nvmap_vma_priv *priv;
-	struct vm_area_struct *vma;
-	struct nvmap_handle *h = NULL;
-	int err = 0;
-
-#ifdef CONFIG_COMPAT
-	if (is32) {
-		if (copy_from_user(&op32, arg, sizeof(op32)))
-			return -EFAULT;
-		op.handle = op32.handle;
-		op.offset = op32.offset;
-		op.length = op32.length;
-		op.flags = op32.flags;
-		op.addr = op32.addr;
-	} else
-#endif
-		if (copy_from_user(&op, arg, sizeof(op)))
-			return -EFAULT;
-
-	h = nvmap_handle_get_from_fd(op.handle);
-	if (!h)
-		return -EINVAL;
-
-	if(!h->alloc) {
-		nvmap_handle_put(h);
-		return -EFAULT;
-	}
-
-	trace_nvmap_map_into_caller_ptr(client, h, op.offset,
-					op.length, op.flags);
-	down_read(&current->mm->mmap_sem);
-
-	vma = find_vma(current->mm, op.addr);
-	if (!vma) {
-		err = -ENOMEM;
-		goto out;
-	}
-
-	if (op.offset & ~PAGE_MASK) {
-		err = -EFAULT;
-		goto out;
-	}
-
-	if (op.offset >= h->size || op.length > h->size - op.offset) {
-		err = -EADDRNOTAVAIL;
-		goto out;
-	}
-
-	/* the VMA must exactly match the requested mapping operation, and the
-	 * VMA that is targetted must have been created by this driver
-	 */
-	if ((vma->vm_start != op.addr) || !is_nvmap_vma(vma) ||
-	    (vma->vm_end-vma->vm_start != op.length)) {
-		err = -EPERM;
-		goto out;
-	}
-
-	/* verify that each mmap() system call creates a unique VMA */
-	if (vma->vm_private_data)
-		goto out;
-
-	if (!h->heap_pgalloc && (h->carveout->base & ~PAGE_MASK)) {
-		err = -EFAULT;
-		goto out;
-	}
-
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
-	if (!priv)  {
-		err = -ENOMEM;
-		goto out;
-	}
-
-	vma->vm_flags |= (h->heap_pgalloc ? 0 : VM_PFNMAP);
-	priv->handle = h;
-	priv->offs = op.offset;
-	vma->vm_private_data = priv;
-	vma->vm_page_prot = nvmap_pgprot(h, vma->vm_page_prot);
-	nvmap_vma_open(vma);
-
-out:
-	up_read(&current->mm->mmap_sem);
-
-	if (err)
-		nvmap_handle_put(h);
 	return err;
 }
 
@@ -624,54 +509,6 @@ int nvmap_ioctl_rw_handle(struct file *filp, int is_read, void __user *arg,
 	return err;
 }
 
-static int __nvmap_cache_maint(struct nvmap_client *client,
-			       struct nvmap_cache_op *op)
-{
-	struct vm_area_struct *vma;
-	struct nvmap_vma_priv *priv;
-	struct nvmap_handle *handle;
-	unsigned long start;
-	unsigned long end;
-	int err = 0;
-
-	if (!op->addr || op->op < NVMAP_CACHE_OP_WB ||
-	    op->op > NVMAP_CACHE_OP_WB_INV)
-		return -EINVAL;
-
-	handle = nvmap_handle_get_from_fd(op->handle);
-	if (!handle)
-		return -EINVAL;
-
-	down_read(&current->mm->mmap_sem);
-
-	vma = find_vma(current->active_mm, (unsigned long)op->addr);
-	if (!vma || !is_nvmap_vma(vma) ||
-	    (ulong)op->addr < vma->vm_start ||
-	    (ulong)op->addr >= vma->vm_end ||
-	    op->len > vma->vm_end - (ulong)op->addr) {
-		err = -EADDRNOTAVAIL;
-		goto out;
-	}
-
-	priv = (struct nvmap_vma_priv *)vma->vm_private_data;
-
-	if (priv->handle != handle) {
-		err = -EFAULT;
-		goto out;
-	}
-
-	start = (unsigned long)op->addr - vma->vm_start +
-		(vma->vm_pgoff << PAGE_SHIFT);
-	end = start + op->len;
-
-	err = __nvmap_do_cache_maint(client, priv->handle, start, end, op->op,
-				     false);
-out:
-	up_read(&current->mm->mmap_sem);
-	nvmap_handle_put(handle);
-	return err;
-}
-
 int nvmap_ioctl_cache_maint(struct file *filp, void __user *arg, bool is32)
 {
 	struct nvmap_client *client = filp->private_data;
@@ -705,316 +542,6 @@ int nvmap_ioctl_free(struct file *filp, unsigned long arg)
 
 	nvmap_free_handle_fd(client, arg);
 	return sys_close(arg);
-}
-
-void inner_cache_maint(unsigned int op, void *vaddr, size_t size)
-{
-	if (op == NVMAP_CACHE_OP_WB_INV)
-		dmac_flush_range(vaddr, vaddr + size);
-	else if (op == NVMAP_CACHE_OP_INV)
-		dmac_map_area(vaddr, size, DMA_FROM_DEVICE);
-	else
-		dmac_map_area(vaddr, size, DMA_TO_DEVICE);
-}
-
-void outer_cache_maint(unsigned int op, phys_addr_t paddr, size_t size)
-{
-	if (op == NVMAP_CACHE_OP_WB_INV)
-		outer_flush_range(paddr, paddr + size);
-	else if (op == NVMAP_CACHE_OP_INV)
-		outer_inv_range(paddr, paddr + size);
-	else
-		outer_clean_range(paddr, paddr + size);
-}
-
-static void heap_page_cache_maint(
-	struct nvmap_handle *h, unsigned long start, unsigned long end,
-	unsigned int op, bool inner, bool outer, bool clean_only_dirty)
-{
-	if (h->userflags & NVMAP_HANDLE_CACHE_SYNC) {
-		/*
-		 * zap user VA->PA mappings so that any access to the pages
-		 * will result in a fault and can be marked dirty
-		 */
-		nvmap_handle_mkclean(h, start, end-start);
-		nvmap_zap_handle(h, start, end - start);
-	}
-
-#ifdef NVMAP_LAZY_VFREE
-	if (inner) {
-		void *vaddr = NULL;
-
-		if (!h->vaddr) {
-			struct page **pages;
-			/* mutex lock protection is not necessary as it is
-			 * already increased in __nvmap_do_cache_maint to
-			 * protect from migrations.
-			 */
-			nvmap_kmaps_inc_no_lock(h);
-			pages = nvmap_pages(h->pgalloc.pages,
-					    h->size >> PAGE_SHIFT);
-			if (!pages)
-				goto per_page_cache_maint;
-			vaddr = vm_map_ram(pages,
-					h->size >> PAGE_SHIFT, -1,
-					nvmap_pgprot(h, PG_PROT_KERNEL));
-			nvmap_altfree(pages,
-				(h->size >> PAGE_SHIFT) * sizeof(*pages));
-		}
-		if (vaddr && atomic_long_cmpxchg(&h->vaddr, 0, (long)vaddr)) {
-			nvmap_kmaps_dec(h);
-			vm_unmap_ram(vaddr, h->size >> PAGE_SHIFT);
-		}
-		if (h->vaddr) {
-			/* Fast inner cache maintenance using single mapping */
-			inner_cache_maint(op, h->vaddr + start, end - start);
-			if (!outer)
-				return;
-			/* Skip per-page inner maintenance in loop below */
-			inner = false;
-		}
-
-per_page_cache_maint:
-		if (!h->vaddr)
-			nvmap_kmaps_dec(h);
-	}
-#endif
-
-	while (start < end) {
-		struct page *page;
-		void *kaddr, *vaddr;
-		phys_addr_t paddr;
-		unsigned long next;
-		unsigned long off;
-		size_t size;
-
-		page = nvmap_to_page(h->pgalloc.pages[start >> PAGE_SHIFT]);
-		next = min(((start + PAGE_SIZE) & PAGE_MASK), end);
-		off = start & ~PAGE_MASK;
-		size = next - start;
-		paddr = page_to_phys(page) + off;
-
-		if (inner) {
-			kaddr = kmap(page);
-			vaddr = (void *)kaddr + off;
-			BUG_ON(!kaddr);
-			inner_cache_maint(op, vaddr, size);
-			kunmap(page);
-		}
-
-		if (outer)
-			outer_cache_maint(op, paddr, size);
-		start = next;
-	}
-}
-
-#if defined(CONFIG_NVMAP_OUTER_CACHE_MAINT_BY_SET_WAYS)
-static bool fast_cache_maint_outer(unsigned long start,
-		unsigned long end, unsigned int op)
-{
-	bool result = false;
-	if (end - start >= cache_maint_outer_threshold) {
-		if (op == NVMAP_CACHE_OP_WB_INV) {
-			outer_flush_all();
-			result = true;
-		}
-		if (op == NVMAP_CACHE_OP_WB) {
-			outer_clean_all();
-			result = true;
-		}
-	}
-
-	return result;
-}
-#else
-static inline bool fast_cache_maint_outer(unsigned long start,
-		unsigned long end, unsigned int op)
-{
-	return false;
-}
-#endif
-
-#if defined(CONFIG_NVMAP_CACHE_MAINT_BY_SET_WAYS)
-static inline bool can_fast_cache_maint(struct nvmap_handle *h,
-	unsigned long start,
-	unsigned long end, unsigned int op)
-{
-	if ((op == NVMAP_CACHE_OP_INV) ||
-		((end - start) < cache_maint_inner_threshold))
-		return false;
-	return true;
-}
-#else
-static inline bool can_fast_cache_maint(struct nvmap_handle *h,
-	unsigned long start,
-	unsigned long end, unsigned int op)
-{
-	return false;
-}
-#endif
-
-static bool fast_cache_maint(struct nvmap_handle *h,
-	unsigned long start,
-	unsigned long end, unsigned int op,
-	bool clean_only_dirty)
-{
-	if (!can_fast_cache_maint(h, start, end, op))
-		return false;
-
-	if (h->userflags & NVMAP_HANDLE_CACHE_SYNC) {
-		nvmap_handle_mkclean(h, 0, h->size);
-		nvmap_zap_handle(h, 0, h->size);
-	}
-
-	if (op == NVMAP_CACHE_OP_WB_INV)
-		inner_flush_cache_all();
-	else if (op == NVMAP_CACHE_OP_WB)
-		inner_clean_cache_all();
-
-	/* outer maintenance */
-	if (h->flags != NVMAP_HANDLE_INNER_CACHEABLE) {
-		if(!fast_cache_maint_outer(start, end, op))
-		{
-			if (h->heap_pgalloc) {
-				heap_page_cache_maint(h, start,
-					end, op, false, true,
-					clean_only_dirty);
-			} else  {
-				phys_addr_t pstart;
-
-				pstart = start + h->carveout->base;
-				outer_cache_maint(op, pstart, end - start);
-			}
-		}
-	}
-	return true;
-}
-
-struct cache_maint_op {
-	phys_addr_t start;
-	phys_addr_t end;
-	unsigned int op;
-	struct nvmap_handle *h;
-	bool inner;
-	bool outer;
-	bool clean_only_dirty;
-};
-
-static int do_cache_maint(struct cache_maint_op *cache_work)
-{
-	pgprot_t prot;
-	unsigned long kaddr;
-	phys_addr_t pstart = cache_work->start;
-	phys_addr_t pend = cache_work->end;
-	phys_addr_t loop;
-	int err = 0;
-	struct nvmap_handle *h = cache_work->h;
-	struct nvmap_client *client;
-	unsigned int op = cache_work->op;
-	struct vm_struct *area = NULL;
-
-	if (!h || !h->alloc)
-		return -EFAULT;
-
-	client = h->owner;
-	if (can_fast_cache_maint(h, pstart, pend, op))
-		nvmap_stats_inc(NS_CFLUSH_DONE, cache_maint_inner_threshold);
-	else
-		nvmap_stats_inc(NS_CFLUSH_DONE, pend - pstart);
-	trace_nvmap_cache_maint(client, h, pstart, pend, op, pend - pstart);
-	trace_nvmap_cache_flush(pend - pstart,
-		nvmap_stats_read(NS_ALLOC),
-		nvmap_stats_read(NS_CFLUSH_RQ),
-		nvmap_stats_read(NS_CFLUSH_DONE));
-
-	wmb();
-	if (h->flags == NVMAP_HANDLE_UNCACHEABLE ||
-	    h->flags == NVMAP_HANDLE_WRITE_COMBINE || pstart == pend)
-		goto out;
-
-	if (fast_cache_maint(h, pstart, pend, op, cache_work->clean_only_dirty))
-		goto out;
-
-	if (h->heap_pgalloc) {
-		heap_page_cache_maint(h, pstart, pend, op, true,
-			(h->flags == NVMAP_HANDLE_INNER_CACHEABLE) ?
-			false : true, cache_work->clean_only_dirty);
-		goto out;
-	}
-
-	if (pstart > h->size || pend > h->size) {
-		pr_warn("cache maintenance outside handle\n");
-		err = -EINVAL;
-		goto out;
-	}
-
-	prot = nvmap_pgprot(h, PG_PROT_KERNEL);
-	area = alloc_vm_area(PAGE_SIZE, NULL);
-	if (!area) {
-		err = -ENOMEM;
-		goto out;
-	}
-	kaddr = (ulong)area->addr;
-
-	pstart += h->carveout->base;
-	pend += h->carveout->base;
-	loop = pstart;
-
-	while (loop < pend) {
-		phys_addr_t next = (loop + PAGE_SIZE) & PAGE_MASK;
-		void *base = (void *)kaddr + (loop & ~PAGE_MASK);
-		next = min(next, pend);
-
-		ioremap_page_range(kaddr, kaddr + PAGE_SIZE,
-			loop, prot);
-		inner_cache_maint(op, base, next - loop);
-		loop = next;
-		unmap_kernel_range(kaddr, PAGE_SIZE);
-	}
-
-	if (h->flags != NVMAP_HANDLE_INNER_CACHEABLE)
-		outer_cache_maint(op, pstart, pend - pstart);
-
-out:
-	if (area)
-		free_vm_area(area);
-	return err;
-}
-
-int __nvmap_do_cache_maint(struct nvmap_client *client,
-			struct nvmap_handle *h,
-			unsigned long start, unsigned long end,
-			unsigned int op, bool clean_only_dirty)
-{
-	int err;
-	struct cache_maint_op cache_op;
-
-	h = nvmap_handle_get(h);
-	if (!h)
-		return -EFAULT;
-
-	nvmap_kmaps_inc(h);
-	if (op == NVMAP_CACHE_OP_INV)
-		op = NVMAP_CACHE_OP_WB_INV;
-
-	/* clean only dirty is applicable only for Write Back operation */
-	if (op != NVMAP_CACHE_OP_WB)
-		clean_only_dirty = false;
-
-	cache_op.h = h;
-	cache_op.start = start;
-	cache_op.end = end;
-	cache_op.op = op;
-	cache_op.inner = h->flags == NVMAP_HANDLE_CACHEABLE ||
-			 h->flags == NVMAP_HANDLE_INNER_CACHEABLE;
-	cache_op.outer = h->flags == NVMAP_HANDLE_CACHEABLE;
-	cache_op.clean_only_dirty = clean_only_dirty;
-
-	nvmap_stats_inc(NS_CFLUSH_RQ, end - start);
-	err = do_cache_maint(&cache_op);
-	nvmap_kmaps_dec(h);
-	nvmap_handle_put(h);
-	return err;
 }
 
 static int rw_handle_page(struct nvmap_handle *h, int is_read,
@@ -1073,9 +600,10 @@ static ssize_t rw_handle(struct nvmap_client *client, struct nvmap_handle *h,
 			 unsigned long count)
 {
 	ssize_t copied = 0;
-	void *addr;
+	u8 *addr;
 	int ret = 0;
-	struct vm_struct *area;
+	bool use_set_ways_cache_maint = false;
+	struct vm_struct *area = NULL;
 
 	if (!elem_size || !count)
 		return -EINVAL;
@@ -1098,10 +626,40 @@ static ssize_t rw_handle(struct nvmap_client *client, struct nvmap_handle *h,
 		h_offs + h_stride * (count - 1) + elem_size > h->size)
 		return -EINVAL;
 
-	area = alloc_vm_area(PAGE_SIZE, NULL);
-	if (!area)
-		return -ENOMEM;
-	addr = area->addr;
+#ifdef NVMAP_LAZY_VFREE
+	if (!h->heap_pgalloc) {
+#endif
+		area = alloc_vm_area(PAGE_SIZE, NULL);
+		if (!area)
+			return -ENOMEM;
+		addr = area->addr;
+#ifdef NVMAP_LAZY_VFREE
+	} else if (!h->vaddr) {
+		void *vaddr = __nvmap_mmap(h);
+
+		if (!vaddr)
+			return -ENOMEM;
+
+		/*
+		 * we already hold a reference to handle by the time we
+		 * reach here. Drop the extra reference to handle from
+		 * __nvmap_mmap
+		 */
+		nvmap_handle_put(h);
+		addr = h->vaddr + h_offs;
+	} else {
+		addr = h->vaddr + h_offs;
+	}
+#endif
+
+	if (nvmap_can_fast_cache_maint(h, h_offs, h_offs + count*elem_size,
+				NVMAP_CACHE_OP_WB_INV))
+		use_set_ways_cache_maint = true;
+
+	if (is_read && use_set_ways_cache_maint) {
+		inner_flush_cache_all();
+		outer_flush_all();
+	}
 
 	while (count--) {
 		if (h_offs + elem_size > h->size) {
@@ -1109,18 +667,34 @@ static ssize_t rw_handle(struct nvmap_client *client, struct nvmap_handle *h,
 			ret = -EFAULT;
 			break;
 		}
-		if (is_read &&
+		if (!use_set_ways_cache_maint && is_read &&
 		    !(h->userflags & NVMAP_HANDLE_CACHE_SYNC_AT_RESERVE))
 			__nvmap_do_cache_maint(client, h, h_offs,
 				h_offs + elem_size, NVMAP_CACHE_OP_INV, false);
 
-		ret = rw_handle_page(h, is_read, h_offs, sys_addr,
-				     elem_size, (unsigned long)addr);
+#ifdef NVMAP_LAZY_VFREE
+		if (h->heap_pgalloc && h->vaddr) {
+			int err;
+			if (is_read)
+				err = copy_to_user((void *)sys_addr,
+						addr, elem_size);
+			else
+				err = copy_from_user(addr,
+						(void *)sys_addr, elem_size);
+			if (err)
+				ret = -EFAULT;
+			addr += h_stride;
+		} else
+#endif
+		{
+			ret = rw_handle_page(h, is_read, h_offs, sys_addr,
+					     elem_size, (unsigned long)addr);
+		}
 
 		if (ret)
 			break;
 
-		if (!is_read &&
+		if (!use_set_ways_cache_maint && !is_read &&
 		    !(h->userflags & NVMAP_HANDLE_CACHE_SYNC_AT_RESERVE))
 			__nvmap_do_cache_maint(client, h, h_offs,
 				h_offs + elem_size, NVMAP_CACHE_OP_WB_INV,
@@ -1131,7 +705,13 @@ static ssize_t rw_handle(struct nvmap_client *client, struct nvmap_handle *h,
 		h_offs += h_stride;
 	}
 
-	free_vm_area(area);
+	if (copied && !is_read && use_set_ways_cache_maint) {
+		inner_clean_cache_all();
+		outer_clean_all();
+	}
+
+	if (area)
+		free_vm_area(area);
 	return ret ?: copied;
 }
 
@@ -1196,7 +776,6 @@ int nvmap_ioctl_create_from_ivc(struct file *filp, void __user *arg)
 	size_t size = 0;
 	int peer;
 	struct nvmap_heap_block *block = NULL;
-	struct nvmap_handle *h;
 
 	/* First create a new handle and then fake carveout allocation */
 	if (copy_from_user(&op, arg, sizeof(op)))
@@ -1205,41 +784,19 @@ int nvmap_ioctl_create_from_ivc(struct file *filp, void __user *arg)
 	if (!client)
 		return -ENODEV;
 
-	h = nvmap_validate_get_by_ivmid(client, op.id);
-	if (h) {
-		ref = nvmap_duplicate_handle(client, h, true);
-		if (!ref)
-			return -ENOMEM;
-	} else {
-		/*
-		 * offset is SZ_1M aligned.
-		 * See nvmap_heap_alloc() for encoding details.
-		 */
-		offs = ((op.id & ~(0x7 << 29)) >> 21) << 20;
-		size = (op.id & ((1 << 21) - 1)) << PAGE_SHIFT;
-		peer = (op.id >> 29);
+	/*
+	 * offset is SZ_1M aligned.
+	 * See nvmap_heap_alloc() for encoding details.
+	 */
+	offs = ((op.id & ~(0x7 << 29)) >> 21) << 20;
+	size = (op.id & ((1 << 21) - 1)) << PAGE_SHIFT;
+	peer = (op.id >> 29);
 
-		ref = nvmap_create_handle(client, PAGE_ALIGN(size));
-		if (!IS_ERR(ref))
-			ref->handle->orig_size = size;
-		else
-			return PTR_ERR(ref);
-
-		ref->handle->peer = peer;
-
-		block = nvmap_carveout_alloc(client, ref->handle,
-				NVMAP_HEAP_CARVEOUT_IVM, &offs);
-		if (!block) {
-			nvmap_free_handle(client, __nvmap_ref_to_handle(ref));
-			return -ENOMEM;
-		}
-
-		ref->handle->heap_type = NVMAP_HEAP_CARVEOUT_IVM;
-		ref->handle->heap_pgalloc = false;
-		ref->handle->ivm_id = op.id;
-		mb();
-		ref->handle->alloc = true;
-	}
+	ref = nvmap_create_handle(client, PAGE_ALIGN(size));
+	if (!IS_ERR(ref))
+		ref->handle->orig_size = size;
+	else
+		return PTR_ERR(ref);
 
 	fd = nvmap_create_fd(client, ref->handle);
 	if (fd < 0)
@@ -1252,9 +809,19 @@ int nvmap_ioctl_create_from_ivc(struct file *filp, void __user *arg)
 		return -EFAULT;
 	}
 
-	if (err && fd > 0)
-		sys_close(fd);
+	ref->handle->peer = peer;
 
+	block = nvmap_carveout_alloc(client, ref->handle,
+			NVMAP_HEAP_CARVEOUT_IVM, &offs);
+	if (!block) {
+		nvmap_free_handle_fd(client, fd);
+		return -ENOMEM;
+	}
+
+	ref->handle->heap_type = NVMAP_HEAP_CARVEOUT_IVM;
+	ref->handle->heap_pgalloc = false;
+	mb();
+	ref->handle->alloc = true;
 	return err;
 }
 
@@ -1314,7 +881,7 @@ int nvmap_ioctl_cache_maint_list(struct file *filp, void __user *arg,
 
 	/*
 	 * Either all handles should have NVMAP_HANDLE_CACHE_SYNC_AT_RESERVE
-	 * or none should have it
+	 * or none should have it.
 	 */
 	for (i = 0; i < op.nr; i++)
 		if (refs[i]->userflags & NVMAP_HANDLE_CACHE_SYNC_AT_RESERVE)
@@ -1326,7 +893,7 @@ int nvmap_ioctl_cache_maint_list(struct file *filp, void __user *arg,
 	}
 
 	/*
-	 * When NVMAP_HANDLE_CACHE_SYNC_AT_RESERVE is specified, mix can cause
+	 * when NVMAP_HANDLE_CACHE_SYNC_AT_RESERVE is specified mix can cause
 	 * cache WB_INV at unreserve op on iovmm handles increasing overhead.
 	 * So, either all handles should have pages from carveout or from iovmm.
 	 */

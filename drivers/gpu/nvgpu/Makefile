@@ -60,7 +60,8 @@ nvgpu-y := \
 	gm20b/mm_gm20b.o \
 	gm20b/regops_gm20b.o \
 	gm20b/mc_gm20b.o \
-	gm20b/debug_gm20b.o
+	gm20b/debug_gm20b.o \
+	gm20b/cde_gm20b.o
 
 nvgpu-$(CONFIG_TEGRA_GK20A) += gk20a/platform_gk20a_tegra.o
 nvgpu-$(CONFIG_SYNC) += gk20a/sync_gk20a.o
@@ -72,7 +73,6 @@ nvgpu-$(CONFIG_TEGRA_GR_VIRTUALIZATION) += \
 	vgpu/fifo_vgpu.o \
 	vgpu/ce2_vgpu.o \
 	vgpu/mm_vgpu.o \
-	vgpu/tsg_vgpu.o \
 	vgpu/debug_vgpu.o \
 	vgpu/vgpu.o
 
@@ -82,6 +82,9 @@ nvgpu-$(CONFIG_TEGRA_CLK_FRAMEWORK) += \
 
 nvgpu-$(CONFIG_GK20A_DEVFREQ) += \
 	gk20a/gk20a_scale.o
+
+nvgpu-$(CONFIG_GK20A_CYCLE_STATS) += \
+	gk20a/css_gr_gk20a.o
 
 ifeq ($(CONFIG_ARCH_TEGRA_18x_SOC),y)
 ccflags-$(CONFIG_GK20A) += -I$(srctree)/../kernel-t18x/drivers/gpu/nvgpu

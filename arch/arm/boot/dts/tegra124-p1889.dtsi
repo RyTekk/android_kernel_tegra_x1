@@ -31,7 +31,6 @@
 #include <tegra124-platforms/tegra124-vcm30-t124-hdmi.dtsi>
 #include <dt-bindings/gpio/tmpm32x-gpio.h>
 #include <tegra124-platforms/tegra124-pmic-vcm30t124-max20024.dtsi>
-#include <dt-bindings/pinctrl/pinctrl-tegra.h>
 
 / {
 	#address-cells = <2>;
@@ -99,21 +98,6 @@
 			interrupts = <TEGRA_GPIO(V, 1) 0x0>;
 			atmel,irq_flags = <IRQ_TYPE_LEVEL_LOW>;
 			status = "okay";
-		};
-		tca6408_21: tca6408@21 {
-			compatible = "ti,tca6408";
-			gpio-controller;
-			#gpio-cells = <2>;
-			reg = <0x21>;
-			interrupt-parent = <&gpio>;
-			interrupts = <TEGRA_GPIO(V, 0) 0x0>;
-			gpio-init-names = "default_0x21";
-			gpio-init-0 = <&tca6408_21_default>;
-			tca6408_21_default: default_0x21 {
-				gpio-input = <0 2 6 7>;
-				gpio-output-low = <1 3>;
-				gpio-output-high = <4 5>;
-			};
 		};
 	};
 
@@ -188,9 +172,9 @@
 			reg = <0x20>;
 			interrupt-parent = <&gpio>;
 			interrupts = <TEGRA_GPIO(V, 0) 0x0>;
-			gpio-init-names = "default_0x20";
+			gpio-init-names = "default";
 			gpio-init-0 = <&tca6408_20_default>;
-			tca6408_20_default: default_0x20 {
+			tca6408_20_default: default {
 				gpio-input = <1 2 7>;
 				gpio-output-low = <0 3 6>;
 				gpio-output-high = <4 5>;
@@ -250,39 +234,10 @@
 
 	spi@7000d800 {
 		status = "okay";
-		spi@0 {
-			compatible = "saf775x";
-			reg = <0>;
-			spi-max-frequency = <4000000>;
-			spi-cpha;
-			controller-data {
-				nvidia,clk-delay-between-packets = <10>;
-				nvidia,chipselect-gpio = <&gpio TEGRA_GPIO(S,6) 0>;
-			};
-		};
 	};
 
 	spi@7000dc00 {
 		status = "okay";
-	};
-
-	extcon {
-		/* ID pin extcon */
-		extcon@0 {
-			status="okay";
-		};
-
-		/* VBUS extcon */
-		extcon@1 {
-			status="okay";
-		};
-	};
-
-	otg@7d000000 {
-		nvidia,id-detection-type = <1>;
-		extcon-cables = <&vbus_gpio_extcon 0 &id_gpio_extcon 0>;
-		extcon-cable-names = "vbus", "id";
-		nvidia,enable-pmu-vbus-detection;
 	};
 
 	xusb@70090000 {
@@ -405,11 +360,6 @@
 	};
 
 	sdhci@700b0400 {
-		nvidia,update-pinctrl-settings;
-		pinctrl-names = "default_mode", "uhs_sdr50_mode", "uhs_sdr104_mode";
-		pinctrl-0 = <&sdmmc3_hs_mode>;
-		pinctrl-1 = <&sdmmc3_uhs_sdr50_mode>;
-		pinctrl-2 = <&sdmmc3_uhs_sdr104_mode>;
 		vddio_sdmmc-supply = <&max20024_ldo5>;
 		status = "okay";
 	};
@@ -532,44 +482,6 @@
 			addr = <0x30>;  /* 7 bit slave address */
 			reg_len = <16>;  /* 8 bit register length */
 			dat_len = <8>;  /* 8 bit data length */
-		};
-	};
-
-	pinmux@70000868 {
-		sdmmc3_hs_mode: sdmmc3_hs_mode_drive {
-			drive_sdio3 {
-				nvidia,pins = "drive_sdio3";
-				nvidia,high-speed-mode = <TEGRA_PIN_ENABLE>;
-				nvidia,schmitt = <TEGRA_PIN_ENABLE>;
-				nvidia,pull-down-strength = <32>;
-				nvidia,pull-up-strength = <40>;
-				nvidia,slew-rate-rising = <TEGRA_PIN_SLEW_RATE_SLOWEST>;
-				nvidia,slew-rate-falling = <TEGRA_PIN_SLEW_RATE_SLOWEST>;
-			};
-		};
-
-		sdmmc3_uhs_sdr50_mode: sdmmc3_uhs_sdr50_mode_drive {
-			drive_sdio3 {
-				nvidia,pins = "drive_sdio3";
-				nvidia,high-speed-mode = <TEGRA_PIN_ENABLE>;
-				nvidia,schmitt = <TEGRA_PIN_ENABLE>;
-				nvidia,pull-down-strength = <40>;
-				nvidia,pull-up-strength = <45>;
-				nvidia,slew-rate-rising = <TEGRA_PIN_SLEW_RATE_SLOWEST>;
-				nvidia,slew-rate-falling = <TEGRA_PIN_SLEW_RATE_SLOWEST>;
-			};
-		};
-
-		sdmmc3_uhs_sdr104_mode: sdmmc3_uhs_sdr104_mode_drive {
-			drive_sdio3 {
-				nvidia,pins = "drive_sdio3";
-				nvidia,high-speed-mode = <TEGRA_PIN_ENABLE>;
-				nvidia,schmitt = <TEGRA_PIN_ENABLE>;
-				nvidia,pull-down-strength = <48>;
-				nvidia,pull-up-strength = <61>;
-				nvidia,slew-rate-rising = <TEGRA_PIN_SLEW_RATE_SLOWEST>;
-				nvidia,slew-rate-falling = <TEGRA_PIN_SLEW_RATE_SLOWEST>;
-			};
 		};
 	};
 };

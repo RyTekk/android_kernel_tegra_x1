@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/dc/ext/dev.c
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION, All rights reserved.
  *
  * Author: Robert Morell <rmorell@nvidia.com>
  * Some code based on fbdev extensions written by:
@@ -32,7 +32,6 @@
 #include <mach/dc.h>
 #include <mach/tegra_dc_ext.h>
 #include <trace/events/display.h>
-#include <linux/tegra-timer.h>
 
 /* XXX ew */
 #include "../dc_priv.h"
@@ -47,7 +46,12 @@
 #endif
 
 #define TEGRA_DC_TS_MAX_DELAY_US 1000000
-#define TEGRA_DC_TS_SLACK_US 2000
+#define TEGRA_DC_TS_SLACK_US 100
+
+#define TEGRA_DC_SMOOTHING_CR_PC 75
+#define TEGRA_DC_SMOOTHING_MAX_APC_US 64000
+#define TEGRA_DC_SMOOTHING_LATENCY_US 4000
+#define TEGRA_DC_SMOOTHING_SLACK_US 50
 
 #define BEGIN_TRACE() trace_function_frame(__func__, 'B')
 #define TRACE_NAME_BEGIN(NAME) trace_function_frame(#NAME, 'B')
@@ -126,22 +130,12 @@ struct tegra_dc_ext_flip_data {
 	u16 dirty_rect[4];
 	bool dirty_rect_valid;
 	u8 flags;
+	struct tegra_dc_hdr hdr_data;
+	bool hdr_cache_dirty;
 };
 
 static int tegra_dc_ext_set_vblank(struct tegra_dc_ext *ext, bool enable);
 static void tegra_dc_ext_unpin_window(struct tegra_dc_ext_win *win);
-
-/* tegra_firstfrm_timestamp : shows timestamp since coldboot/hw reset */
-static inline void tegra_firstfrm_timestamp(struct tegra_dc_ext *ext)
-{
-	static bool once;
-
-	if (unlikely(!once)) {
-		dev_info(&ext->dc->ndev->dev, "first frame flipped [%u]us\n",
-			tegra_read_usec_raw());
-		once = true;
-	}
-}
 
 static inline s64 tegra_timespec_to_ns(const struct tegra_timespec *ts)
 {
@@ -289,9 +283,11 @@ int tegra_dc_ext_disable(struct tegra_dc_ext *ext)
 		}
 
 		tegra_dc_blank(ext->dc, windows);
-		for_each_set_bit(i, &windows, DC_N_WINDOWS) {
-			tegra_dc_ext_unpin_window(&ext->win[i]);
-		}
+#if !defined(CONFIG_FRAMEBUFFER_CONSOLE)
+			for_each_set_bit(i, &windows, DC_N_WINDOWS) {
+				tegra_dc_ext_unpin_window(&ext->win[i]);
+			}
+#endif
 	}
 
 	return !!windows;
@@ -644,6 +640,46 @@ static void tegra_dc_ext_unpin_handles(struct tegra_dc_dmabuf *unpin_handles[],
 	}
 }
 
+static void tegra_dc_ext_smooth_apc(struct tegra_vrr *vrr)
+{
+	/* Smooth actual present cadence when vrr is enabled
+	 */
+	if (vrr && vrr->enable) {
+		s32 sleep_us = TEGRA_DC_SMOOTHING_LATENCY_US;
+
+		if (vrr->flip_interval_us > 0 &&
+			vrr->flip_interval_us < TEGRA_DC_SMOOTHING_MAX_APC_US) {
+			struct timespec tm;
+			s64 now_us = 0;
+			s64 next_desired_present = 0;
+
+			getnstimeofday(&tm);
+			now_us = (s64)tm.tv_sec * 1000000 + tm.tv_nsec / 1000;
+
+			next_desired_present = vrr->last_flip_us +
+				vrr->flip_interval_us;
+			sleep_us = next_desired_present - now_us;
+
+			/* Smooth our sleep time towards 4ms.  This is required
+			 * to smoothly move us back to 4ms of latency added
+			 * when framerate is changing.
+			 */
+			sleep_us = sleep_us * TEGRA_DC_SMOOTHING_CR_PC / 100 +
+				TEGRA_DC_SMOOTHING_LATENCY_US *
+				(100 - TEGRA_DC_SMOOTHING_CR_PC) / 100;
+
+			if (sleep_us < 0)
+				sleep_us = 0;
+			if (sleep_us > TEGRA_DC_SMOOTHING_LATENCY_US * 2)
+				sleep_us = TEGRA_DC_SMOOTHING_LATENCY_US * 2;
+		}
+
+		TRACE_NAME_BEGIN(smooth_wait);
+		usleep_range(sleep_us, sleep_us + TEGRA_DC_SMOOTHING_SLACK_US);
+		TRACE_NAME_END(smooth_wait);
+	}
+}
+
 static void tegra_dc_ext_flip_worker(struct kthread_work *work)
 {
 	struct tegra_dc_ext_flip_data *data =
@@ -656,6 +692,7 @@ static void tegra_dc_ext_flip_worker(struct kthread_work *work)
 					       TEGRA_DC_NUM_PLANES];
 	struct tegra_dc_dmabuf *old_handle;
 	struct tegra_dc *dc = ext->dc;
+	struct tegra_vrr *vrr = ext->dc->out->vrr;
 	int i, nr_unpin = 0, nr_win = 0;
 	bool skip_flip = false;
 	bool wait_for_vblank = false;
@@ -675,7 +712,6 @@ static void tegra_dc_ext_flip_worker(struct kthread_work *work)
 		struct tegra_dc_ext_flip_data *temp = NULL;
 		s64 head_timestamp = 0;
 		int j = 0;
-		u32 reg_val = 0;
 
 		if (index < 0 || !test_bit(index, &dc->valid_windows))
 			continue;
@@ -754,16 +790,6 @@ static void tegra_dc_ext_flip_worker(struct kthread_work *work)
 		if (!skip_flip)
 			tegra_dc_ext_set_windowattr(ext, win, &data->win[i]);
 
-		if (dc->yuv_bypass) {
-			reg_val = tegra_dc_readl(dc,
-				DC_DISP_DISP_COLOR_CONTROL);
-			reg_val &= ~CMU_ENABLE;
-			tegra_dc_writel(dc, reg_val,
-				DC_DISP_DISP_COLOR_CONTROL);
-			reg_val = GENERAL_ACT_REQ;
-			tegra_dc_writel(dc, reg_val, DC_CMD_STATE_CONTROL);
-		}
-
 		if (flip_win->attr.swap_interval && !no_vsync)
 			wait_for_vblank = true;
 
@@ -783,12 +809,17 @@ static void tegra_dc_ext_flip_worker(struct kthread_work *work)
 		}
 	}
 
+	tegra_dc_ext_smooth_apc(vrr);
+
 	/* YUV packing consumes only one window, thus there must have been
 	 * free window which can host background pattern.
 	 */
 	BUG_ON(show_background);
 
 	trace_sync_wt_ovr_syncpt_upd((data->win[win_num-1]).syncpt_max);
+
+	if (dc->enabled && !skip_flip)
+		tegra_dc_set_hdr(dc, &data->hdr_data, data->hdr_cache_dirty);
 
 	if (dc->enabled && !skip_flip) {
 		dc->blanked = false;
@@ -813,7 +844,6 @@ static void tegra_dc_ext_flip_worker(struct kthread_work *work)
 		tegra_dc_program_bandwidth(dc, true);
 		if (!tegra_dc_has_multiple_dc())
 			tegra_dc_call_flip_callback();
-		tegra_firstfrm_timestamp(ext);
 	}
 
 	if (!skip_flip) {
@@ -832,7 +862,10 @@ static void tegra_dc_ext_flip_worker(struct kthread_work *work)
 
 	/* unpin and deref previous front buffers */
 	tegra_dc_ext_unpin_handles(unpin_handles, nr_unpin);
-
+#ifdef CONFIG_ANDROID
+	/* now DC has submitted buffer for display, try to release fbmem */
+	tegra_fb_release_fbmem(ext->dc->fb);
+#endif
 	kfree(data);
 	kfree(blank_win);
 	END_TRACE();
@@ -1086,11 +1119,48 @@ static void tegra_dc_ext_unpin_window(struct tegra_dc_ext_win *win)
 	tegra_dc_ext_unpin_handles(unpin_handles, nr_unpin);
 }
 
+static void tegra_dc_ext_read_user_data(struct tegra_dc_ext_flip_data *data,
+			struct tegra_dc_ext_flip_user_data *flip_user_data,
+			int nr_user_data)
+{
+	int i = 0;
+
+	for (i = 0; i < nr_user_data; i++) {
+		struct tegra_dc_hdr *hdr;
+		struct tegra_dc_ext_hdr *info;
+		switch (flip_user_data[0].data_type) {
+		case TEGRA_DC_EXT_FLIP_USER_DATA_HDR_DATA:
+			hdr = &data->hdr_data;
+			info = &flip_user_data[i].hdr_info;
+			if (flip_user_data[i].flags &
+				TEGRA_DC_EXT_FLIP_FLAG_HDR_ENABLE)
+				hdr->enabled = true;
+			if (flip_user_data[i].flags &
+				TEGRA_DC_EXT_FLIP_FLAG_HDR_DATA_UPDATED) {
+				data->hdr_cache_dirty = true;
+				hdr->eotf = info->eotf;
+				hdr->static_metadata_id =
+						info->static_metadata_id;
+				memcpy(hdr->static_metadata,
+					info->static_metadata,
+					sizeof(hdr->static_metadata));
+			}
+			break;
+		default:
+			dev_err(&data->ext->dc->ndev->dev,
+				"Invalid FLIP_USER_DATA_TYPE\n");
+		}
+	}
+	return;
+}
+
 static int tegra_dc_ext_flip(struct tegra_dc_ext_user *user,
 			     struct tegra_dc_ext_flip_windowattr *win,
 			     int win_num,
 			     __u32 *syncpt_id, __u32 *syncpt_val,
-			     int *syncpt_fd, __u16 *dirty_rect, u8 flip_flags)
+			     int *syncpt_fd, __u16 *dirty_rect, u8 flip_flags,
+			     struct tegra_dc_ext_flip_user_data *flip_user_data,
+			     int nr_user_data)
 {
 	struct tegra_dc_ext *ext = user->ext;
 	struct tegra_dc_ext_flip_data *data;
@@ -1135,6 +1205,8 @@ static int tegra_dc_ext_flip(struct tegra_dc_ext_user *user,
 		ret = -ENXIO;
 		goto unlock;
 	}
+
+	tegra_dc_ext_read_user_data(data, flip_user_data, nr_user_data);
 
 	BUG_ON(win_num > DC_N_WINDOWS);
 	for (i = 0; i < win_num; i++) {
@@ -1268,6 +1340,50 @@ static int tegra_dc_ext_set_csc(struct tegra_dc_ext_user *user,
 }
 #endif
 
+#if defined(CONFIG_TEGRA_CSC_V2)
+static int tegra_dc_ext_set_csc(struct tegra_dc_ext_user *user,
+				struct tegra_dc_ext_csc_v2 *new_csc)
+{
+	unsigned int index = new_csc->win_index;
+	struct tegra_dc *dc = user->ext->dc;
+	struct tegra_dc_ext_win *ext_win;
+	struct tegra_dc_csc_v2 *csc;
+	struct tegra_dc_win *win = tegra_dc_get_window(dc, index);
+
+	if (!win)
+		return -EINVAL;
+
+	ext_win = &user->ext->win[index];
+	csc = &win->csc;
+
+	mutex_lock(&ext_win->lock);
+
+	if (ext_win->user != user) {
+		mutex_unlock(&ext_win->lock);
+		return -EACCES;
+	}
+
+	csc->r2r = new_csc->r2r;
+	csc->g2r = new_csc->g2r;
+	csc->b2r = new_csc->b2r;
+	csc->const2r = new_csc->const2r;
+	csc->r2g = new_csc->r2g;
+	csc->g2g = new_csc->g2g;
+	csc->b2g = new_csc->b2g;
+	csc->const2g = new_csc->const2g;
+	csc->r2b = new_csc->r2b;
+	csc->g2b = new_csc->g2b;
+	csc->b2b = new_csc->b2b;
+	csc->const2b = new_csc->const2b;
+
+	tegra_nvdisp_update_csc(dc, index);
+
+	mutex_unlock(&ext_win->lock);
+
+	return 0;
+}
+#endif
+
 #if defined(CONFIG_TEGRA_LUT)
 static int set_lut_channel(u16 __user *channel_from_user,
 			   u8 *channel_to,
@@ -1385,7 +1501,54 @@ static int tegra_dc_ext_set_lut(struct tegra_dc_ext_user *user,
 	return 0;
 }
 
-#ifdef CONFIG_TEGRA_DC_CMU
+#if defined(CONFIG_TEGRA_DC_CMU_V2)
+static int tegra_dc_ext_get_cmu_v2(struct tegra_dc_ext_user *user,
+			struct tegra_dc_ext_cmu_v2 *args, bool custom_value)
+{
+	int i;
+	struct tegra_dc *dc = user->ext->dc;
+	struct tegra_dc_cmu *cmu = dc->pdata->cmu;
+	struct tegra_dc_lut *cmu_lut = &dc->cmu;
+
+	if (custom_value && !dc->pdata->cmu)
+		return -EACCES;
+
+	args->cmu_enable = dc->pdata->cmu_enable;
+	for (i = 0; i < TEGRA_DC_EXT_LUT_SIZE_1025; i++) {
+		if (custom_value)
+			args->rgb[i] = cmu->rgb[i];
+		else
+			args->rgb[i] = cmu_lut->rgb[i];
+	}
+	return 0;
+}
+
+static int tegra_dc_ext_set_cmu_v2(struct tegra_dc_ext_user *user,
+				struct tegra_dc_ext_cmu_v2 *args)
+{
+	int i, lut_size;
+	struct tegra_dc_lut *cmu;
+	struct tegra_dc *dc = user->ext->dc;
+
+	/* Directly copying the values to DC
+	 * output lut whose address is already
+	 * programmed to HW register.
+	 */
+	cmu = &dc->cmu;
+	if (!cmu)
+		return -ENOMEM;
+
+	dc->pdata->cmu_enable = args->cmu_enable;
+	lut_size = args->lut_size;
+	for (i = 0; i < lut_size; i++)
+		cmu->rgb[i] = args->rgb[i];
+
+	tegra_nvdisp_update_cmu(dc, cmu);
+
+	return 0;
+}
+
+#elif defined(CONFIG_TEGRA_DC_CMU)
 static int tegra_dc_ext_get_cmu(struct tegra_dc_ext_user *user,
 			struct tegra_dc_ext_cmu *args, bool custom_value)
 {
@@ -1621,7 +1784,7 @@ static long tegra_dc_ioctl(struct file *filp, unsigned int cmd,
 		ret = tegra_dc_ext_flip(user, args.win,
 			TEGRA_DC_EXT_FLIP_N_WINDOWS,
 			&args.post_syncpt_id, &args.post_syncpt_val, NULL,
-			NULL, 0);
+			NULL, 0, NULL, 0);
 
 		if (copy_to_user(user_arg, &args, sizeof(args)))
 			return -EFAULT;
@@ -1651,7 +1814,7 @@ static long tegra_dc_ioctl(struct file *filp, unsigned int cmd,
 
 		ret = tegra_dc_ext_flip(user, win, win_num,
 			&args.post_syncpt_id, &args.post_syncpt_val, NULL,
-			args.dirty_rect, 0);
+			args.dirty_rect, 0, NULL, 0);
 
 		if (copy_to_user(compat_ptr(args.win), win,
 			sizeof(*win) * win_num) ||
@@ -1685,7 +1848,7 @@ static long tegra_dc_ioctl(struct file *filp, unsigned int cmd,
 
 		ret = tegra_dc_ext_flip(user, win, win_num,
 			&args.post_syncpt_id, &args.post_syncpt_val, NULL,
-			args.dirty_rect, 0);
+			args.dirty_rect, 0, NULL, 0);
 
 		if (copy_to_user(args.win, win, sizeof(*win) * win_num) ||
 			copy_to_user(user_arg, &args, sizeof(args))) {
@@ -1710,10 +1873,6 @@ static long tegra_dc_ioctl(struct file *filp, unsigned int cmd,
 
 		bypass = !!(args.flags & TEGRA_DC_EXT_FLIP_HEAD_FLAG_YUVBYPASS);
 
-		if (!!(user->ext->dc->mode.vmode & FB_VMODE_YUV_MASK) !=
-		    bypass)
-			return -EINVAL;
-
 		user->ext->dc->yuv_bypass = bypass;
 		win_num = args.win_num;
 		win = kzalloc(sizeof(*win) * win_num, GFP_KERNEL);
@@ -1726,7 +1885,7 @@ static long tegra_dc_ioctl(struct file *filp, unsigned int cmd,
 
 		ret = tegra_dc_ext_flip(user, win, win_num,
 			NULL, NULL, &args.post_syncpt_fd, args.dirty_rect,
-			args.flags);
+			args.flags, NULL, 0);
 
 		if (copy_to_user((void __user *)(uintptr_t)args.win, win,
 				 sizeof(*win) * win_num) ||
@@ -1738,6 +1897,60 @@ static long tegra_dc_ioctl(struct file *filp, unsigned int cmd,
 		kfree(win);
 		return ret;
 	}
+	case TEGRA_DC_EXT_FLIP4:
+	{
+		int ret;
+		int win_num;
+		int nr_user_data;
+		struct tegra_dc_ext_flip_4 args;
+		struct tegra_dc_ext_flip_windowattr *win;
+		struct tegra_dc_ext_flip_user_data *flip_user_data;
+		bool bypass;
+
+		if (copy_from_user(&args, user_arg, sizeof(args)))
+			return -EFAULT;
+
+		bypass = !!(args.flags & TEGRA_DC_EXT_FLIP_HEAD_FLAG_YUVBYPASS);
+
+		user->ext->dc->yuv_bypass = bypass;
+		win_num = args.win_num;
+		win = kzalloc(sizeof(*win) * win_num, GFP_KERNEL);
+
+		if (copy_from_user(win,  (void __user *) (uintptr_t)args.win,
+				   sizeof(*win) * win_num)) {
+			kfree(win);
+			return -EFAULT;
+		}
+
+		nr_user_data = args.nr_elements;
+		flip_user_data = kzalloc(sizeof(*flip_user_data)
+					* nr_user_data, GFP_KERNEL);
+		if (nr_user_data > 0) {
+			if (copy_from_user(flip_user_data,
+				(void __user *) (uintptr_t)args.data,
+				sizeof(*flip_user_data) * nr_user_data)) {
+				kfree(win);
+				return -EFAULT;
+			}
+		}
+		ret = tegra_dc_ext_flip(user, win, win_num,
+			NULL, NULL, &args.post_syncpt_fd, args.dirty_rect,
+			args.flags, flip_user_data, nr_user_data);
+
+		if (nr_user_data > 0)
+			kfree(flip_user_data);
+
+		if (copy_to_user((void __user *)(uintptr_t)args.win, win,
+				 sizeof(*win) * win_num) ||
+			copy_to_user(user_arg, &args, sizeof(args))) {
+			kfree(win);
+			return -EFAULT;
+		}
+
+		kfree(win);
+		return ret;
+	}
+
 #ifdef CONFIG_TEGRA_ISOMGR
 #ifdef CONFIG_COMPAT
 	case TEGRA_DC_EXT_SET_PROPOSED_BW32:
@@ -1854,6 +2067,18 @@ static long tegra_dc_ioctl(struct file *filp, unsigned int cmd,
 	case TEGRA_DC_EXT_SET_CSC:
 	{
 		struct tegra_dc_ext_csc args;
+
+		if (copy_from_user(&args, user_arg, sizeof(args)))
+			return -EFAULT;
+
+		return tegra_dc_ext_set_csc(user, &args);
+	}
+#endif
+
+#ifdef CONFIG_TEGRA_CSC_V2
+	case TEGRA_DC_EXT_SET_CSC_V2:
+	{
+		struct tegra_dc_ext_csc_v2 args;
 
 		if (copy_from_user(&args, user_arg, sizeof(args)))
 			return -EFAULT;
@@ -2056,6 +2281,62 @@ static long tegra_dc_ioctl(struct file *filp, unsigned int cmd,
 		}
 
 		ret = tegra_dc_ext_set_cmu(user, args);
+
+		kfree(args);
+
+		return ret;
+#else
+		return -EACCES;
+#endif
+	}
+
+	case TEGRA_DC_EXT_GET_CMU_V2:
+	case TEGRA_DC_EXT_GET_CUSTOM_CMU_V2:
+	{
+#ifdef CONFIG_TEGRA_DC_CMU_V2
+		struct tegra_dc_ext_cmu_v2 *args;
+		bool custom_value = false;
+
+		if (TEGRA_DC_EXT_GET_CUSTOM_CMU_V2 == cmd)
+			custom_value = true;
+
+		args = kzalloc(sizeof(*args), GFP_KERNEL);
+		if (!args)
+			return -ENOMEM;
+
+		if (tegra_dc_ext_get_cmu_v2(user, args, custom_value)) {
+			kfree(args);
+			return -EACCES;
+		}
+
+		if (copy_to_user(user_arg, args, sizeof(*args))) {
+			kfree(args);
+			return -EFAULT;
+		}
+
+		kfree(args);
+		return 0;
+#else
+		return -EACCES;
+#endif
+	}
+
+	case TEGRA_DC_EXT_SET_CMU_V2:
+	{
+#ifdef CONFIG_TEGRA_DC_CMU_V2
+		int ret;
+		struct tegra_dc_ext_cmu_v2 *args;
+
+		args = kzalloc(sizeof(*args), GFP_KERNEL);
+		if (!args)
+			return -ENOMEM;
+
+		if (copy_from_user(args, user_arg, sizeof(*args))) {
+			kfree(args);
+			return -EFAULT;
+		}
+
+		ret = tegra_dc_ext_set_cmu_v2(user, args);
 
 		kfree(args);
 

@@ -208,16 +208,9 @@ dtb-$(CONFIG_ARCH_TEGRA) += tegra20-harmony.dtb \
 	tegra124-android-p1859.dtb \
 	tegra124-android-p1859-vm.dtb \
 	tegra124-android-p1859-vm_1.dtb \
-	tegra124-android-p1859-vm_1_for_autosar.dtb \
-	tegra124-android-p1859-vm_2.dtb \
 	tegra124-android-p1859-hdmiprimary.dtb \
 	tegra124-android-p1889.dtb \
-	tegra124-android-p1889-vm.dtb \
-	tegra124-android-p1889-vm_for_autosar.dtb \
 	tegra124-android-p1889-hdmiprimary.dtb \
-	tegra124-android-p1889-vm-hdmiprimary.dtb \
-	tegra124-android-p1889-edp-only.dtb \
-	tegra124-android-p1889-vm-edp-only.dtb \
 	tegra124-laguna.dtb \
 	tegra124-laguna-pm358.dtb \
 	tegra124-jetson_tk1-pm375-000-c00-00.dtb \
@@ -267,10 +260,7 @@ dtb-$(CONFIG_ARCH_TEGRA) += tegra20-harmony.dtb \
 	tegra124-p1859-vm_1.dtb \
 	tegra124-p1859-vm_2.dtb \
 	tegra124-p1889.dtb \
-	tegra124-p2360-b00.dtb \
-	tegra124-p2360-c00.dtb \
-	tegra124-p2360-480p-b00.dtb \
-	tegra124-p2360-480p-c00.dtb \
+	tegra124-p2360.dtb \
 	tegra124-p1855.dtb \
 	tegra124-vcm30t124-flashing.dtb \
 	tegra124-green-arrow-p2267-base-a00.dtb

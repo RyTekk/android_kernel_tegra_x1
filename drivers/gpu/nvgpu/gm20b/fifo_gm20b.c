@@ -24,7 +24,7 @@ static void channel_gm20b_bind(struct channel_gk20a *ch_gk20a)
 {
 	struct gk20a *g = ch_gk20a->g;
 
-	u32 inst_ptr = sg_phys(ch_gk20a->inst_block.sgt->sgl)
+	u32 inst_ptr = gk20a_mem_phys(&ch_gk20a->inst_block)
 		>> ram_in_base_shift_v();
 
 	gk20a_dbg_info("bind channel %d inst ptr 0x%08x",
@@ -119,5 +119,4 @@ void gm20b_init_fifo(struct gpu_ops *gops)
 	gops->fifo.wait_engine_idle = gk20a_fifo_wait_engine_idle;
 	gops->fifo.get_num_fifos = gm20b_fifo_get_num_fifos;
 	gops->fifo.get_pbdma_signature = gk20a_fifo_get_pbdma_signature;
-	gops->fifo.force_reset_ch = gk20a_fifo_force_reset_ch;
 }

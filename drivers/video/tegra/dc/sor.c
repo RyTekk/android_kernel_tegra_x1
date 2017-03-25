@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/dc/sor.c
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -24,6 +24,7 @@
 #include <linux/debugfs.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/tegra_prod.h>
 
 #include <mach/dc.h>
 #include <mach/io_dpd.h>
@@ -81,7 +82,7 @@ void tegra_sor_config_safe_clk(struct tegra_dc_sor_data *sor)
 {
 	int flag = tegra_is_clk_enabled(sor->sor_clk);
 
-	if (sor->clk_type == TEGRA_SOR_SAFE_CLK || tegra_platform_is_linsim())
+	if (sor->clk_type == TEGRA_SOR_SAFE_CLK)
 		return;
 
 	/*
@@ -90,12 +91,13 @@ void tegra_sor_config_safe_clk(struct tegra_dc_sor_data *sor)
 	 * between safe clock and macro pll clock
 	 */
 	if (flag)
-		clk_disable_unprepare(sor->sor_clk);
+		tegra_sor_clk_disable(sor);
 
-	tegra_clk_cfg_ex(sor->sor_clk, TEGRA_CLK_SOR_CLK_SEL, 0);
+	if (tegra_platform_is_silicon())
+		tegra_clk_cfg_ex(sor->sor_clk, TEGRA_CLK_SOR_CLK_SEL, 0);
 
 	if (flag)
-		clk_prepare_enable(sor->sor_clk);
+		tegra_sor_clk_enable(sor);
 
 	sor->clk_type = TEGRA_SOR_SAFE_CLK;
 }
@@ -123,14 +125,15 @@ void tegra_sor_config_dp_clk(struct tegra_dc_sor_data *sor)
 	 * has single DVFS table for all modes, nothing changes).
 	 */
 	if (flag)
-		clk_disable_unprepare(sor->sor_clk);
+		tegra_sor_clk_disable(sor);
 
 	tegra_dvfs_use_alt_freqs_on_clk(sor->sor_clk, true);
 
-	tegra_clk_cfg_ex(sor->sor_clk, TEGRA_CLK_SOR_CLK_SEL, 1);
+	if (tegra_platform_is_silicon())
+		tegra_clk_cfg_ex(sor->sor_clk, TEGRA_CLK_SOR_CLK_SEL, 1);
 
 	if (flag)
-		clk_prepare_enable(sor->sor_clk);
+		tegra_sor_clk_enable(sor);
 
 	sor->clk_type = TEGRA_SOR_MACRO_CLK;
 }
@@ -201,9 +204,7 @@ static int dbg_sor_show(struct seq_file *s, void *unused)
 	DUMP_REG(NV_SOR_DC(0));
 	DUMP_REG(NV_SOR_DC(1));
 	DUMP_REG(NV_SOR_LANE_DRIVE_CURRENT(0));
-	DUMP_REG(NV_SOR_LANE4_DRIVE_CURRENT(0));
 	DUMP_REG(NV_SOR_PR(0));
-	DUMP_REG(NV_SOR_LANE_PREEMPHASIS(0));
 	DUMP_REG(NV_SOR_LANE4_PREEMPHASIS(0));
 	DUMP_REG(NV_SOR_POSTCURSOR(0));
 	DUMP_REG(NV_SOR_DP_CONFIG(0));
@@ -217,10 +218,18 @@ static int dbg_sor_show(struct seq_file *s, void *unused)
 	DUMP_REG(NV_SOR_DP_SPARE(0));
 	DUMP_REG(NV_SOR_DP_SPARE(1));
 	DUMP_REG(NV_SOR_DP_TPG);
+#if defined(CONFIG_ARCH_TEGRA_21x_SOC) || defined(CONFIG_TEGRA_NVDISPLAY)
+	DUMP_REG(NV_SOR_HDMI_CTRL);
+#endif
 	DUMP_REG(NV_SOR_HDMI2_CTRL);
-	if (sor->dc->ndev->id == 1) { /* sor1 */
+#ifdef CONFIG_TEGRA_NVDISPLAY
+	if (tegra_platform_is_linsim())
+		DUMP_REG(NV_SOR_FPGA_HDMI_HEAD_SEL);
+#endif
+	if (sor->instance) { /* sor1 */
 		DUMP_REG(NV_SOR_DP_AUDIO_CTRL);
-
+		DUMP_REG(NV_SOR_DP_AUDIO_HBLANK_SYMBOLS);
+		DUMP_REG(NV_SOR_DP_AUDIO_VBLANK_SYMBOLS);
 		DUMP_REG(NV_SOR_DP_GENERIC_INFOFRAME_HEADER);
 		DUMP_REG(NV_SOR_DP_GENERIC_INFOFRAME_SUBPACK(0));
 		DUMP_REG(NV_SOR_DP_GENERIC_INFOFRAME_SUBPACK(1));
@@ -236,6 +245,8 @@ static int dbg_sor_show(struct seq_file *s, void *unused)
 		DUMP_REG(NV_SOR_HDMI_AUDIO_N);
 		DUMP_REG(NV_SOR_HDMI2_CTRL);
 
+		DUMP_REG(NV_SOR_AUDIO_CTRL);
+		DUMP_REG(NV_SOR_AUDIO_DEBUG);
 		DUMP_REG(NV_SOR_AUDIO_NVAL_0320);
 		DUMP_REG(NV_SOR_AUDIO_NVAL_0441);
 		DUMP_REG(NV_SOR_AUDIO_NVAL_0882);
@@ -252,6 +263,7 @@ static int dbg_sor_show(struct seq_file *s, void *unused)
 		DUMP_REG(NV_SOR_AUDIO_AVAL_0960);
 		DUMP_REG(NV_SOR_AUDIO_AVAL_1920);
 
+		DUMP_REG(NV_SOR_DP_AUDIO_CRC);
 		DUMP_REG(NV_SOR_DP_AUDIO_TIMESTAMP_0320);
 		DUMP_REG(NV_SOR_DP_AUDIO_TIMESTAMP_0441);
 		DUMP_REG(NV_SOR_DP_AUDIO_TIMESTAMP_0882);
@@ -433,6 +445,54 @@ static inline void tegra_dc_sor_debug_create(struct tegra_dc_sor_data *sor,
 { }
 #endif
 
+#if defined(CONFIG_TEGRA_NVDISPLAY)
+static int sor_fpga_settings(struct tegra_dc *dc,
+				struct tegra_dc_sor_data *sor)
+{
+	u32 mode_sel = NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD1_MODE_FIELD |
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD1_OUT_EN_FIELD;
+	u32 head_sel = NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD1_MODE_HDMI |
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD1_OUT_EN_ENABLE;
+
+	if (!tegra_platform_is_linsim() ||
+		(dc->out->type != TEGRA_DC_OUT_HDMI))
+		return 0;
+
+	if (dc->ndev->id == 0) {/* HEAD 0 */
+		mode_sel =
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD0_MODE_FIELD |
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD0_OUT_EN_FIELD;
+
+		head_sel =
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD0_MODE_HDMI |
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD0_OUT_EN_ENABLE;
+
+	} else if (dc->ndev->id == 1) {/* HEAD 1 */
+		mode_sel =
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD1_MODE_FIELD |
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD1_OUT_EN_FIELD;
+
+		head_sel =
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD1_MODE_HDMI |
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD1_OUT_EN_ENABLE;
+
+	} else if (dc->ndev->id == 2) {/* HEAD 2 */
+		mode_sel =
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD2_MODE_FIELD |
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD2_OUT_EN_FIELD;
+
+		head_sel =
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD2_MODE_HDMI |
+			NV_SOR_FPGA_HDMI_HEAD_SEL_FPGA_HEAD2_OUT_EN_ENABLE;
+
+	}
+	tegra_sor_write_field(sor, NV_SOR_FPGA_HDMI_HEAD_SEL,
+				mode_sel, head_sel);
+
+	return 0;
+}
+#endif
+
 struct tegra_dc_sor_data *tegra_dc_sor_init(struct tegra_dc *dc,
 				const struct tegra_dc_dp_link_config *cfg)
 {
@@ -447,22 +507,18 @@ struct tegra_dc_sor_data *tegra_dc_sor_init(struct tegra_dc *dc,
 	struct clk *brick_clk = NULL;
 	struct clk *src_clk = NULL;
 	struct device_node *np = dc->ndev->dev.of_node;
+	int sor_num = tegra_dc_which_sor(dc);
 	struct device_node *np_sor =
-		dc->ndev->id ? of_find_node_by_path(SOR1_NODE) :
+		sor_num ? of_find_node_by_path(SOR1_NODE) :
 		of_find_node_by_path(SOR_NODE);
-	const char *res_name = dc->ndev->id ? "sor1" : "sor0";
-
-	if (dc->out->type == TEGRA_DC_OUT_HDMI) {
-		of_node_put(np_sor);
-		np_sor = of_find_node_by_path(SOR1_NODE);
-		res_name = "sor1";
-	}
+	const char *res_name = sor_num ? "sor1" : "sor0";
 
 	sor = devm_kzalloc(&dc->ndev->dev, sizeof(*sor), GFP_KERNEL);
 	if (!sor) {
 		err = -ENOMEM;
 		goto err_allocate;
 	}
+	sor->instance = sor_num;
 
 	if (np) {
 		if (np_sor && (of_device_is_available(np_sor) ||
@@ -502,7 +558,11 @@ struct tegra_dc_sor_data *tegra_dc_sor_init(struct tegra_dc *dc,
 		goto err_release_resource_reg;
 	}
 
+#ifdef CONFIG_TEGRA_NVDISPLAY
+	clk = tegra_disp_of_clk_get_by_name(np_sor, res_name);
+#else
 	clk = clk_get(NULL, res_name);
+#endif
 	if (IS_ERR_OR_NULL(clk)) {
 		dev_err(&dc->ndev->dev, "sor: can't get clock\n");
 		err = -ENOENT;
@@ -510,7 +570,13 @@ struct tegra_dc_sor_data *tegra_dc_sor_init(struct tegra_dc *dc,
 	}
 
 #ifndef	CONFIG_ARCH_TEGRA_12x_SOC
+
+#ifdef CONFIG_TEGRA_NVDISPLAY
+	safe_clk = tegra_disp_of_clk_get_by_name(np_sor, "sor_safe");
+#else
 	safe_clk = clk_get(NULL, "sor_safe");
+#endif
+
 	if (IS_ERR_OR_NULL(safe_clk)) {
 		dev_err(&dc->ndev->dev, "sor: can't get safe clock\n");
 		err = -ENOENT;
@@ -555,14 +621,21 @@ struct tegra_dc_sor_data *tegra_dc_sor_init(struct tegra_dc *dc,
 	tegra_dc_sor_debug_create(sor, res_name);
 	of_node_put(np_sor);
 
+#if defined(CONFIG_TEGRA_NVDISPLAY)
+	sor_fpga_settings(dc, sor);
+#endif
 	return sor;
 
+#ifndef CONFIG_TEGRA_NVDISPLAY
 err_src: __maybe_unused
 	clk_put(brick_clk);
 err_brick: __maybe_unused
 	clk_put(safe_clk);
+#endif
 err_safe: __maybe_unused
+#ifndef CONFIG_TEGRA_NVDISPLAY
 	clk_put(clk);
+#endif
 err_iounmap_reg:
 	devm_iounmap(&dc->ndev->dev, base);
 err_release_resource_reg:
@@ -608,15 +681,18 @@ int tegra_dc_sor_set_power_state(struct tegra_dc_sor_data *sor, int pu_pd)
 
 void tegra_dc_sor_destroy(struct tegra_dc_sor_data *sor)
 {
-	struct device_node *np_sor = (sor->dc->ndev->id) ?
+	struct device_node *np_sor = sor->instance ?
 		of_find_node_by_path(SOR1_NODE) :
 		of_find_node_by_path(SOR_NODE);
+
+	struct device *dev = &sor->dc->ndev->dev;
 
 	if (sor->dc->out->type == TEGRA_DC_OUT_HDMI) {
 		of_node_put(np_sor);
 		np_sor = of_find_node_by_path(SOR1_NODE);
 	}
 
+#ifndef CONFIG_TEGRA_NVDISPLAY
 	clk_put(sor->sor_clk);
 	if (sor->safe_clk)
 		clk_put(sor->safe_clk);
@@ -624,13 +700,14 @@ void tegra_dc_sor_destroy(struct tegra_dc_sor_data *sor)
 		clk_put(sor->brick_clk);
 	if (sor->src_switch_clk)
 		clk_put(sor->src_switch_clk);
-	devm_iounmap(&sor->dc->ndev->dev, sor->base);
-	devm_release_mem_region(&sor->dc->ndev->dev,
+#endif
+	devm_iounmap(dev, sor->base);
+	devm_release_mem_region(dev,
 		sor->res->start, resource_size(sor->res));
 
 	if (!np_sor || !of_device_is_available(np_sor))
 		release_resource(sor->res);
-	devm_kfree(&sor->dc->ndev->dev, sor);
+	devm_kfree(dev, sor);
 	of_node_put(np_sor);
 }
 
@@ -642,6 +719,11 @@ void tegra_sor_tpg(struct tegra_dc_sor_data *sor, u32 tp, u32 n_lanes)
 		{1, 0}, /* training pattern 1 */
 		{1, 0}, /* training pattern 2 */
 		{1, 0}, /* training pattern 3 */
+		{1, 0}, /* D102 */
+		{1, 1}, /* SBLERRRATE */
+		{0, 0}, /* PRBS7 */
+		{0, 0}, /* CSTM */
+		{1, 1}, /* HBR2_COMPLIANCE */
 	};
 	u32 cnt;
 	u32 val = 0;
@@ -804,9 +886,7 @@ void tegra_dc_sor_termination_cal(struct tegra_dc_sor_data *sor)
 	termadj = cur_try = 0x8;
 
 	tegra_sor_write_field(sor, NV_SOR_PLL1,
-		NV_SOR_PLL1_TMDS_TERMADJ_DEFAULT_MASK |
-		NV_SOR_PLL1_TMDS_TERM_ENABLE,
-		NV_SOR_PLL1_TMDS_TERM_ENABLE |
+		NV_SOR_PLL1_TMDS_TERMADJ_DEFAULT_MASK,
 		termadj << NV_SOR_PLL1_TMDS_TERMADJ_SHIFT);
 
 	while (cur_try) {
@@ -1035,12 +1115,13 @@ void tegra_sor_config_hdmi_clk(struct tegra_dc_sor_data *sor)
 	 * between safe clock and macro pll clock
 	 */
 	if (flag)
-		clk_disable_unprepare(sor->sor_clk);
+		tegra_sor_clk_disable(sor);
 
-	tegra_clk_cfg_ex(sor->sor_clk, TEGRA_CLK_SOR_CLK_SEL, 3);
+	if (tegra_platform_is_silicon())
+		tegra_clk_cfg_ex(sor->sor_clk, TEGRA_CLK_SOR_CLK_SEL, 3);
 
 	if (flag)
-		clk_prepare_enable(sor->sor_clk);
+		tegra_sor_clk_enable(sor);
 
 	sor->clk_type = TEGRA_SOR_MACRO_CLK;
 }
@@ -1258,7 +1339,13 @@ static void tegra_dc_sor_enable_dc(struct tegra_dc_sor_data *sor)
 #endif
 
 	/* Enable DC */
-	tegra_dc_writel(dc, DISP_CTRL_MODE_C_DISPLAY, DC_CMD_DISPLAY_COMMAND);
+	if (dc->out->flags & TEGRA_DC_OUT_NVSR_MODE)
+		tegra_dc_writel(dc, DISP_CTRL_MODE_NC_DISPLAY,
+			DC_CMD_DISPLAY_COMMAND);
+	else
+		tegra_dc_writel(dc, DISP_CTRL_MODE_C_DISPLAY,
+			DC_CMD_DISPLAY_COMMAND);
+
 	tegra_dc_writel(dc, reg_val, DC_CMD_STATE_ACCESS);
 
 	tegra_dc_put(dc);
@@ -1304,23 +1391,38 @@ static void tegra_dc_sor_attach_lvds(struct tegra_dc_sor_data *sor)
 
 }
 
+static int tegra_sor_config_dp_prods(struct tegra_dc_dp_data *dp)
+{
+	int err = 0;
+
+	if (!IS_ERR(dp->prod_list)) {
+		err = tegra_prod_set_by_name(&dp->sor->base, "prod_c_dp",
+							dp->prod_list);
+		if (err) {
+			dev_warn(&dp->dc->ndev->dev,
+				"dp: prod set failed\n");
+			return -EINVAL;
+		}
+	}
+
+	return err;
+}
+
 static void tegra_sor_dp_cal(struct tegra_dc_sor_data *sor)
 {
 	tegra_sor_pad_cal_power(sor, true);
+
+	tegra_sor_config_dp_prods(tegra_dc_get_outdata(sor->dc));
 
 	tegra_sor_write_field(sor, NV_SOR_PLL2,
 		NV_SOR_PLL2_AUX6_BANDGAP_POWERDOWN_MASK,
 		NV_SOR_PLL2_AUX6_BANDGAP_POWERDOWN_DISABLE);
 	usleep_range(20, 100);
 
-	tegra_sor_write_field(sor, NV_SOR_PLL3,
-		NV_SOR_PLL3_PLLVDD_MODE_MASK,
-		NV_SOR_PLL3_PLLVDD_MODE_V3_3);
-	tegra_sor_writel(sor, NV_SOR_PLL0,
-		0x1 << NV_SOR_PLL0_ICHPMP_SHFIT |
-		0x3 << NV_SOR_PLL0_VCOCAP_SHIFT |
+	tegra_sor_write_field(sor, NV_SOR_PLL0,
+		NV_SOR_PLL0_PLLREG_LEVEL_DEFAULT_MASK |
+		NV_SOR_PLL0_PWR_MASK | NV_SOR_PLL0_VCOPD_MASK,
 		NV_SOR_PLL0_PLLREG_LEVEL_V45 |
-		NV_SOR_PLL0_RESISTORSEL_EXT |
 		NV_SOR_PLL0_PWR_ON | NV_SOR_PLL0_VCOPD_RESCIND);
 	tegra_sor_write_field(sor, NV_SOR_PLL2,
 		NV_SOR_PLL2_AUX1_SEQ_MASK | NV_SOR_PLL2_AUX9_LVDSEN_OVERRIDE |
@@ -1328,9 +1430,9 @@ static void tegra_sor_dp_cal(struct tegra_dc_sor_data *sor)
 		NV_SOR_PLL2_AUX1_SEQ_PLLCAPPD_OVERRIDE |
 		NV_SOR_PLL2_AUX9_LVDSEN_OVERRIDE |
 		NV_SOR_PLL2_AUX8_SEQ_PLLCAPPD_ENFORCE_DISABLE);
-	tegra_sor_writel(sor, NV_SOR_PLL1,
-		NV_SOR_PLL1_TERM_COMPOUT_HIGH | NV_SOR_PLL1_TMDS_TERM_ENABLE |
-		0x0 << NV_SOR_PLL1_LVDSCM_SHIFT);
+	tegra_sor_write_field(sor, NV_SOR_PLL1,
+		NV_SOR_PLL1_TERM_COMPOUT_HIGH,
+		NV_SOR_PLL1_TERM_COMPOUT_HIGH);
 
 	if (tegra_dc_sor_poll_register(sor, NV_SOR_PLL2,
 			NV_SOR_PLL2_AUX8_SEQ_PLLCAPPD_ENFORCE_MASK,
@@ -1392,15 +1494,16 @@ void tegra_dc_sor_enable_dp(struct tegra_dc_sor_data *sor)
 static void tegra_dc_sor_enable_sor(struct tegra_dc_sor_data *sor, bool enable)
 {
 	struct tegra_dc *dc = sor->dc;
+	int sor_num = sor->instance;
 	u32 reg_val = tegra_dc_readl(sor->dc, DC_DISP_DISP_WIN_OPTIONS);
-	u32 enb = dc->ndev->id ? SOR1_ENABLE : SOR_ENABLE;
+	u32 enb = sor_num ? SOR1_ENABLE : SOR_ENABLE;
 
 	/* Do not disable SOR during seamless boot */
 	if (sor->dc->initialized && !enable)
 		return;
 
 	if (sor->dc->out->type == TEGRA_DC_OUT_HDMI)
-		enb = SOR1_ENABLE;
+		enb = sor_num ? SOR1_ENABLE : SOR_ENABLE;
 
 	if (dc->out->type == TEGRA_DC_OUT_HDMI)
 		enb |= SOR1_TIMING_CYA;
@@ -1467,12 +1570,14 @@ void tegra_dc_sor_attach(struct tegra_dc_sor_data *sor)
 
 	tegra_dc_sor_enable_sor(sor, true);
 
-	if (tegra_dc_sor_poll_register(sor, NV_SOR_TEST,
-		NV_SOR_TEST_ACT_HEAD_OPMODE_DEFAULT_MASK,
-		NV_SOR_TEST_ACT_HEAD_OPMODE_AWAKE,
-		100, TEGRA_SOR_ATTACH_TIMEOUT_MS)) {
-		dev_err(&dc->ndev->dev,
-			"dc timeout waiting for OPMOD = AWAKE\n");
+	if (!(dc->out->flags & TEGRA_DC_OUT_NVSR_MODE)) {
+		if (tegra_dc_sor_poll_register(sor, NV_SOR_TEST,
+			NV_SOR_TEST_ACT_HEAD_OPMODE_DEFAULT_MASK,
+			NV_SOR_TEST_ACT_HEAD_OPMODE_AWAKE,
+			100, TEGRA_SOR_ATTACH_TIMEOUT_MS)) {
+			dev_err(&dc->ndev->dev,
+				"dc timeout waiting for OPMOD = AWAKE\n");
+		}
 	}
 #else
 	tegra_dc_sor_update(sor);
@@ -1741,12 +1846,13 @@ static void tegra_sor_config_lvds_clk(struct tegra_dc_sor_data *sor)
 	 * between safe clock and macro pll clock
 	 */
 	if (flag)
-		clk_disable_unprepare(sor->sor_clk);
+		tegra_sor_clk_disable(sor);
 
-	tegra_clk_cfg_ex(sor->sor_clk, TEGRA_CLK_SOR_CLK_SEL, 1);
+	if (tegra_platform_is_silicon())
+		tegra_clk_cfg_ex(sor->sor_clk, TEGRA_CLK_SOR_CLK_SEL, 1);
 
 	if (flag)
-		clk_prepare_enable(sor->sor_clk);
+		tegra_sor_clk_enable(sor);
 
 	sor->clk_type = TEGRA_SOR_MACRO_CLK;
 }
@@ -1766,10 +1872,8 @@ void tegra_dc_sor_enable_lvds(struct tegra_dc_sor_data *sor,
 		NV_SOR_PLL3_PLLVDD_MODE_MASK,
 		NV_SOR_PLL3_PLLVDD_MODE_V1_8);
 
-	tegra_sor_writel(sor, NV_SOR_PLL1, 
-			 (NV_SOR_PLL1_TMDS_TERMADJ_OHM500 |
-			  (2 << NV_SOR_PLL1_LVDSCM_SHIFT) |
-			  (2 << NV_SOR_PLL1_LOADADJ_SHIFT)));
+	tegra_sor_writel(sor, NV_SOR_PLL1,
+		NV_SOR_PLL1_TERM_COMPOUT_HIGH | NV_SOR_PLL1_TMDS_TERM_ENABLE);
 	tegra_sor_write_field(sor, NV_SOR_PLL2,
 		NV_SOR_PLL2_AUX1_SEQ_MASK |
 		NV_SOR_PLL2_AUX8_SEQ_PLLCAPPD_ENFORCE_MASK,
@@ -1793,26 +1897,7 @@ void tegra_dc_sor_enable_lvds(struct tegra_dc_sor_data *sor,
 
 	tegra_sor_writel(sor, NV_SOR_LVDS, reg_val);
 	tegra_sor_writel(sor, NV_SOR_LANE_DRIVE_CURRENT(sor->portnum),
-		(NV_SOR_DC_LANE0_DP_LANE2_P1_LEVEL0 |
-		 NV_SOR_DC_LANE1_DP_LANE1_P1_LEVEL0 |
-		 NV_SOR_DC_LANE2_DP_LANE0_P1_LEVEL0 |
-		 NV_SOR_DC_LANE3_DP_LANE3_P1_LEVEL0));
-	reg_val = tegra_sor_readl(sor,
-				  NV_SOR_LANE4_DRIVE_CURRENT(sor->portnum));
-	reg_val &= ~NV_SOR_PR_LANE0_DP_LANE2_MASK;
-	tegra_sor_writel(sor, NV_SOR_LANE4_DRIVE_CURRENT(sor->portnum),
-		 reg_val | NV_SOR_DC_LANE0_DP_LANE2_P1_LEVEL0);
-
-	tegra_sor_writel(sor, NV_SOR_LANE_PREEMPHASIS(sor->portnum),
-			 (NV_SOR_DC_LANE3_DP_LANE3_P0_LEVEL4 |
-			  NV_SOR_DC_LANE2_DP_LANE0_P0_LEVEL4 |
-			  NV_SOR_DC_LANE1_DP_LANE1_P0_LEVEL4 |
-			  NV_SOR_DC_LANE0_DP_LANE2_P0_LEVEL4));
-	reg_val = tegra_sor_readl(sor,
-		 NV_SOR_LANE4_PREEMPHASIS(sor->portnum));
-	reg_val &= ~NV_SOR_PR_LANE0_DP_LANE2_MASK;
-	tegra_sor_writel(sor, NV_SOR_LANE4_PREEMPHASIS(sor->portnum),
-			 reg_val | NV_SOR_DC_LANE0_DP_LANE2_P0_LEVEL4);
+		0x40404040);
 
 #if 0
 	tegra_sor_write_field(sor, NV_SOR_LVDS,
@@ -1890,8 +1975,7 @@ void tegra_dc_sor_set_internal_panel(struct tegra_dc_sor_data *sor, bool is_int)
 	else
 		reg_val &= ~NV_SOR_DP_SPARE_PANEL_INTERNAL;
 
-	reg_val |= NV_SOR_DP_SPARE_SOR_CLK_SEL_MACRO_SORCLK |
-		NV_SOR_DP_SPARE_SEQ_ENABLE_YES;
+	reg_val |= NV_SOR_DP_SPARE_SOR_CLK_SEL_MACRO_SORCLK;
 
 	tegra_sor_writel(sor, NV_SOR_DP_SPARE(sor->portnum), reg_val);
 

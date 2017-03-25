@@ -1,7 +1,7 @@
 /*
  * arch/arm/mach-tegra/board-ardbeg.c
  *
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -42,6 +42,7 @@
 #include <linux/skbuff.h>
 #include <linux/ti_wilink_st.h>
 #include <linux/regulator/consumer.h>
+#include <linux/regulator/machine.h>
 #include <linux/smb349-charger.h>
 #include <linux/max17048_battery.h>
 #include <linux/leds.h>
@@ -330,6 +331,7 @@ static void ardbeg_audio_init(void)
 		if (board_info.board_id == BOARD_E1762 ||
 			board_info.board_id == BOARD_P1761 ||
 			board_info.board_id == BOARD_E1922 ||
+			board_info.board_id == BOARD_E1784 ||
 			of_machine_is_compatible("nvidia,green-arrow")) {
 			ardbeg_audio_pdata_rt5639.gpio_hp_det =
 				TEGRA_GPIO_CDC_IRQ;
@@ -571,14 +573,6 @@ static void ardbeg_usb_init(void)
 			board_info.board_id == BOARD_E1784 ||
 			board_info.board_id == BOARD_E1780) {
 
-			/*
-			 * Set the maximum voltage that can be supplied
-			 * over USB vbus that the board supports if we use
-			 * a quick charge 2 wall charger.
-			 */
-			tegra_udc_pdata.qc2_voltage = TEGRA_USB_QC2_9V;
-			tegra_udc_pdata.u_data.dev.qc2_current_limit_ma = 1200;
-
 			/* charger needs to be set to 3A - h/w will do 2A */
 			tegra_udc_pdata.u_data.dev.dcp_current_limit_ma = 3000;
 		}
@@ -800,15 +794,10 @@ static struct of_dev_auxdata ardbeg_auxdata_lookup[] __initdata = {
 #endif
 	OF_DEV_AUXDATA("nvidia,tegra124-msenc", TEGRA_MSENC_BASE, "msenc",
 		NULL),
-#ifdef CONFIG_VI_ONE_DEVICE
 	OF_DEV_AUXDATA("nvidia,tegra124-vi", TEGRA_VI_BASE, "vi", NULL),
-#else
-	OF_DEV_AUXDATA("nvidia,tegra124-vi", TEGRA_VI_BASE, "vi.0", NULL),
-#endif
 	OF_DEV_AUXDATA("nvidia,tegra124-isp", TEGRA_ISP_BASE, "isp.0", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra124-isp", TEGRA_ISPB_BASE, "isp.1", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra124-tsec", TEGRA_TSEC_BASE, "tsec", NULL),
-	T124_I2C_OF_DEV_AUXDATA,
 	OF_DEV_AUXDATA("nvidia,tegra124-xhci", 0x70090000, "tegra-xhci",
 				&xusb_pdata),
 	OF_DEV_AUXDATA("nvidia,tegra132-xhci", 0x70090000, "tegra-xhci",
@@ -1063,7 +1052,8 @@ static int __init ardbeg_touch_init(void)
 					&rm31080ts_t132loki_data,
 					&rm31080a_ardbeg_spi_board[0],
 					ARRAY_SIZE(rm31080a_ardbeg_spi_board));
-		} else if (board_info.board_id == BOARD_P1761) {
+		} else if ((board_info.board_id == BOARD_P1761) ||
+			(board_info.board_id == BOARD_E1784)) {
 			rm31080a_tn8_spi_board[0].irq =
 				gpio_to_irq(TOUCH_GPIO_IRQ_RAYDIUM_SPI);
 			touch_init_raydium(TOUCH_GPIO_IRQ_RAYDIUM_SPI,
@@ -1270,8 +1260,6 @@ static void __init tegra_ardbeg_late_init(void)
 	if (board_info.board_id == BOARD_E2548 ||
 			board_info.board_id == BOARD_P2530)
 		loki_panel_init();
-	else
-		tegra_fb_copy_or_clear();
 
 		/* put PEX pads into DPD mode to save additional power */
 		tegra_io_dpd_enable(&pexbias_io);
@@ -1388,6 +1376,9 @@ static struct notifier_block i2c_nb = {
 
 static void __init tegra_ardbeg_dt_init(void)
 {
+	if(of_machine_is_compatible("nvidia,green-arrow"))
+		regulator_has_full_constraints();
+
 	tegra_get_board_info(&board_info);
 	tegra_get_display_board_info(&display_board_info);
 
@@ -1413,33 +1404,15 @@ static void __init tegra_ardbeg_dt_init(void)
 
 static void __init tegra_ardbeg_reserve(void)
 {
-#ifdef CONFIG_TEGRA_HDMI_PRIMARY
-	ulong tmp;
-#endif /* CONFIG_TEGRA_HDMI_PRIMARY */
-
 #if defined(CONFIG_NVMAP_CONVERT_CARVEOUT_TO_IOVMM) || \
 		defined(CONFIG_TEGRA_NO_CARVEOUT)
 	ulong carveout_size = 0;
-	ulong fb2_size = SZ_16M;
 #else
 	ulong carveout_size = SZ_1G;
-	ulong fb2_size = SZ_4M;
 #endif
-	ulong fb1_size = SZ_16M + SZ_2M;
 	ulong vpr_size = 186 * SZ_1M;
 
-#ifdef CONFIG_FRAMEBUFFER_CONSOLE
-	/* support FBcon on 4K monitors */
-	fb2_size = SZ_64M + SZ_8M;	/* 4096*2160*4*2 = 70778880 bytes */
-#endif /* CONFIG_FRAMEBUFFER_CONSOLE */
-
-#ifdef CONFIG_TEGRA_HDMI_PRIMARY
-	tmp = fb1_size;
-	fb1_size = fb2_size;
-	fb2_size = tmp;
-#endif /* CONFIG_TEGRA_HDMI_PRIMARY */
-
-	tegra_reserve4(carveout_size, fb1_size, fb2_size, vpr_size);
+	tegra_reserve4(carveout_size, 0, 0, vpr_size);
 }
 
 static const char * const ardbeg_dt_board_compat[] = {

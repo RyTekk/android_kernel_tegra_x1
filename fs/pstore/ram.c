@@ -467,12 +467,6 @@ void notrace ramoops_console_write_buf(const char *buf, size_t size)
 	persistent_ram_write(cxt->cprz, buf, size);
 }
 
-void notrace ramoops_pmsg_write_buf(const char *buf, size_t size)
-{
-	struct ramoops_context *cxt = &oops_cxt;
-	persistent_ram_write(cxt->mprz, buf, size);
-}
-
 static int ramoops_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -626,11 +620,15 @@ fail_clear:
 	cxt->max_dump_cnt = 0;
 fail_cnt:
 	kfree(cxt->mprz);
+#ifdef CONFIG_PSTORE_PMSG
 fail_init_mprz:
+#endif
 	kfree(cxt->rprz);
 fail_init_rprz:
 	kfree(cxt->fprz);
+#ifdef CONFIG_PSTORE_FTRACE
 fail_init_fprz:
+#endif
 	kfree(cxt->cprz);
 fail_init_cprz:
 	ramoops_free_przs(cxt);

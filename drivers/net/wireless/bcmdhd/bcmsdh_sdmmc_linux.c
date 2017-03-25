@@ -89,6 +89,7 @@ extern void sdioh_sdmmc_devintr_on(sdioh_info_t *sd);
 extern void* bcmsdh_probe(osl_t *osh, void *dev, void *sdioh, void *adapter_info, uint bus_type,
 	uint bus_num, uint slot_num);
 extern int bcmsdh_remove(bcmsdh_info_t *bcmsdh);
+extern int wifi_platform_bus_enumerate(wifi_adapter_info_t *adapter, bool device_present);
 
 int sdio_function_init(void);
 void sdio_function_cleanup(void);
@@ -106,7 +107,9 @@ MODULE_PARM_DESC(clockoverride, "SDIO card clock override");
 /* Maximum number of bcmsdh_sdmmc devices supported by driver */
 #define BCMSDH_SDMMC_MAX_DEVICES 1
 
+#ifdef CONFIG_PM_SLEEP
 extern volatile bool dhd_mmc_suspend;
+#endif
 
 static int sdioh_probe(struct sdio_func *func)
 {
@@ -124,19 +127,9 @@ static int sdioh_probe(struct sdio_func *func)
 	if (adapter  != NULL) {
 		sd_err(("found adapter info '%s'\n", adapter->name));
 #if defined(CONFIG_WIFI_CONTROL_FUNC)
-		if (adapter->wifi_plat_data) {
-			plat_data = adapter->wifi_plat_data;
-			/* sdio card detection is completed,
-			 * so stop card detection here */
-			if (plat_data->set_carddetect) {
-				sd_debug(("stopping card detection\n"));
-				plat_data->set_carddetect(0);
-			}
-			else
-				sd_err(("set_carddetect is not registered\n"));
-		}
-		else
-			sd_err(("platform data is NULL\n"));
+		/* sdio card detection is completed,
+		* so stop card detection here */
+		wifi_platform_bus_enumerate(adapter, 0);
 #endif
 	} else
 		sd_err(("can't find adapter info for this chip\n"));
@@ -320,16 +313,41 @@ static void bcmsdh_sdmmc_remove(struct sdio_func *func)
 
 /* devices we support, null terminated */
 static const struct sdio_device_id bcmsdh_sdmmc_ids[] = {
+#if 0
 	{ 	.class	= SDIO_CLASS_NONE,
 		.vendor	= SDIO_VENDOR_ID_BROADCOM,
 		.device	= SDIO_ANY_ID
 	},
+#elif 1
+	/* BCM4354 */
+	{ 	.class	= SDIO_CLASS_NONE,
+		.vendor	= SDIO_VENDOR_ID_BROADCOM,
+		.device	= 0x4354
+	},
+	/* BCM43241 */
+	{ 	.class	= SDIO_CLASS_NONE,
+		.vendor	= SDIO_VENDOR_ID_BROADCOM,
+		.device	= 0x4324
+	},
+	/* BCM4339 */
+	{ 	.class	= SDIO_CLASS_NONE,
+		.vendor	= SDIO_VENDOR_ID_BROADCOM,
+		.device	= 0x4339
+	},
+
+#else
+	/* BCM43341 */
+	{ 	.class	= SDIO_CLASS_NONE,
+		.vendor	= SDIO_VENDOR_ID_BROADCOM,
+		.device	= 0xa94d
+	},
+#endif
 	{ /* end: all zeroes */                         },
 };
 
 MODULE_DEVICE_TABLE(sdio, bcmsdh_sdmmc_ids);
 
-#if (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 39)) && defined(CONFIG_PM)
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 39)) && defined(CONFIG_PM_SLEEP)
 static int bcmsdh_sdmmc_suspend(struct device *pdev)
 {
 	int err;
@@ -408,7 +426,7 @@ static const struct dev_pm_ops bcmsdh_sdmmc_pm_ops = {
 	.resume_noirq   = bcmsdh_sdmmc_resume_noirq,
 #endif
 };
-#endif  /* (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 39)) && defined(CONFIG_PM) */
+#endif  /* (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 39)) && defined(CONFIG_PM_SLEEP) */
 
 #if defined(BCMLXSDMMC)
 static struct semaphore *notify_semaphore = NULL;
@@ -455,11 +473,11 @@ static struct sdio_driver bcmsdh_sdmmc_driver = {
 	.remove		= bcmsdh_sdmmc_remove,
 	.name		= "bcmsdh_sdmmc",
 	.id_table	= bcmsdh_sdmmc_ids,
-#if (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 39)) && defined(CONFIG_PM)
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 39)) && defined(CONFIG_PM_SLEEP)
 	.drv = {
 	.pm	= &bcmsdh_sdmmc_pm_ops,
 	},
-#endif /* (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 39)) && defined(CONFIG_PM) */
+#endif /* (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 39)) && defined(CONFIG_PM_SLEEP) */
 	};
 
 struct sdos_info {

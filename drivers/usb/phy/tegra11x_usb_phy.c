@@ -1,7 +1,7 @@
 /*
  * drivers/usb/phy/tegra11x_usb_phy.c
  *
- * Copyright (c) 2012-2015 NVIDIA Corporation. All rights reserved.
+ * Copyright (c) 2012-2016 NVIDIA Corporation. All rights reserved.
  *
  *
  * This software is licensed under the terms of the GNU General Public
@@ -32,6 +32,7 @@
 #include <mach/tegra_usb_pmc.h>
 #include <mach/tegra_usb_pad_ctrl.h>
 #include <linux/tegra_prod.h>
+#include <dt-bindings/usb/tegra-usb.h>
 
 #include "tegra_usb_phy.h"
 #include "../../../arch/arm/mach-tegra/gpio-names.h"
@@ -109,7 +110,7 @@
 #define   UTMIP_XCVR_HSSLEW_MSB(x)		(((x) & 0x7f) << 25)
 #define   UTMIP_XCVR_HSSLEW_LSB(x)		(((x) & 0x3) << 4)
 #define   UTMIP_XCVR_MAX_OFFSET		0x10
-#define   UTMIP_XCVR_SETUP_MAX_VALUE	0x7f
+#define   UTMIP_XCVR_SETUP_MAX_VALUE	0x3f
 #define   UTMIP_XCVR_SETUP_MIN_VALUE	0
 #define   XCVR_SETUP_MSB_CALIB(x) ((x) >> 4)
 
@@ -655,7 +656,7 @@ static int utmi_phy_open(struct tegra_usb_phy *phy)
 
 	DBG("%s(%d) inst:[%d]\n", __func__, __LINE__, phy->inst);
 
-#if defined(CONFIG_ARCH_TEGRA_21x_SOC) || defined(CONFIG_ARCH_TEGRA_12x_SOC)
+#ifdef CONFIG_ARCH_TEGRA_21x_SOC
 	if (phy->pdev->dev.of_node) {
 		phy->prod_list = tegra_prod_get(&phy->pdev->dev, NULL);
 		if (IS_ERR_OR_NULL(phy->prod_list)) {
@@ -726,8 +727,7 @@ static void utmi_phy_close(struct tegra_usb_phy *phy)
 		phy->pmc_hotplug_wakeup = false;
 		PHY_DBG("%s DISABLE_PMC inst = %d\n", __func__, phy->inst);
 	}
-#if defined(CONFIG_ARCH_TEGRA_21x_SOC) || defined(CONFIG_ARCH_TEGRA_12x_SOC)
-
+#ifdef CONFIG_ARCH_TEGRA_21x_SOC
 	if (phy->prod_list)
 		tegra_prod_release(&phy->prod_list);
 #endif
@@ -1079,31 +1079,26 @@ safe_settings:
 #else
 	utmi_phy_pad_enable();
 #endif
-	/*If prod_list is NULL or it does not have phy_prod label*/
-	if ((phy->prod_list == NULL) ||
-		(tegra_prod_set_by_name(&base,
-					"phy_prod",
-					phy->prod_list) != 0)) {
-		val = readl(base + UTMIP_XCVR_CFG0);
-		val &= ~(UTMIP_XCVR_LSBIAS_SEL | UTMIP_FORCE_PD_POWERDOWN |
-			 UTMIP_FORCE_PD2_POWERDOWN | UTMIP_FORCE_PDZI_POWERDOWN |
-			 UTMIP_XCVR_SETUP(~0) | UTMIP_XCVR_LSFSLEW(~0) |
-			 UTMIP_XCVR_LSRSLEW(~0) | UTMIP_XCVR_HSSLEW_MSB(~0) |
-			 UTMIP_XCVR_SETUP_MSB(~0));
-		val |= UTMIP_XCVR_SETUP(phy->utmi_xcvr_setup);
-		val |= UTMIP_XCVR_SETUP_MSB(XCVR_SETUP_MSB_CALIB(phy->utmi_xcvr_setup));
-		val |= UTMIP_XCVR_LSFSLEW(config->xcvr_lsfslew);
-		val |= UTMIP_XCVR_LSRSLEW(config->xcvr_lsrslew);
-		if (!config->xcvr_use_lsb) {
-			if (!config->xcvr_hsslew_msb)
-				val |= UTMIP_XCVR_HSSLEW_MSB(3);
-			else
-				val |= UTMIP_XCVR_HSSLEW_MSB(config->xcvr_hsslew_msb);
-		}
-		if (config->xcvr_hsslew_lsb)
-			val |= UTMIP_XCVR_HSSLEW_LSB(config->xcvr_hsslew_lsb);
-		writel(val, base + UTMIP_XCVR_CFG0);
+
+	val = readl(base + UTMIP_XCVR_CFG0);
+	val &= ~(UTMIP_XCVR_LSBIAS_SEL | UTMIP_FORCE_PD_POWERDOWN |
+		 UTMIP_FORCE_PD2_POWERDOWN | UTMIP_FORCE_PDZI_POWERDOWN |
+		 UTMIP_XCVR_SETUP(~0) | UTMIP_XCVR_LSFSLEW(~0) |
+		 UTMIP_XCVR_LSRSLEW(~0) | UTMIP_XCVR_HSSLEW_MSB(~0) |
+		 UTMIP_XCVR_SETUP_MSB(~0));
+	val |= UTMIP_XCVR_SETUP(phy->utmi_xcvr_setup);
+	val |= UTMIP_XCVR_SETUP_MSB(XCVR_SETUP_MSB_CALIB(phy->utmi_xcvr_setup));
+	val |= UTMIP_XCVR_LSFSLEW(config->xcvr_lsfslew);
+	val |= UTMIP_XCVR_LSRSLEW(config->xcvr_lsrslew);
+	if (!config->xcvr_use_lsb) {
+		if (!config->xcvr_hsslew_msb)
+			val |= UTMIP_XCVR_HSSLEW_MSB(3);
+		else
+			val |= UTMIP_XCVR_HSSLEW_MSB(config->xcvr_hsslew_msb);
 	}
+	if (config->xcvr_hsslew_lsb)
+		val |= UTMIP_XCVR_HSSLEW_LSB(config->xcvr_hsslew_lsb);
+	writel(val, base + UTMIP_XCVR_CFG0);
 
 	val = readl(base + UTMIP_XCVR_CFG1);
 	val &= ~(UTMIP_FORCE_PDDISC_POWERDOWN | UTMIP_FORCE_PDCHRP_POWERDOWN |
@@ -1313,6 +1308,9 @@ static int utmi_phy_resume(struct tegra_usb_phy *phy)
 		port_connected = val & USB_PORTSC_CCS;
 		is_lp0 = !(readl(base + USB_ASYNCLISTADDR));
 
+		if (phy->pdata->u_data.host.turn_off_vbus_on_lp0 && is_lp0)
+			phy->port_speed = USB_PHY_PORT_SPEED_UNKNOWN;
+
 		if ((phy->port_speed < USB_PHY_PORT_SPEED_UNKNOWN) &&
 			(port_connected ^ is_lp0)) {
 			utmi_phy_restore_start(phy);
@@ -1410,6 +1408,7 @@ static void disable_charger_detection(void __iomem *base)
 	val = readl(base + UTMIP_BAT_CHRG_CFG0);
 	val &= ~(UTMIP_OP_SRC_EN | UTMIP_ON_SINK_EN);
 	val &= ~(UTMIP_ON_SRC_EN | UTMIP_OP_SINK_EN);
+	val |= UTMIP_PD_CHRG;
 	writel(val, base + UTMIP_BAT_CHRG_CFG0);
 
 	/* Delay of 40 ms before we pull the D+ as per battery charger spec */

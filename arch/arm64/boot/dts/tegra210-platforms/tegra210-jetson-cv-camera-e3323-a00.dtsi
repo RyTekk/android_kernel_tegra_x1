@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,28 +28,76 @@
 /* camera control gpio definitions */
 
 / {
-	ov23850_a@10 {
-		/* Define any required hw resources needed by driver */
-		/* ie. clocks, io pins, power sources */
-		mclk = "cam_mclk1";
-		reset-gpios = <&gpio CAM0_RST_L GPIO_ACTIVE_HIGH>;   //also for VCM_2V8 en
-		pwdn-gpios = <&gpio CAM0_PWDN GPIO_ACTIVE_HIGH>;
-		vana-supply = <&en_vdd_cam_hv_2v8>;
-		vdig-supply = <&en_vdd_cam_1v2>;
-		vif-supply = <&en_vdd_cam>;
-		vvcm-suply = <&en_vdd_vcm_2v8>;
+	tegra-camera-platform {
+		compatible = "nvidia, tegra-camera-platform";
+		/**
+		* Physical settings to calculate max ISO BW
+		*
+		* num_csi_lanes = <>;
+		* Total number of CSI lanes when all cameras are active
+		*
+		* max_lane_speed = <>;
+		* Max lane speed in Kbit/s
+		*
+		* min_bits_per_pixel = <>;
+		* Min bits per pixel
+		*
+		* vi_peak_byte_per_pixel = <>;
+		* Max byte per pixel for the VI ISO case
+		*
+		* vi_bw_margin_pct = <>;
+		* Vi bandwidth margin in percentage
+		*
+		* isp_peak_byte_per_pixel = <>;
+		* Max byte per pixel for the ISP ISO case
+		*
+		* isp_bw_margin_pct = <>;
+		* Isp bandwidth margin in percentage
+		*/
+		num_csi_lanes = <8>;
+		max_lane_speed = <1500000>;
+		min_bits_per_pixel = <10>;
+		vi_peak_byte_per_pixel = <2>;
+		vi_bw_margin_pct = <25>;
+		max_pixel_rate = <600000>;
+		isp_peak_byte_per_pixel = <3>;
+		isp_bw_margin_pct = <25>;
 	};
 
-	ov23850_c@36 {
-		/* Define any required hw resources needed by driver */
-		/* ie. clocks, io pins, power sources */
-		mclk = "cam_mclk1";
-		reset-gpios = <&gpio CAM1_RST_L GPIO_ACTIVE_HIGH>;   //also for VCM_2V8 en
-		pwdn-gpios = <&gpio CAM1_PWDN GPIO_ACTIVE_HIGH>;
-		vana-supply = <&en_vdd_cam_hv_2v8>;
-		vdig-supply = <&en_vdd_cam_1v2>;
-		vif-supply = <&en_vdd_cam>;
-		vvcm-suply = <&en_vdd_vcm_2v8>;
+	host1x {
+		i2c@546c0000 {
+			ov23850_a@10 {
+				/* Define any required hw resources needed by driver */
+				/* ie. clocks, io pins, power sources */
+				mclk = "cam_mclk1";
+				reset-gpios = <&gpio CAM0_RST_L GPIO_ACTIVE_HIGH>;   //also for VCM_2V8 en
+				pwdn-gpios = <&gpio CAM0_PWDN GPIO_ACTIVE_HIGH>;
+				vana-supply = <&en_vdd_cam_hv_2v8>;
+				vdig-supply = <&en_vdd_cam_1v2>;
+				vif-supply = <&en_vdd_cam>;
+				vvcm-suply = <&en_vdd_vcm_2v8>;
+			};
+			lc898212_1: lc898212@72 {
+				vvcm-supply = <&en_vdd_vcm_2v8>;
+			};
+		};
+	};
+
+	i2c@7000c000 {
+		ov23850_c@36 {
+			/* Define any required hw resources needed by driver */
+			/* ie. clocks, io pins, power sources */
+			mclk = "cam_mclk1";
+			reset-gpios = <&gpio CAM1_RST_L GPIO_ACTIVE_HIGH>;   //also for VCM_2V8 en
+			pwdn-gpios = <&gpio CAM1_PWDN GPIO_ACTIVE_HIGH>;
+			vana-supply = <&en_vdd_cam_hv_2v8>;
+			vdig-supply = <&en_vdd_cam_1v2>;
+			vif-supply = <&en_vdd_cam>;
+			vvcm-suply = <&en_vdd_vcm_2v8>;
+		};
+		lc898212_2: lc898212@72 {
+			vvcm-supply = <&en_vdd_vcm_2v8>;
+		};
 	};
 
 	gpio: gpio@6000d000 {
@@ -60,30 +108,6 @@
 				CAM1_RST_L
 				CAM1_PWDN
 				>;
-		};
-	};
-
-	regulators {
-		en_vdd_cam_1v2: regulator@209 {
-			compatible = "regulator-fixed-sync";
-			reg = <209>;
-			regulator-name = "en-vdd-cam-1v2";
-			regulator-min-microvol = <1200000>;
-			regulator-max-microvol = <1200000>;
-			vin-supply = <&vdd_3v3>;
-			gpio = <&tca9539_77 3 1>;
-			enable-active-high;
-		};
-
-		en_vdd_vcm_2v8: regulator@210 {
-			compatible = "regulator-fixed-sync";
-			reg = <210>;
-			regulator-name = "en-vdd-vcm-2v8";
-			regulator-min-microvol = <2800000>;
-			regulator-max-microvol = <2800000>;
-			vin-supply = <&vdd_3v3>;
-			gpio = <&gpio TEGRA_GPIO(S, 4) 0>;
-			enable-active-high;
 		};
 	};
 };

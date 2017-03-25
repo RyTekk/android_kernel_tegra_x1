@@ -20,51 +20,54 @@
 / {
 	i2c@7000c000 {
 		mpu6515@69 {
-			compatible = "invensense,mpu6515-input";
+			compatible = "invensense,mpu6xxx";
 			reg = <0x69>;
 			interrupt-parent = <&gpio>;
-			interrupts = <144 0x01>;
-			invensense,int_config = <0x10>;
-			invensense,level_shifter = <0>;
-			invensense,orientation = [ff 00 00 00 01 00 00 00 ff];
+			interrupts = <TEGRA_GPIO(S, 0) 0x01>;
 			accelerometer_matrix = [ff 00 00 00 01 00 00 00 ff];
 			gyroscope_matrix = [ff 00 00 00 01 00 00 00 ff];
-			invensense,sec_slave_type = <0>;
-			invensense,key = [4e cc 7e eb f6 1e 35 22
-					  00 34 0d 65 32 e9 94 89];
 			vlogic-supply = <&palmas_smps8>;
 			vdd-supply = <&palmas_smps9>;
 		};
 
 		ak8963c@0d {
-			compatible = "ak,ak8963-input";
+			compatible = "ak,ak89xx";
 			reg = <0x0d>;
-			orientation = [ff 00 00 00 01 00 00 00 ff];
 			magnetic_field_matrix = [ff 00 00 00 01 00 00 00 ff];
-			config = "mpu";
 			vid-supply = <&palmas_smps8>;
 			vdd-supply = <&palmas_smps9>;
 		};
 
 		cm3217@10 {
-			compatible = "capella,cm3217-siio";
+			compatible = "capella,cm3217";
 			reg = <0x10>;
 			vdd-supply = <&palmas_smps9>;
-			illuminance,resolution = "8740";
-			illuminance,max-range  = "681613.7";
-			illuminance,power-consumed = "0.09";
-			light_uncalibrated_lo = <0>;
-			light_calibrated_lo = <16>;
-			light_uncalibrated_hi = <12>;
-			light_calibrated_hi = <1636>;
+			light_dynamic_resolution_index_limit_low = <0>;
+			light_dynamic_resolution_index_limit_high = <3>;
+			light_lux_maximum = <3000000>;
+			light_report_count = <2>;
+			light_threshold_lo = <0>;
+			light_threshold_hi = <1>;
+			light_nld_thr_i_hi_0 = <40>;
+			light_nld_thr_i_lo_1 = <18>;
+			light_nld_thr_i_hi_1 = <55>;
+			light_nld_thr_i_lo_2 = <24>;
+			light_nld_thr_i_hi_2 = <50>;
+			light_nld_thr_i_lo_3 = <23>;
+			light_uncalibrated_lo = <60>;
+			light_uncalibrated_hi = <1845>;
+			light_calibrated_lo = <8900>;
+			light_calibrated_hi = <312000>;
 		};
 
 		ltr659@23 {
-			compatible = "lite-on,ltr659";
+			status = "disabled";
+			compatible = "liteon,ltrX5X";
 			reg = <0x23>;
-			threshold = <125>;
 			vdd-supply = <&palmas_smps9>;
 			vled-supply = <&palmas_smps8>;
+			proximity_threshold_lo = <120>;
+			proximity_threshold_hi = <130>;
 		};
 	};
 

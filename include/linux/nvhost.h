@@ -3,7 +3,7 @@
  *
  * Tegra graphics host driver
  *
- * Copyright (c) 2009-2015, NVIDIA Corporation. All rights reserved.
+ * Copyright (c) 2009-2016, NVIDIA Corporation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -32,6 +32,7 @@
 #include <linux/pm_qos.h>
 #include <linux/time.h>
 
+struct nvhost_channel;
 struct nvhost_master;
 struct nvhost_hwctx;
 struct nvhost_device_power_attr;
@@ -44,7 +45,7 @@ struct nvhost_sync_pt;
 struct sync_pt;
 
 #define NVHOST_MODULE_MAX_CLOCKS		8
-#define NVHOST_MODULE_MAX_SYNCPTS		8
+#define NVHOST_MODULE_MAX_SYNCPTS		16
 #define NVHOST_MODULE_MAX_WAITBASES		3
 #define NVHOST_MODULE_MAX_MODMUTEXES		5
 #define NVHOST_MODULE_MAX_IORESOURCE_MEM	3
@@ -109,6 +110,11 @@ struct nvhost_clock {
 	unsigned long devfreq_rate;
 };
 
+struct nvhost_vm_hwid {
+	u64 addr;
+	bool dynamic;
+};
+
 /*
  * Defines HW and SW class identifiers.
  *
@@ -129,6 +135,11 @@ enum nvhost_module_identifier {
 	/* Specifies shared EMC client module */
 	NVHOST_MODULE_ID_EMC_SHARED,
 	NVHOST_MODULE_ID_MAX
+};
+
+enum nvhost_resource_policy {
+	RESOURCE_PER_DEVICE = 0,
+	RESOURCE_PER_CHANNEL_INSTANCE,
 };
 
 struct nvhost_device_data {
@@ -171,11 +182,6 @@ struct nvhost_device_data {
 	/* Clock gating registers */
 	struct nvhost_gating_register *engine_cg_regs;
 
-
-	struct platform_device *master;	/* Master of a slave device */
-	struct platform_device *slave;	/* Slave device to create in probe */
-	int		slave_initialized;
-
 	int		num_clks;	/* Number of clocks opened for dev */
 	struct clk	*clk[NVHOST_MODULE_MAX_CLOCKS];
 	struct mutex	lock;		/* Power management lock */
@@ -184,9 +190,6 @@ struct nvhost_device_data {
 	int		num_channels;	/* Max num of channel supported */
 	int		num_mapped_chs;	/* Num of channel mapped to device */
 	int		num_ppc;	/* Number of pixels per clock cycle */
-
-	/* Channel(s) assigned for the module */
-	struct nvhost_channel **channels;
 
 	/* device node for channel operations */
 	dev_t cdev_region;
@@ -297,6 +300,7 @@ struct nvhost_device_data {
 	u32 mamask_val;
 	u64 borps_addr;
 	u32 borps_val;
+	struct nvhost_vm_hwid vm_regs[13];
 
 	/* Actmon IRQ from hintstatus_r */
 	unsigned int actmon_irq;
@@ -304,8 +308,11 @@ struct nvhost_device_data {
 	/* Is the device already forced on? */
 	bool forced_on;
 
-	/* Override flag for a device */
-	bool forced_map_on_open;
+	/* Should we map channel at submit time? */
+	bool resource_policy;
+
+	/* Should we enable context isolation for this device? */
+	bool isolate_contexts;
 
 	/* channel user context list */
 	struct mutex userctx_list_lock;
@@ -333,6 +340,12 @@ struct nvhost_device_power_attr {
 
 void host1x_writel(struct platform_device *dev, u32 r, u32 v);
 u32 host1x_readl(struct platform_device *dev, u32 r);
+
+void host1x_channel_writel(struct nvhost_channel *ch, u32 r, u32 v);
+u32 host1x_channel_readl(struct nvhost_channel *ch, u32 r);
+
+void host1x_sync_writel(struct nvhost_master *dev, u32 r, u32 v);
+u32 host1x_sync_readl(struct nvhost_master *dev, u32 r);
 
 /* public host1x power management APIs */
 bool nvhost_module_powered_ext(struct platform_device *dev);
@@ -375,11 +388,11 @@ int nvhost_module_add_domain(struct generic_pm_domain *domain,
 extern const struct dev_pm_ops nvhost_module_pm_ops;
 
 /* public host1x sync-point management APIs */
-u32 nvhost_get_syncpt_client_managed(const char *syncpt_name);
+u32 nvhost_get_syncpt_client_managed(struct platform_device *pdev,
+				const char *syncpt_name);
 u32 nvhost_get_syncpt_host_managed(struct platform_device *pdev,
-				   u32 param);
-u32 nvhost_get_syncpt_host_managed_by_name(const char *syncpt_name);
-void nvhost_free_syncpt(u32 id);
+				   u32 param, const char *syncpt_name);
+void nvhost_syncpt_put_ref_ext(struct platform_device *pdev, u32 id);
 const char *nvhost_syncpt_get_name(struct platform_device *dev, int id);
 u32 nvhost_syncpt_incr_max_ext(struct platform_device *dev, u32 id, u32 incrs);
 void nvhost_syncpt_cpu_incr_ext(struct platform_device *dev, u32 id);
@@ -400,6 +413,10 @@ int nvhost_intr_register_notifier(struct platform_device *pdev,
 				  void (*callback)(void *, int),
 				  void *private_data);
 
+int nvhost_intr_register_fast_notifier(struct platform_device *pdev,
+				  u32 id, u32 thresh,
+				  void (*callback)(void *, int),
+				  void *private_data);
 
 #ifdef CONFIG_TEGRA_GRHOST
 void nvhost_debug_dump_device(struct platform_device *pdev);

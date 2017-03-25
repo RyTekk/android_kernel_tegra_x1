@@ -42,6 +42,7 @@ struct power_supply_extcon {
 	struct power_supply			usb;
 	uint8_t					ac_online;
 	uint8_t					usb_online;
+	bool					default_ac_connected;
 	struct power_supply_extcon_plat_data	*pdata;
 	spinlock_t				lock;
 	struct power_supply_cables		*psy_cables;
@@ -199,6 +200,8 @@ static int power_supply_extcon_get_property(struct power_supply *psy,
 	if (psy->type == POWER_SUPPLY_TYPE_MAINS) {
 		psy_extcon = container_of(psy, struct power_supply_extcon, ac);
 		online = psy_extcon->ac_online;
+		if(!online && psy_extcon->default_ac_connected)
+			online = true;
 	} else if (psy->type == POWER_SUPPLY_TYPE_USB) {
 		psy_extcon = container_of(psy, struct power_supply_extcon, usb);
 		online = psy_extcon->usb_online;
@@ -214,7 +217,7 @@ static int power_supply_extcon_get_property(struct power_supply *psy,
 		val->strval = "no cable";
 		for (i = 0; i < psy_extcon->max_psy_cables; ++i) {
 			psy_cable = &psy_extcon->psy_cables[i];
-			if (!psy_cable->ec_cable)
+			if (IS_ERR(psy_cable->ec_cable) || !psy_cable->ec_cable)
 				continue;
 
 			state = psy_get_cable_state(psy_extcon, psy_cable->name);
@@ -310,6 +313,10 @@ static struct power_supply_extcon_plat_data *psy_extcon_get_dt_pdata(
 	if (!ret)
 		pdata->y_cable_extcon_name = pstr;
 
+	pdata->default_ac_connected = false;
+	pdata->default_ac_connected = of_property_read_bool(np,
+				"power-supply,default-ac-cable-connected");
+
 	return pdata;
 }
 
@@ -364,10 +371,9 @@ static int psy_extcon_probe(struct platform_device *pdev)
 		dev_err(psy_extcon->dev, "failed: power supply register\n");
 		goto pwr_sply_error;
 	}
+	psy_extcon->default_ac_connected = pdata->default_ac_connected;
 
-	psy_extcon->psy_cables = psy_cables;
-	psy_extcon->max_psy_cables = ARRAY_SIZE(psy_cables);
-	for (j = 0; j < psy_extcon->max_psy_cables; j++) {
+	for (j = 0; j < ARRAY_SIZE(psy_cables); j++) {
 		struct power_supply_cables *psy_cable = &psy_cables[j];
 		const char *ext_name;
 
@@ -411,6 +417,10 @@ register_cable:
 				psy_cable->name, ret);
 		}
 	}
+
+	psy_extcon->psy_cables = psy_cables;
+	barrier();
+	psy_extcon->max_psy_cables = ARRAY_SIZE(psy_cables);
 
 	spin_lock(&psy_extcon->lock);
 	power_supply_extcon_attach_cable(psy_extcon);

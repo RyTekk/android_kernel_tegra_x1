@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -130,6 +130,7 @@ void nvtouch_set_pm_timeouts(u32 pm_active_to_lp_timeout_ms,
 	u32 pm_active_to_idle_timeout_ms);
 
 void nvtouch_report_events(struct nvtouch_events *touch_events);
+void nvtouch_report_events_dta(struct nvtouch_events *touch_events);
 void nvtouch_set_scan_rate(unsigned int scan_rate);
 void nvtouch_set_system_state(unsigned int state);
 
@@ -138,7 +139,7 @@ void nvtouch_calibrate(unsigned int calibrate, char factor);
 void nvtouch_unpack_data(void *input, short *output);
 u32 nvtouch_get_driver_mode(void);
 
-#define NVTOUCH_DRIVER_VERSION 4
+#define NVTOUCH_DRIVER_VERSION 5
 
 #define NVTOUCH_SENSOR_DATA_RESERVED 5000
 
@@ -168,6 +169,17 @@ struct nvtouch_data_frame {
 	char samples[NVTOUCH_SENSOR_DATA_RESERVED];
 };
 
+struct nvtouch_userspace_dta_info {
+	u16 left_pixels; /* in - pixels */
+	u16 top_pixels; /* in - pixels */
+	u16 right_pixels; /* in - pixels */
+	u16 bottom_pixels; /* in - pixels */
+	u16 pid; /* in */
+	u16 device_width;
+	u16 device_height;
+	u8 orientation;
+};
+
 struct nvtouch_ioctl_data {
 	struct nvtouch_events detected_events;
 	struct nvtouch_data_frame data_frame;
@@ -182,6 +194,11 @@ struct nvtouch_ioctl_data {
 #define NVTOUCH_CONFIG_REPORT_MODE_SHIFT (3)
 #define NVTOUCH_CONFIG_REPORT_MODE_MASK  (7 << 3)
 #define NVTOUCH_CONFIG_ENABLE_DTA (1 << 8)
+#define NVTOUCH_CONFIG_ENABLE_CALIBRATION (1 << 9)
+#define NVTOUCH_CONFIG_ENABLE_CALIBRATION_DEBUG (1 << 10)
+#define NVTOUCH_CONFIG_TUNE_DEBUG (1 << 11)
+#define NVTOUCH_CONFIG_TUNE_PARAM_SHIFT (12)
+#define NVTOUCH_CONFIG_TUNE_PARAM_MASK  (255 << 12)
 
 	struct nvtouch_events vendor_events;
 	u32 pm_active_to_lp_timeout_ms;
@@ -204,6 +221,11 @@ struct nvtouch_ioctl_dta {
 	u64 timestamp;
 	struct nvtouch_events detected_events;
 	char data[NVTOUCH_SENSOR_DATA_RESERVED];
+	u32 sensor_img_width;
+	u32 sensor_img_height;
+	u32 orientation;
+	u32 invert_x;
+	u32 invert_y;
 };
 
 struct nvtouch_ioctl_dta_old {
@@ -217,9 +239,20 @@ struct nvtouch_ioctl_dta_admin_config {
 	u32 driver_version_userspace;  /* in */
 };
 
-struct nvtouch_ioctl_dta_admin_data {
+struct nvtouch_ioctl_dta_admin_update {
+	u32 left_pixels; /* in - pixels */
+	u32 top_pixels; /* in - pixels */
+	u32 right_pixels; /* in - pixels */
+	u32 bottom_pixels; /* in - pixels */
 #define NVTOUCH_DTA_ADMIN_NULL_PID 0
 	u32 pid; /* in */
+	u32 device_width;
+	u32 device_height;
+#define NVTOUCH_DTA_ADMIN_ORIENTATION_0   0
+#define NVTOUCH_DTA_ADMIN_ORIENTATION_90  1
+#define NVTOUCH_DTA_ADMIN_ORIENTATION_180 2
+#define NVTOUCH_DTA_ADMIN_ORIENTATION_270 3
+	u32 orientation;
 };
 
 struct nvtouch_ioctl_dta_admin_query {
@@ -257,7 +290,7 @@ struct nvtouch_ioctl_debug_touch {
 #define NVTOUCH_DTA_ADMIN_IOCTL_CONFIG _IOWR(NVTOUCH_DTA_ADMIN_IOCTL_MAGIC, 1,\
 	struct nvtouch_ioctl_dta_admin_config)
 #define NVTOUCH_DTA_ADMIN_IOCTL_UPDATE _IOWR(NVTOUCH_DTA_ADMIN_IOCTL_MAGIC, 2,\
-	struct nvtouch_ioctl_dta_admin_data)
+	struct nvtouch_ioctl_dta_admin_update)
 #define NVTOUCH_DTA_ADMIN_IOCTL_QUERY _IOWR(NVTOUCH_DTA_ADMIN_IOCTL_MAGIC, 3,\
 	struct nvtouch_ioctl_dta_admin_query)
 #define NVTOUCH_DTA_ADMIN_IOCTL_SEND_DEBUG_TOUCH _IOWR(NVTOUCH_DTA_IOCTL_MAGIC,\
@@ -267,6 +300,6 @@ struct nvtouch_ioctl_debug_touch {
 #define NVTOUCH_DTA_ADMIN_IOCTL_LAST \
 	(_IOC_NR(NVTOUCH_DTA_ADMIN_IOCTL_RECV_DEBUG_TOUCH))
 #define NVTOUCH_DTA_ADMIN_IOCTL_MAX_ARG_SIZE \
-	sizeof(struct nvtouch_ioctl_dta_admin_config)
+	sizeof(struct nvtouch_ioctl_dta_admin_update)
 
 #endif /* NVTOUCH_H_ */

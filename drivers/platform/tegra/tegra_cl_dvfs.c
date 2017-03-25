@@ -159,6 +159,8 @@
 
 #define CL_DVFS_OUTPUT_LUT		0x200
 
+#define CL_DVFS_APERTURE		0x400
+
 #define IS_I2C_OFFS(offs)		\
 	((((offs) >= CL_DVFS_I2C_CFG) && ((offs) <= CL_DVFS_INTR_EN)) || \
 	((offs) >= CL_DVFS_I2C_CNTRL))
@@ -235,6 +237,7 @@ struct tegra_cl_dvfs {
 	struct voltage_reg_map		*out_map[MAX_CL_DVFS_VOLTAGES];
 	u8				num_voltages;
 	u8				safe_output;
+	u8				rail_relations_out_min;
 
 	u32				tune0_low;
 	u32				tune0_high;
@@ -710,7 +713,9 @@ static inline u8 get_output_min(struct tegra_cl_dvfs *cld)
 	if (cld->therm_floor_idx < cld->therm_floors_num)
 		thermal_min = cld->thermal_out_floors[cld->therm_floor_idx];
 
-	return max(tune_min, thermal_min);
+	/* return max of all the possible output min settings */
+	return max_t(u8, max(tune_min, thermal_min),
+					cld->rail_relations_out_min);
 }
 
 static inline void _load_lut(struct tegra_cl_dvfs *cld)
@@ -3278,6 +3283,43 @@ int tegra_dvfs_clamp_dfll_at_vmin(struct clk *dfll_clk, bool clamp)
 }
 EXPORT_SYMBOL(tegra_dvfs_clamp_dfll_at_vmin);
 
+/*
+ * Get the new Vmin setting from external rail that is connected to same CPU
+ * regulator.
+ */
+int tegra_dvfs_set_rail_relations_dfll_vmin(struct clk *dfll_clk,
+						int rail_relations_vmin)
+{
+	struct tegra_cl_dvfs *cld;
+	unsigned long flags;
+	u8 rail_relations_out_min;
+
+	if (!dfll_clk)
+		return -EINVAL;
+
+	/* get handle to cl_dvfs from dfll_clk */
+	cld = tegra_dfll_get_cl_dvfs_data(dfll_clk);
+	if (IS_ERR(cld))
+		return PTR_ERR(cld);
+
+	clk_lock_save(cld->dfll_clk, &flags);
+
+	/* convert mv to output value of cl_dvfs */
+	rail_relations_out_min = find_mv_out_cap(cld, rail_relations_vmin);
+
+	if (cld->rail_relations_out_min != rail_relations_out_min) {
+		cld->rail_relations_out_min = rail_relations_out_min;
+		if (cld->mode == TEGRA_CL_DVFS_CLOSED_LOOP) {
+			tegra_cl_dvfs_request_rate(cld,
+				tegra_cl_dvfs_request_get(cld));
+			/* Delay to make sure new Vmin delivery started */
+			udelay(2 * GET_SAMPLE_PERIOD(cld));
+		}
+	}
+	clk_unlock_restore(cld->dfll_clk, &flags);
+	return 0;
+}
+
 #ifdef CONFIG_DEBUG_FS
 
 static int lock_get(void *data, u64 *val)
@@ -3610,6 +3652,9 @@ static ssize_t cl_register_write(struct file *file,
 	strim(buf);
 
 	if (sscanf(buf, "[0x%x] = 0x%x", &offs, &val) != 2)
+		return -1;
+
+	if (offs >= CL_DVFS_APERTURE)
 		return -1;
 
 	clk_enable(cld->soc_clk);

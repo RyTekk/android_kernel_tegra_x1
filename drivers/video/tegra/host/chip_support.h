@@ -60,18 +60,17 @@ struct nvhost_cdma_ops {
 				     u32 getptr);
 	void (*timeout_pb_cleanup)(struct nvhost_cdma *,
 				 u32 getptr, u32 nr_slots);
+	void (*make_adjacent_space)(struct nvhost_cdma *, u32 words);
 };
 
 struct nvhost_vm_ops {
 	int (*init)(struct nvhost_vm *vm);
 	void (*deinit)(struct nvhost_vm *vm);
-	int (*pin_buffer)(struct nvhost_vm *vm,
-			  struct nvhost_vm_buffer *buffer);
-	void (*unpin_buffer)(struct nvhost_vm *vm,
-			     struct nvhost_vm_buffer *buffer);
-	int (*pin_static_buffer)(struct nvhost_vm *vm,
-				 struct nvhost_vm_static_buffer *sbuffer);
+	int (*pin_static_buffer)(struct platform_device *pdev,
+				 void *vaddr, dma_addr_t paddr,
+				 size_t size);
 	int (*get_id)(struct nvhost_vm *vm);
+	int (*init_device)(struct platform_device *pdev);
 };
 
 struct nvhost_pushbuffer_ops {
@@ -145,9 +144,12 @@ struct nvhost_dev_ops {
 };
 
 struct nvhost_actmon_ops {
+	 void __iomem * (*get_actmon_regs)(struct host1x_actmon *actmon);
 	int (*init)(struct host1x_actmon *actmon);
 	void (*deinit)(struct host1x_actmon *actmon);
 	int (*read_avg)(struct host1x_actmon *actmon, u32 *val);
+	int (*read_count)(struct host1x_actmon *actmon, u32 *val);
+	int (*read_count_norm)(struct host1x_actmon *actmon, u32 *val);
 	int (*above_wmark_count)(struct host1x_actmon *actmon);
 	int (*below_wmark_count)(struct host1x_actmon *actmon);
 	int (*read_avg_norm)(struct host1x_actmon *actmon, u32 *val);

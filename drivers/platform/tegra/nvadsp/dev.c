@@ -147,8 +147,6 @@ static void nvadsp_clocks_disable(struct platform_device *pdev)
 	struct nvadsp_drv_data *drv_data = platform_get_drvdata(pdev);
 	struct device *dev = &pdev->dev;
 
-	udelay(500);
-
 	if (drv_data->uartape_clk) {
 		clk_disable_unprepare(drv_data->uartape_clk);
 		dev_dbg(dev, "uartape clock disabled\n");
@@ -384,27 +382,12 @@ read_again:
 }
 EXPORT_SYMBOL(nvadsp_get_timestamp_counter);
 
-static int __init nvadsp_parse_dt(struct platform_device *pdev)
+static void __init nvadsp_parse_clk_entries(struct platform_device *pdev)
 {
 	struct nvadsp_drv_data *drv_data = platform_get_drvdata(pdev);
 	struct device *dev = &pdev->dev;
-	struct device_node *of_node;
 	u32 val32 = 0;
-	u32 *adsp_mem;
-	int iter;
 
-	adsp_mem = drv_data->adsp_mem;
-	of_node = dev->of_node;
-
-	for (iter = 0; iter < ADSP_MEM_END; iter++) {
-		if (of_property_read_u32_index(dev->of_node, "nvidia,adsp_mem",
-			iter, &adsp_mem[iter])) {
-			dev_err(dev, "adsp dt %d not found\n", iter);
-			return -EINVAL;
-		}
-	}
-
-	drv_data->adsp_freq = drv_data->ape_freq = drv_data->ape_emc_freq = 0;
 
 	/* Optional properties, should come from platform dt files */
 	if (of_property_read_u32(dev->of_node, "nvidia,adsp_freq", &val32))
@@ -421,6 +404,56 @@ static int __init nvadsp_parse_dt(struct platform_device *pdev)
 		dev_dbg(dev, "ape_emc_freq dt not found\n");
 	else
 		drv_data->ape_emc_freq = val32;
+}
+
+static int __init nvadsp_parse_dt(struct platform_device *pdev)
+{
+	struct nvadsp_drv_data *drv_data = platform_get_drvdata(pdev);
+	struct device *dev = &pdev->dev;
+	u32 *adsp_reset;
+	u32 *adsp_mem;
+	int iter;
+
+	adsp_reset = drv_data->unit_fpga_reset;
+	adsp_mem = drv_data->adsp_mem;
+
+	for (iter = 0; iter < ADSP_MEM_END; iter++) {
+		if (of_property_read_u32_index(dev->of_node, "nvidia,adsp_mem",
+			iter, &adsp_mem[iter])) {
+			dev_err(dev, "adsp memory dt %d not found\n", iter);
+			return -EINVAL;
+		}
+	}
+
+	for (iter = 0; iter < ADSP_EVP_END; iter++) {
+		if (of_property_read_u32_index(dev->of_node,
+			"nvidia,adsp-evp-base",
+			iter, &drv_data->evp_base[iter])) {
+			dev_err(dev, "adsp memory dt %d not found\n", iter);
+			return -EINVAL;
+		}
+	}
+
+	drv_data->adsp_unit_fpga = of_property_read_bool(dev->of_node,
+				"nvidia,adsp_unit_fpga");
+
+	if (drv_data->adsp_unit_fpga) {
+		for (iter = 0; iter < ADSP_UNIT_FPGA_RESET_END; iter++) {
+			if (of_property_read_u32_index(dev->of_node,
+				"nvidia,adsp_unit_fpga_reset", iter,
+				&adsp_reset[iter])) {
+				dev_err(dev, "adsp reset dt %d not found\n",
+					iter);
+				return -EINVAL;
+			}
+		}
+	}
+	nvadsp_parse_clk_entries(pdev);
+
+	drv_data->state.evp = devm_kzalloc(dev,
+			drv_data->evp_base[ADSP_EVP_SIZE], GFP_KERNEL);
+	if (!drv_data->state.evp)
+		return -ENOMEM;
 
 	return 0;
 }
@@ -431,9 +464,11 @@ static int __init nvadsp_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct resource *res = NULL;
 	void __iomem *base = NULL;
+	uint32_t aram_addr;
+	uint32_t aram_size;
+	int dram_iter;
 	int ret = 0;
 	int iter;
-	int dram_iter;
 
 	dev_info(dev, "in probe()...\n");
 
@@ -446,7 +481,9 @@ static int __init nvadsp_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, drv_data);
-	nvadsp_parse_dt(pdev);
+	ret = nvadsp_parse_dt(pdev);
+	if (ret)
+		goto out;
 
 #if CONFIG_DEBUG_FS
 	if (adsp_debug_init(drv_data))
@@ -473,10 +510,13 @@ static int __init nvadsp_probe(struct platform_device *pdev)
 			goto out;
 		}
 
+		if (!drv_data->adsp_unit_fpga && iter == UNIT_FPGA_RST)
+			continue;
+
 		base = devm_ioremap_resource(dev, res);
 		if (IS_ERR(base)) {
-			dev_err(dev,
-				"Failed to remap AMISC resource\n");
+			dev_err(dev, "Failed to iomap resource reg[%d]\n",
+				iter);
 			ret = PTR_ERR(base);
 			goto out;
 		}
@@ -501,8 +541,7 @@ static int __init nvadsp_probe(struct platform_device *pdev)
 
 	nvadsp_drv_data = drv_data;
 
-	platform_set_drvdata(pdev, drv_data);
-
+#ifdef CONFIG_PM_RUNTIME
 	tegra_adsp_pd_add_device(dev);
 
 	pm_runtime_enable(dev);
@@ -510,6 +549,7 @@ static int __init nvadsp_probe(struct platform_device *pdev)
 	ret = pm_runtime_get_sync(dev);
 	if (ret)
 		goto out;
+#endif
 
 	ret = nvadsp_os_probe(pdev);
 	if (ret)
@@ -542,13 +582,17 @@ static int __init nvadsp_probe(struct platform_device *pdev)
 	if (ret)
 		goto err;
 
-	ret = aram_init();
+	aram_addr = drv_data->adsp_mem[ARAM_ALIAS_0_ADDR];
+	aram_size = drv_data->adsp_mem[ARAM_ALIAS_0_SIZE];
+	ret = aram_init(aram_addr, aram_size);
 	if (ret)
 		dev_err(dev, "Failed to init aram\n");
 err:
+#ifdef CONFIG_PM_RUNTIME
 	ret = pm_runtime_put_sync(dev);
 	if (ret)
 		dev_err(dev, "pm_runtime_put_sync failed\n");
+#endif
 out:
 	return ret;
 }
@@ -565,6 +609,7 @@ static int nvadsp_remove(struct platform_device *pdev)
 #ifdef CONFIG_OF
 static const struct of_device_id nvadsp_of_match[] = {
 	{ .compatible = "nvidia,tegra210-adsp", .data = NULL, },
+	{ .compatible = "nvidia,tegra18x-adsp", .data = NULL, },
 	{},
 };
 #endif

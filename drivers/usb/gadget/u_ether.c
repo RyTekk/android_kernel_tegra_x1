@@ -960,7 +960,7 @@ struct eth_dev *gether_setup_name(struct usb_gadget *g, u8 ethaddr[ETH_ALEN],
 	uether_wq  = create_singlethread_workqueue("uether");
 	if (!uether_wq) {
                 pr_err("%s: Unable to create workqueue: uether\n", __func__);
-                return -ENOMEM;
+                return ERR_PTR(-ENOMEM);
         }
 
 	dev = netdev_priv(net);
@@ -1206,13 +1206,13 @@ static int __init gether_init(void)
 	}
 	return 0;
 }
-__initcall(gether_init);
+// module_init(gether_init); /* called directly from ether.c */
 
 static void __exit gether_exit(void)
 {
 	destroy_workqueue(uether_wq);
 
 }
-__exitcall(gether_exit);
-MODULE_DESCRIPTION("ethernet over USB driver");
-MODULE_LICENSE("GPL v2");
+// module_exit(gether_exit); /* called directly from ether.c */
+// MODULE_DESCRIPTION("ethernet over USB driver");
+// MODULE_LICENSE("GPL v2");

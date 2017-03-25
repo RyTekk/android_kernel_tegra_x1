@@ -96,6 +96,15 @@ static bool beep_mode[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS-1)] =
 					CONFIG_SND_HDA_INPUT_BEEP_MODE};
 #endif
 
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+static struct of_device_id tegra_disb_pd[] = {
+	{ .compatible = "nvidia, tegra210-disb-pd", },
+	{ .compatible = "nvidia, tegra132-disb-pd", },
+	{ .compatible = "nvidia, tegra124-disb-pd", },
+	{},
+};
+#endif
+
 module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for Intel HD audio interface.");
 module_param_array(id, charp, NULL, 0444);
@@ -1144,7 +1153,7 @@ static int azx_single_wait_for_response(struct azx *chip, unsigned int addr)
 		udelay(1);
 	}
 	if (printk_ratelimit())
-		snd_printd(SFX "%s: get_response timeout: IRS=0x%x\n",
+		snd_printd(SFX "%s: get_response timeout: IRS=0x%lx\n",
 			   azx_name(chip), azx_readw(chip, IRS));
 	chip->rirb.res[addr] = -1;
 	return -EIO;
@@ -1172,7 +1181,7 @@ static int azx_single_send_cmd(struct hda_bus *bus, u32 val)
 		udelay(1);
 	}
 	if (printk_ratelimit())
-		snd_printd(SFX "%s: send_cmd timeout: IRS=0x%x, val=0x%x\n",
+		snd_printd(SFX "%s: send_cmd timeout: IRS=0x%lx, val=0x%x\n",
 			   azx_name(chip), azx_readw(chip, IRS), val);
 	return -EIO;
 }
@@ -1229,6 +1238,36 @@ static unsigned int azx_get_response(struct hda_bus *bus,
 
 	return ret;
 }
+
+#ifdef CONFIG_PM_SLEEP
+/* put codec down to D3 at hibernation for Intel SKL+;
+ * otherwise BIOS may still access the codec and screw up the driver
+ */
+#define IS_SKL(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0xa170)
+#define IS_SKL_LP(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0x9d70)
+#define IS_BXT(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0x5a98)
+#define IS_SKL_PLUS(pci) (IS_SKL(pci) || IS_SKL_LP(pci) || IS_BXT(pci))
+
+static int azx_freeze_noirq(struct device *dev)
+{
+	struct pci_dev *pci = to_pci_dev(dev);
+
+	if (IS_SKL_PLUS(pci))
+		pci_set_power_state(pci, PCI_D3hot);
+
+	return 0;
+}
+
+static int azx_thaw_noirq(struct device *dev)
+{
+	struct pci_dev *pci = to_pci_dev(dev);
+
+	if (IS_SKL_PLUS(pci))
+		pci_set_power_state(pci, PCI_D0);
+
+	return 0;
+}
+#endif /* CONFIG_PM_SLEEP */
 
 #ifdef CONFIG_PM
 static void azx_power_notify(struct hda_bus *bus, bool power_up);
@@ -1542,9 +1581,17 @@ static void azx_init_platform(struct azx *chip)
 static void __azx_platform_enable_clocks(struct azx *chip)
 {
 	int i;
+	int partition_id;
 
 #ifdef CONFIG_SND_HDA_PLATFORM_NVIDIA_TEGRA
-	tegra_unpowergate_partition(TEGRA_POWERGATE_DISB);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_disb_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_DISB;
+#endif
+	tegra_unpowergate_partition(partition_id);
 #endif
 
 	for (i = 0; i < chip->platform_clk_count; i++)
@@ -1565,6 +1612,7 @@ static void azx_platform_enable_clocks(struct azx *chip)
 static void __azx_platform_disable_clocks(struct azx *chip)
 {
 	int i;
+	int partition_id;
 
 	if (!chip->platform_clk_enable)
 		return;
@@ -1573,7 +1621,14 @@ static void __azx_platform_disable_clocks(struct azx *chip)
 		clk_disable(chip->platform_clks[i]);
 
 #ifdef CONFIG_SND_HDA_PLATFORM_NVIDIA_TEGRA
-	tegra_powergate_partition(TEGRA_POWERGATE_DISB);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_disb_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_DISB;
+#endif
+	tegra_powergate_partition(partition_id);
 #endif
 
 	chip->platform_clk_enable--;
@@ -3306,6 +3361,10 @@ static int azx_runtime_idle(struct device *dev)
 #ifdef CONFIG_PM
 static const struct dev_pm_ops azx_pm = {
 	SET_SYSTEM_SLEEP_PM_OPS(azx_suspend, azx_resume)
+#ifdef CONFIG_PM_SLEEP
+	.freeze_noirq = azx_freeze_noirq,
+	.thaw_noirq = azx_thaw_noirq,
+#endif
 	SET_RUNTIME_PM_OPS(azx_runtime_suspend, azx_runtime_resume, azx_runtime_idle)
 };
 
@@ -4371,6 +4430,11 @@ static DEFINE_PCI_DEVICE_TABLE(azx_pci_ids) = {
 	{ PCI_DEVICE(0x8086, 0x8d20),
 	  .driver_data = AZX_DRIVER_PCH | AZX_DCAPS_INTEL_PCH },
 	{ PCI_DEVICE(0x8086, 0x8d21),
+	  .driver_data = AZX_DRIVER_PCH | AZX_DCAPS_INTEL_PCH },
+	/* Lewisburg */
+	{ PCI_DEVICE(0x8086, 0xa1f0),
+	  .driver_data = AZX_DRIVER_PCH | AZX_DCAPS_INTEL_PCH },
+	{ PCI_DEVICE(0x8086, 0xa270),
 	  .driver_data = AZX_DRIVER_PCH | AZX_DCAPS_INTEL_PCH },
 	/* Lynx Point-LP */
 	{ PCI_DEVICE(0x8086, 0x9c20),

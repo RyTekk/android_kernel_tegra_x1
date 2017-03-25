@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
 
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -35,6 +35,7 @@
 #define CAMERA_TABLE_INX_CLOCK		(CAMERA_INT_MASK | 50)
 #define CAMERA_TABLE_INX_CGATE		(CAMERA_INT_MASK | 51)
 #define CAMERA_TABLE_EDP_STATE		(CAMERA_INT_MASK | 60)
+#define CAMERA_TABLE_RAW_WRITE		(CAMERA_INT_MASK | 61)
 
 #define CAMERA_TABLE_DEV_READ		0xe0000000
 
@@ -159,6 +160,7 @@ struct gpio_cfg {
 
 #define VIRTUAL_DEV_MAX_REGULATORS	8
 #define VIRTUAL_DEV_MAX_GPIOS		8
+#define VIRTUAL_DEV_MAX_POWER_SIZE	32
 #define VIRTUAL_REGNAME_SIZE		(VIRTUAL_DEV_MAX_REGULATORS * \
 						CAMERA_MAX_NAME_LENGTH)
 

@@ -223,7 +223,7 @@ static void __nvmap_dmabuf_free_sgt_locked(struct nvmap_handle_sgt *nvmap_sgt)
 
 	list_del(&nvmap_sgt->maps_entry);
 
-	if (info->handle->heap_type == NVMAP_HEAP_CARVEOUT_IRAM) {
+	if (!(nvmap_dev->dynamic_dma_map_mask & info->handle->heap_type)) {
 		sg_dma_address(nvmap_sgt->sgt->sgl) = 0;
 	} else if (info->handle->heap_type == NVMAP_HEAP_CARVEOUT_VPR &&
 			access_vpr_phys(nvmap_sgt->dev)) {
@@ -395,7 +395,8 @@ static struct sg_table *nvmap_dmabuf_map_dma_buf(
 
 	if (!info->handle->alloc) {
 		goto err_map;
-	} else if (info->handle->heap_type == NVMAP_HEAP_CARVEOUT_IRAM) {
+	} else if (!(nvmap_dev->dynamic_dma_map_mask &
+			info->handle->heap_type)) {
 		sg_dma_address(sgt->sgl) = info->handle->carveout->base;
 	} else if (info->handle->heap_type == NVMAP_HEAP_CARVEOUT_VPR &&
 			access_vpr_phys(attach->dev)) {
@@ -409,14 +410,6 @@ static struct sg_table *nvmap_dmabuf_map_dma_buf(
 			err = -ENOMEM;
 			goto err_map;
 		}
-#ifndef CONFIG_MODS
-		if (ents != 1) {
-			dev_err(attach->dev,
-				"Device is not attached to IOMMU. But the memory is allocated from IOMMU Heap. Either enable IOMMU for the device or avoid using IOMMU heap.\n");
-			dump_stack();
-			goto err_map;
-		}
-#endif
 	}
 
 	if (__nvmap_dmabuf_prep_sgt_locked(attach, dir, sgt)) {
@@ -485,22 +478,6 @@ static void nvmap_dmabuf_release(struct dma_buf *dmabuf)
 	dma_buf_detach(dmabuf, info->handle->attachment);
 	nvmap_handle_put(info->handle);
 	kfree(info);
-}
-
-void nvmap_dmabuf_release_stashed_maps(struct dma_buf *dmabuf)
-{
-	struct nvmap_handle_info *info = dmabuf->priv;
-	struct nvmap_handle_sgt *nvmap_sgt;
-
-	mutex_lock(&info->maps_lock);
-	while (!list_empty(&info->maps)) {
-		nvmap_sgt = list_first_entry(&info->maps,
-					     struct nvmap_handle_sgt,
-					     maps_entry);
-		__nvmap_dmabuf_evict_stash(nvmap_sgt);
-		__nvmap_dmabuf_free_sgt_locked(nvmap_sgt);
-	}
-	mutex_unlock(&info->maps_lock);
 }
 
 static int nvmap_dmabuf_begin_cpu_access(struct dma_buf *dmabuf,
@@ -842,10 +819,11 @@ static int __nvmap_dmabuf_stashes_show(struct seq_file *s, void *data)
 		seq_printf(s, " flags = 0x%08x, refs = %d\n",
 			   handle->flags, atomic_read(&handle->ref));
 
-		seq_printf(s, "  device = %s\n",
-			   dev_name(handle->attachment->dev));
+		seq_printf(s, "  device = %s, mapping = %p\n",
+			   dev_name(handle->attachment->dev),
+			   nvmap_sgt->mapping);
 		addr = sg_dma_address(nvmap_sgt->sgt->sgl);
-		seq_printf(s, "  IO addr = 0x%pa + 0x%zx\n",
+		seq_printf(s, "  IO addr = %pa + 0x%zx\n",
 			&addr, handle->size);
 
 		/* Cleanup. */

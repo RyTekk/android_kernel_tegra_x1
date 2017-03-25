@@ -2,6 +2,7 @@
  * SWIOTLB-based DMA API implementation
  *
  * Copyright (C) 2012 ARM Ltd.
+ * Copyright (c) 2016, NVIDIA CORPORATION.  All rights reserved.
  * Author: Catalin Marinas <catalin.marinas@arm.com>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -735,8 +736,10 @@ static void *__dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 	else
 		addr = __alloc_from_contiguous(dev, size, prot, &page);
 
-	if (addr)
-		*handle = pfn_to_dma(dev, page_to_pfn(page));
+	if (!addr)
+		return NULL;
+
+	*handle = pfn_to_dma(dev, page_to_pfn(page));
 
 	if (dma_get_attr(DMA_ATTR_NO_KERNEL_MAPPING, attrs)) {
 		int i;
@@ -1362,6 +1365,9 @@ static inline dma_addr_t __alloc_iova(struct dma_iommu_mapping *mapping,
 	unsigned long flags;
 	size_t start;
 
+	if (mapping->alignment && order > get_order(mapping->alignment))
+		order = get_order(mapping->alignment);
+
 	count = ((PAGE_ALIGN(size) >> PAGE_SHIFT) +
 		 (1 << mapping->order) - 1) >> mapping->order;
 
@@ -1694,13 +1700,15 @@ static void *__iommu_alloc_atomic(struct device *dev, size_t size,
 				  dma_addr_t *handle, struct dma_attrs *attrs)
 {
 	struct page *page;
+	struct page **pages;
 	void *addr;
 
 	addr = __alloc_from_pool(size, &page);
 	if (!addr)
 		return NULL;
 
-	*handle = __iommu_create_mapping(dev, &page, size, attrs);
+	pages = __iommu_get_pages(addr, attrs);
+	*handle = __iommu_create_mapping(dev, pages, size, attrs);
 	if (*handle == DMA_ERROR_CODE)
 		goto err_mapping;
 
@@ -2077,18 +2085,46 @@ static dma_addr_t arm_coherent_iommu_map_page(struct device *dev, struct page *p
 	struct dma_iommu_mapping *mapping = dev->archdata.mapping;
 	dma_addr_t dma_addr;
 	int ret, len = PAGE_ALIGN(size + offset);
+	int page_offset;
+
+	/*
+	 * In some cases the offset is greater than 1 page. In such cases we
+	 * allocate multiple pages in the IOVA address space. However, when
+	 * freeing that mapping we only have the base address (which includes
+	 * the offset addition) and size so the pages mapped before offset get
+	 * lost.
+	 *
+	 * What we do here to avoid leaking IOVA pages is only map the pages
+	 * actually necessary for the mapping. Any pages fully before the
+	 * offset are not mapped since those are the pages that will be missed
+	 * by the unmap.
+	 *
+	 * The primary culprit here is the network stack. Sometimes the skbuffs
+	 * are backed by multiple pages and fragments above the page boundary
+	 * are mapped. The skbuff code does not work out the specific page that
+	 * needs mapping though.
+	 */
+	page_offset = offset >> PAGE_SHIFT;
+	len -= page_offset * PAGE_SIZE;
+
+	/*
+	 * However, if page_offset is greater than 0, and the passed page is not
+	 * compound page then there's probably a bug somewhere.
+	 */
+	if (page_offset > 0)
+		BUG_ON(page_count(page) == 1);
 
 	dma_addr = __alloc_iova(mapping, len, attrs);
 	if (dma_addr == DMA_ERROR_CODE)
 		return dma_addr;
 
 	ret = pg_iommu_map(mapping, dma_addr,
-			   page_to_phys(page), len, (ulong)attrs);
+			   page_to_phys(page + page_offset), len, (ulong)attrs);
 	if (ret < 0)
 		goto fail;
 
 	trace_dmadebug_map_page(dev, dma_addr + offset, size, page);
-	return dma_addr + offset;
+	return dma_addr + (offset & ~PAGE_MASK);
 fail:
 	__free_iova(mapping, dma_addr, len, attrs);
 	return DMA_ERROR_CODE;
@@ -2154,8 +2190,10 @@ static void arm_coherent_iommu_unmap_page(struct device *dev, dma_addr_t handle,
 	if (!iova)
 		return;
 
-	trace_dmadebug_unmap_page(dev, handle, size,
-		  phys_to_page(iommu_iova_to_phys(mapping->domain, handle)));
+	if (static_key_false(&__tracepoint_dmadebug_unmap_page.key))
+		trace_dmadebug_unmap_page(dev, handle, size,
+		    phys_to_page(iommu_iova_to_phys(mapping->domain, handle)));
+
 	pg_iommu_unmap(mapping, iova, len, (ulong)attrs);
 	if (!dma_get_attr(DMA_ATTR_SKIP_FREE_IOVA, attrs))
 		__free_iova(mapping, iova, len, attrs);
@@ -2186,8 +2224,7 @@ static void arm_iommu_unmap_page(struct device *dev, dma_addr_t handle,
 	if (!dma_get_attr(DMA_ATTR_SKIP_CPU_SYNC, attrs))
 		__dma_page_dev_to_cpu(page, offset, size, dir);
 
-	trace_dmadebug_unmap_page(dev, handle, size,
-		  phys_to_page(iommu_iova_to_phys(mapping->domain, handle)));
+	trace_dmadebug_unmap_page(dev, handle, size, page);
 	pg_iommu_unmap(mapping, iova, len, (ulong)attrs);
 	if (!dma_get_attr(DMA_ATTR_SKIP_FREE_IOVA, attrs))
 		__free_iova(mapping, iova, len, attrs);

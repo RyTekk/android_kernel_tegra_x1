@@ -3,7 +3,7 @@
  *
  * Tegra Graphics Init for T124 Architecture Chips
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -21,7 +21,7 @@
 #include <linux/tegra-powergate.h>
 #include <linux/tegra-fuse.h>
 
-#include <tegra/mc.h>
+#include <linux/platform/tegra/mc.h>
 
 #include "dev.h"
 #include "nvhost_channel.h"
@@ -33,10 +33,10 @@
 #include "syncpt_t124.h"
 #include "tsec/tsec.h"
 #include "flcn/flcn.h"
-#include "vi.h"
+#include "vi/vi.h"
 #include "isp/isp.h"
 #include "isp/isp_isr_v1.h"
-#include "scale3d.h"
+#include "scale_emc.h"
 #include "chip_support.h"
 #include "nvhost_scale.h"
 #include "vhost/vhost.h"
@@ -84,6 +84,7 @@ static struct host1x_device_info host1x04_info = {
 	.pts_base	= 0,
 	.pts_limit	= NV_HOST1X_SYNCPT_NB_PTS,
 	.syncpt_policy	= SYNCPT_PER_CHANNEL,
+	.nb_actmons	= 1,
 };
 
 struct nvhost_device_data t124_host1x_info = {
@@ -197,8 +198,7 @@ static struct platform_device tegra_isp01b_device = {
 
 #endif
 
-#if defined(CONFIG_VIDEO_TEGRA_VI) || defined(CONFIG_VIDEO_TEGRA_VI_MODULE)
-
+#if IS_ENABLED(CONFIG_VIDEO_TEGRA_VI) || IS_ENABLED(CONFIG_VIDEO_TEGRA)
 static struct resource vi_resources[] = {
 	{
 		.name = "regs",
@@ -208,7 +208,6 @@ static struct resource vi_resources[] = {
 	},
 };
 
-#ifdef CONFIG_VI_ONE_DEVICE
 struct nvhost_device_data t124_vi_info = {
 	.num_channels	= 2,
 	/* FIXME: resolve powergating dependency with DIS */
@@ -224,7 +223,7 @@ struct nvhost_device_data t124_vi_info = {
 	.clockgate_delay  = VI_CLOCKGATE_DELAY,
 	.powergate_delay  = VI_POWERGATE_DELAY,
 	.clocks           = {
-		{"vi", UINT_MAX, 0},
+		{"vi_bypass", UINT_MAX, 0},
 		{"csi", 0},
 		{"cilab", 102000000},
 		{"cilcd", 102000000},
@@ -247,81 +246,6 @@ static struct platform_device tegra_vi01_device = {
 		.platform_data = &t124_vi_info,
 	},
 };
-#else
-static struct platform_device tegra_vi01b_device;
-struct nvhost_device_data t124_vi_info = {
-	.num_channels	= 1,
-	/* FIXME: resolve powergating dependency with DIS */
-	/* FIXME: control clocks from user space instead of hard-coding here */
-	.moduleid         = NVHOST_MODULE_VI,
-	.class            = NV_VIDEO_STREAMING_VI_CLASS_ID,
-	.modulemutexes    = {NVMODMUTEX_VI_0},
-	.devfs_name       = "vi",
-	.exclusive        = true,
-	.keepalive       = true,
-	.powergate_id     = TEGRA_POWERGATE_VENC,
-	.can_powergate    = true,
-	.clockgate_delay  = VI_CLOCKGATE_DELAY,
-	.powergate_delay  = VI_POWERGATE_DELAY,
-	.clocks           = {
-		{"vi", UINT_MAX, 0},
-		{"csi", 0},
-		{"cilab", 102000000},
-		{"emc", 0, NVHOST_MODULE_ID_EXTERNAL_MEMORY_CONTROLLER},
-		{"sclk", 80000000} },
-	.prepare_poweroff = nvhost_vi_prepare_poweroff,
-	.finalize_poweron = nvhost_vi_finalize_poweron,
-	.ctrl_ops         = &tegra_vi_ctrl_ops,
-	.reset            = nvhost_vi_reset,
-	.slave         = &tegra_vi01b_device,
-};
-EXPORT_SYMBOL(t124_vi_info);
-
-static struct platform_device tegra_vi01_device = {
-	.name		= "vi",
-	.resource	= vi_resources,
-	.num_resources	= ARRAY_SIZE(vi_resources),
-	.dev		= {
-		.platform_data = &t124_vi_info,
-	},
-};
-
-struct nvhost_device_data t124_vib_info = {
-	.num_channels	= 1,
-	/* FIXME: resolve powergating dependency with DIS */
-	/* FIXME: control clocks from user space instead of hard-coding here */
-	.moduleid         = (1 << 16 | NVHOST_MODULE_VI),
-	.class            = NV_VIDEO_STREAMING_VI_CLASS_ID,
-	.modulemutexes    = {NVMODMUTEX_VI_1},
-	.devfs_name       = "vi",
-	.exclusive        = true,
-	.keepalive       = true,
-	.powergate_id     = TEGRA_POWERGATE_VENC,
-	.can_powergate    = true,
-	.clockgate_delay  = VI_CLOCKGATE_DELAY,
-	.powergate_delay  = VI_POWERGATE_DELAY,
-	.clocks           = {
-		{"vi", UINT_MAX},
-		{"csi", 0},
-		{"cilcd", 102000000},
-		{"cile", 102000000},
-		{"emc", 0, NVHOST_MODULE_ID_EXTERNAL_MEMORY_CONTROLLER},
-		{"sclk", 80000000} },
-	.prepare_poweroff = nvhost_vi_prepare_poweroff,
-	.finalize_poweron = nvhost_vi_finalize_poweron,
-	.ctrl_ops         = &tegra_vi_ctrl_ops,
-	.master           = &tegra_vi01_device,
-	.reset            = nvhost_vi_reset,
-};
-
-static struct platform_device tegra_vi01b_device = {
-	.name		= "vi",
-	.id		= 1, /* .1 on the dev node */
-	.dev		= {
-		.platform_data = &t124_vib_info,
-	},
-};
-#endif
 
 #endif
 
@@ -355,6 +279,8 @@ struct nvhost_device_data t124_msenc_info = {
 	.actmon_regs	= HOST1X_CHANNEL_ACTMON1_REG_BASE,
 	.actmon_enabled	= true,
 	.firmware_name	= "nvhost_msenc031.fw",
+	.resource_policy = RESOURCE_PER_CHANNEL_INSTANCE,
+	.serialize	= true,
 };
 
 static struct platform_device tegra_msenc03_device = {
@@ -394,6 +320,8 @@ struct nvhost_device_data t124_tsec_info = {
 	.moduleid      = NVHOST_MODULE_TSEC,
 	.finalize_poweron = nvhost_tsec_finalize_poweron,
 	.prepare_poweroff = nvhost_tsec_prepare_poweroff,
+	.resource_policy  = RESOURCE_PER_CHANNEL_INSTANCE,
+	.serialize        = true,
 };
 
 static struct platform_device tegra_tsec01_device = {
@@ -438,11 +366,11 @@ struct nvhost_device_data t124_vic_info = {
 	.powergate_delay	= 500,
 	.powergate_id		= TEGRA_POWERGATE_VIC,
 	.finalize_poweron	= nvhost_vic_finalize_poweron,
-	.scaling_init		= nvhost_scale3d_init,
-	.scaling_deinit		= nvhost_scale3d_deinit,
+	.scaling_init		= nvhost_scale_emc_init,
+	.scaling_deinit		= nvhost_scale_emc_deinit,
 	.busy			= nvhost_scale_notify_busy,
 	.idle			= nvhost_scale_notify_idle,
-	.scaling_post_cb	= &nvhost_scale3d_callback,
+	.scaling_post_cb	= &nvhost_scale_emc_callback,
 	.devfreq_governor	= "nvhost_podgov",
 	.actmon_regs		= HOST1X_CHANNEL_ACTMON2_REG_BASE,
 	.actmon_enabled		= true,
@@ -452,6 +380,8 @@ struct nvhost_device_data t124_vic_info = {
 	.firmware_name		= "vic03_ucode.bin",
 	.aggregate_constraints	= nvhost_vic_aggregate_constraints,
 	.num_ppc		= 2,
+	.resource_policy	= RESOURCE_PER_CHANNEL_INSTANCE,
+	.serialize		= true,
 };
 
 static struct platform_device tegra_vic03_device = {
@@ -485,6 +415,8 @@ static struct nvhost_device_data t132_msenc_info = {
 	.poweron_reset	= true,
 	.finalize_poweron = nvhost_flcn_finalize_poweron,
 	.firmware_name	= "nvhost_msenc031.fw",
+	.resource_policy = RESOURCE_PER_CHANNEL_INSTANCE,
+	.serialize	= true,
 };
 
 static struct {
@@ -499,7 +431,7 @@ static struct platform_device *t124_devices[] = {
 	&tegra_isp01_device,
 	&tegra_isp01b_device,
 #endif
-#if defined(CONFIG_VIDEO_TEGRA_VI) || defined(CONFIG_VIDEO_TEGRA_VI_MODULE)
+#if IS_ENABLED(CONFIG_VIDEO_TEGRA_VI) || IS_ENABLED(CONFIG_VIDEO_TEGRA)
 	&tegra_vi01_device,
 #endif
 	&tegra_msenc03_device,

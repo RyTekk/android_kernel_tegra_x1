@@ -113,7 +113,6 @@ struct tegra_otg {
 	bool support_usb_id;
 	bool support_pmu_id;
 	bool support_pmu_rid;
-	bool support_hp_trans;
 	enum tegra_usb_id_detection id_det_type;
 	struct extcon_dev *id_extcon_dev;
 	struct extcon_dev *vbus_extcon_dev;
@@ -152,6 +151,7 @@ static u64 tegra_ehci_dmamask = DMA_BIT_MASK(64);
 static struct tegra_otg *tegra_clone;
 static struct notifier_block otg_vbus_nb;
 static struct notifier_block otg_id_nb;
+static struct wakeup_source *otg_work_wl;
 
 enum tegra_connect_type {
 	CONNECT_TYPE_Y_CABLE,
@@ -593,22 +593,10 @@ static void tegra_change_otg_state(struct tegra_otg *tegra,
 				tegra_otg_start_gadget(tegra, 1);
 			else if (to == OTG_STATE_A_HOST)
 				tegra_otg_start_host(tegra, 1);
-		} else if (from == OTG_STATE_A_HOST) {
-			if (to == OTG_STATE_A_SUSPEND)
-				tegra_otg_start_host(tegra, 0);
-			else if (to == OTG_STATE_B_PERIPHERAL && otg->gadget
-					&& tegra->support_hp_trans) {
-				tegra_otg_start_host(tegra, 0);
-				tegra_otg_start_gadget(tegra, 1);
-			}
-		} else if (from == OTG_STATE_B_PERIPHERAL && otg->gadget) {
-			if (to == OTG_STATE_A_SUSPEND)
-				tegra_otg_start_gadget(tegra, 0);
-			else if (to == OTG_STATE_A_HOST
-					&& tegra->support_hp_trans) {
-				tegra_otg_start_gadget(tegra, 0);
-				tegra_otg_start_host(tegra, 1);
-			}
+		} else if (from == OTG_STATE_A_HOST && to == OTG_STATE_A_SUSPEND) {
+			tegra_otg_start_host(tegra, 0);
+		} else if (from == OTG_STATE_B_PERIPHERAL && otg->gadget && to == OTG_STATE_A_SUSPEND) {
+			tegra_otg_start_gadget(tegra, 0);
 		}
 	}
 
@@ -638,6 +626,7 @@ static void irq_work(struct work_struct *work)
 	unsigned long flags;
 	unsigned long status;
 
+	__pm_stay_awake(otg_work_wl);
 	msleep(50);
 
 	mutex_lock(&tegra->irq_work_mutex);
@@ -660,8 +649,7 @@ static void irq_work(struct work_struct *work)
 
 	if (!(status & USB_ID_STATUS) && (status & USB_ID_INT_EN))
 		to = OTG_STATE_A_HOST;
-	else if (status & USB_VBUS_STATUS &&
-			(from != OTG_STATE_A_HOST || tegra->support_hp_trans))
+	else if (status & USB_VBUS_STATUS && from != OTG_STATE_A_HOST)
 		to = OTG_STATE_B_PERIPHERAL;
 	else
 		to = OTG_STATE_A_SUSPEND;
@@ -669,6 +657,7 @@ static void irq_work(struct work_struct *work)
 	spin_unlock_irqrestore(&tegra->lock, flags);
 	tegra_change_otg_state(tegra, to);
 	mutex_unlock(&tegra->irq_work_mutex);
+	__pm_relax(otg_work_wl);
 }
 
 static irqreturn_t tegra_otg_irq(int irq, void *data)
@@ -876,7 +865,7 @@ DEFINE_SIMPLE_ATTRIBUTE(tegra_otg_pm_fops,
 
 static int tegra_otg_debug_init(struct tegra_otg *tegra)
 {
-	tegra_otg_debugfs_root = debugfs_create_dir("tegra-otg", 0);
+	tegra_otg_debugfs_root = debugfs_create_dir("tegra-otg", NULL);
 
 	if (!tegra_otg_debugfs_root)
 		return -ENOMEM;
@@ -1080,9 +1069,6 @@ static int tegra_otg_conf(struct platform_device *pdev)
 		tegra->support_pmu_rid =
 				of_property_read_bool(pdev->dev.of_node,
 					"nvidia,enable-aca-rid-detection");
-		tegra->support_hp_trans =
-				of_property_read_bool(pdev->dev.of_node,
-				"nvidia,enable-host-peripheral-transitions");
 	} else {
 		pdata = dev_get_platdata(&pdev->dev);
 	}
@@ -1394,10 +1380,17 @@ err_clk:
 	return err;
 }
 
+static const struct of_device_id otg_tegra_device_match[] = {
+	{.compatible = "nvidia,tegra124-otg" },
+	{.compatible = "nvidia,tegra132-otg" },
+	{},
+};
+
 static int tegra_otg_probe(struct platform_device *pdev)
 {
 	struct tegra_otg *tegra;
 	int err = 0;
+	int ret;
 
 	err = tegra_otg_conf(pdev);
 	if (err) {
@@ -1427,6 +1420,11 @@ static int tegra_otg_probe(struct platform_device *pdev)
 			goto err;
 		}
 	}
+
+	ret = genpd_dev_pm_add(otg_tegra_device_match, &pdev->dev);
+	if (ret)
+		pr_err("Could not add %s to power domain using device tree\n",
+					  dev_name(&pdev->dev));
 
 	tegra_pd_add_device(tegra->phy.dev);
 	pm_runtime_use_autosuspend(tegra->phy.dev);
@@ -1617,6 +1615,8 @@ static struct platform_driver tegra_otg_driver = {
 
 static int __init tegra_otg_init(void)
 {
+	otg_work_wl = wakeup_source_register("otg_work_wakelock");
+
 	return platform_driver_register(&tegra_otg_driver);
 }
 fs_initcall(tegra_otg_init);

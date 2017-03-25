@@ -1,7 +1,7 @@
 /*
  * arch/arm/mach-tegra/tegra21_clocks.c
  *
- * Copyright (C) 2013-2015 NVIDIA Corporation. All rights reserved.
+ * Copyright (C) 2013-2016 NVIDIA Corporation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,9 +35,9 @@
 
 #include <mach/edp.h>
 #include <mach/hardware.h>
-#include <mach/tegra_emc.h>
 
-#include <tegra/mc.h>
+#include <linux/platform/tegra/tegra_emc.h>
+#include <linux/platform/tegra/mc.h>
 
 #include <linux/platform/tegra/clock.h>
 #include "tegra_clocks_ops.h"
@@ -524,7 +524,6 @@
 #define PLLE_AUX_PLLP_SEL		(1<<2)
 
 #define PLLE_AUX_CML_SATA_ENABLE	(1<<1)
-#define PLLE_AUX_CML_PCIE_ENABLE	(1<<0)
 
 #define SOURCE_SATA			0x424
 
@@ -5697,7 +5696,7 @@ static struct clk_ops tegra_audio_sync_clk_ops = {
 	.set_parent = tegra21_audio_sync_clk_set_parent,
 };
 
-/* cml0 (pcie), and cml1 (sata) clock ops */
+/* cml1 (sata) clock ops */
 static void tegra21_cml_clk_init(struct clk *c)
 {
 	u32 val = clk_readl(c->reg);
@@ -6958,7 +6957,7 @@ static struct clk tegra_pll_a_out0 = {
 
 static struct clk_mux_sel mux_plla[] = {
 	{ .input = &tegra_pll_a, .value = 0},
-	{ 0, 0},
+	{ NULL, 0},
 };
 
 static struct clk tegra_pll_a_out_adsp = {
@@ -6975,7 +6974,7 @@ static struct clk tegra_pll_a_out_adsp = {
 
 static struct clk_mux_sel mux_plla_out0[] = {
 	{ .input = &tegra_pll_a_out0, .value = 0},
-	{ 0, 0},
+	{ NULL, 0},
 };
 
 static struct clk tegra_pll_a_out0_out_adsp = {
@@ -7831,21 +7830,9 @@ static struct clk tegra_pll_e_gate = {
 	.parent    = &tegra_pll_e,
 	.ops       = &tegra_cml_clk_ops,
 	.reg       = 0xec,
-	.max_rate  = 100000000,
+        .max_rate  = 100000000,
 	.u.periph  = {
 		.clk_num = 15,
-	},
-};
-
-static struct clk tegra_cml0_clk = {
-	.name      = "cml0",
-	.clk_id    = TEGRA210_CLK_ID_PLL_E_CML0,
-	.parent    = &tegra_pll_e,
-	.ops       = &tegra_cml_clk_ops,
-	.reg       = PLLE_AUX,
-	.max_rate  = 100000000,
-	.u.periph  = {
-		.clk_num = 0,
 	},
 };
 
@@ -8422,6 +8409,8 @@ static struct clk tegra_pex_uphy_clk = {
 	.name      = "pex_uphy",
 	.clk_id = TEGRA210_CLK_ID_PEX_UPHY,
 	.ops       = &tegra_xusb_padctl_ops,
+	.parent		= &tegra_pll_e,
+	.max_rate	= 100000000,
 	.u.periph  = {
 		.clk_num   = 205,
 	},
@@ -8780,6 +8769,11 @@ static struct clk_mux_sel mux_clk_m[] = {
 	{ NULL, 0},
 };
 
+static struct clk_mux_sel mux_pex_uphy_clk[] = {
+	{ .input = &tegra_pex_uphy_clk, .value = 0},
+	{ NULL, 0},
+};
+
 static struct clk_mux_sel mux_pllp_out3[] = {
 	{ .input = &tegra_pll_p_out3, .value = 0},
 	{ NULL, 0},
@@ -8908,6 +8902,11 @@ static struct clk tegra_clk_mselect = {
 		.threshold = 408000000,
 	},
 	.rate_change_nh = &mselect_rate_change_nh,
+};
+
+static struct clk_mux_sel mux_clk_mselect[] = {
+	{ .input = &tegra_clk_mselect, .value = 0},
+	{ NULL, 0},
 };
 
 static struct raw_notifier_head ape_rate_change_nh;
@@ -9491,7 +9490,7 @@ static struct clk tegra_list_clks[] = {
 	PERIPH_CLK("hda",	"tegra30-hda",		"hda",  125,	0x428,	102000000, mux_pllp_pllc_clkm,			MUX | DIV_U71 | PERIPH_ON_APB, TEGRA210_CLK_ID_HDA),
 	PERIPH_CLK("hda2hdmi",	"tegra30-hda",	   "hda2hdmi",	128,	0,	 48000000,  mux_hda2codec_2x,				PERIPH_ON_APB, TEGRA210_CLK_ID_HDA2HDMI),
 
-	PERIPH_CLK_EX("qspi",	"qspi",			NULL,	211,	0x6c4, 133000000, mux_pllp_pllc_pllc_out1_pllc4_out2_pllc4_out1_clkm_pllc4_out0, MUX | DIV_U71 | DIV_U71_INT | PERIPH_ON_APB, TEGRA210_CLK_ID_QSPI, &tegra_qspi_clk_ops),
+	PERIPH_CLK_EX("qspi",	"qspi",			NULL,	211,	0x6c4, 163200000, mux_pllp_pllc_pllc_out1_pllc4_out2_pllc4_out1_clkm_pllc4_out0, MUX | DIV_U71 | DIV_U71_INT | PERIPH_ON_APB, TEGRA210_CLK_ID_QSPI, &tegra_qspi_clk_ops),
 	PERIPH_CLK("sbc1",	"7000d400.spi",		NULL,	41,	0x134,  65000000, mux_pllp_pllc_clkm,	MUX | DIV_U71 | DIV_U71_INT | PERIPH_ON_APB, TEGRA210_CLK_ID_SBC1),
 	PERIPH_CLK("sbc2",	"7000d600.spi",		NULL,	44,	0x118,  65000000, mux_pllp_pllc_clkm,	MUX | DIV_U71 | DIV_U71_INT | PERIPH_ON_APB, TEGRA210_CLK_ID_SBC2),
 	PERIPH_CLK("sbc3",	"7000d800.spi",		NULL,	46,	0x11c,  65000000, mux_pllp_pllc_clkm,	MUX | DIV_U71 | DIV_U71_INT | PERIPH_ON_APB, TEGRA210_CLK_ID_SBC3),
@@ -9567,8 +9566,8 @@ static struct clk tegra_list_clks[] = {
 	PERIPH_CLK("extern1",	"extern1",		NULL,	120,	0x3ec,	408000000, mux_plla_clk32_pllp_clkm_plle,	MUX | DIV_U71, TEGRA210_CLK_ID_EXTERN1),
 	PERIPH_CLK("extern2",	"extern2",		NULL,	121,	0x3f0,	408000000, mux_plla_clk32_pllp_clkm_plle,	MUX | DIV_U71, TEGRA210_CLK_ID_EXTERN2),
 	PERIPH_CLK("extern3",	"extern3",		NULL,	122,	0x3f4,	408000000, mux_plla_clk32_pllp_clkm_plle,	MUX | DIV_U71, TEGRA210_CLK_ID_EXTERN3),
-	PERIPH_CLK("pcie",	"tegra-pcie",		"pcie",	70,	0,	250000000, mux_clk_m, 			0, TEGRA210_CLK_ID_PCIE),
-	PERIPH_CLK("afi",	"tegra-pcie",		"afi",	72,	0,	250000000, mux_clk_m, 			0, TEGRA210_CLK_ID_AFI),
+	PERIPH_CLK("pcie",	"tegra_pcie",		"pcie",	70,	0,	250000000, mux_pex_uphy_clk, PERIPH_MANUAL_RESET, TEGRA210_CLK_ID_PCIE),
+	PERIPH_CLK("afi",	"tegra_pcie",		"afi",	72,	0,	408000000, mux_clk_mselect, PERIPH_MANUAL_RESET, TEGRA210_CLK_ID_AFI),
 	PERIPH_CLK("cl_dvfs_ref", "tegra_cl_dvfs",	"ref",	155,	0x62c,	54000000,  mux_pllp_clkm,		MUX | DIV_U71 | DIV_U71_INT | PERIPH_ON_APB, TEGRA210_CLK_ID_DFLL_REF),
 	PERIPH_CLK("cl_dvfs_soc", "tegra_cl_dvfs",	"soc",	155,	0x630,	54000000,  mux_pllp_clkm,		MUX | DIV_U71 | DIV_U71_INT | PERIPH_ON_APB, TEGRA210_CLK_ID_DFLL_SOC),
 	PERIPH_CLK("soc_therm",	"soc_therm",		NULL,   78,	0x644,	136000000, mux_clkm_pllc_pllp_plla,	MUX | DIV_U71 | PERIPH_ON_APB, TEGRA210_CLK_ID_SOC_THERM),
@@ -9605,7 +9604,6 @@ static struct clk tegra_list_clks[] = {
 	SHARED_SCLK("cap.vcore.sclk", "cap.vcore.sclk",	NULL,	&tegra_clk_sbus_cmplx, NULL, 0, SHARED_CEILING, 0),
 	SHARED_SCLK("cap.throttle.sclk", "cap_throttle", NULL,	&tegra_clk_sbus_cmplx, NULL, 0, SHARED_CEILING, 0),
 	SHARED_SCLK("floor.sclk", "floor_sclk",		NULL,	&tegra_clk_sbus_cmplx, NULL, 0, 0, 0),
-	SHARED_SCLK("gpu.sclk", "tegra_gpu.0",		NULL,	&tegra_clk_sbus_cmplx, NULL, 0, 0, TEGRA210_CLK_ID_GBUS_GM20B_USER),
 	SHARED_SCLK("override.sclk", "override_sclk",	NULL,   &tegra_clk_sbus_cmplx, NULL, 0, SHARED_OVERRIDE, 0),
 	SHARED_SCLK("sbc1.sclk", "7000d400.spi",	"sclk", &tegra_clk_apb,        NULL, 0, 0, TEGRA210_CLK_ID_SBUS_SBC1_USER),
 	SHARED_SCLK("sbc2.sclk", "7000d600.spi",	"sclk", &tegra_clk_apb,        NULL, 0, 0, TEGRA210_CLK_ID_SBUS_SBC2_USER),
@@ -9636,22 +9634,19 @@ static struct clk tegra_list_clks[] = {
 	SHARED_EMC_CLK("nvdec.emc",	"tegra_nvdec",	"emc",	&tegra_clk_emc, NULL, 0, 0, 0, TEGRA210_CLK_ID_EMC_NVDEC_USER),
 	SHARED_EMC_CLK("tsec.emc",	"tegra_tsec",	"emc",	&tegra_clk_emc, NULL, 0, 0, 0, TEGRA210_CLK_ID_EMC_TSEC_USER),
 	SHARED_EMC_CLK("tsecb.emc",	"tegra_tsecb",	"emc",	&tegra_clk_emc, NULL, 0, 0, 0, TEGRA210_CLK_ID_EMC_TSECB_USER),
-#ifdef CONFIG_VI_ONE_DEVICE
 	SHARED_EMC_CLK("vi.emc",	"tegra_vi",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW,	BIT(EMC_USER_VI), TEGRA210_CLK_ID_EMC_VI_USER),
-#else
-	SHARED_EMC_CLK("via.emc",	"tegra_vi.0",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW,	BIT(EMC_USER_VI), TEGRA210_CLK_ID_EMC_VIA_USER),
-	SHARED_EMC_CLK("vib.emc",	"tegra_vi.1",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW,	BIT(EMC_USER_VI2), TEGRA210_CLK_ID_EMC_VIB_USER),
-#endif
 	SHARED_EMC_CLK("ispa.emc",	"tegra_isp.0",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW,	BIT(EMC_USER_ISP1), TEGRA210_CLK_ID_EMC_ISPA_USER),
 	SHARED_EMC_CLK("ispb.emc",	"tegra_isp.1",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_ISO_BW,	BIT(EMC_USER_ISP2), TEGRA210_CLK_ID_EMC_ISPB_USER),
 	SHARED_EMC_CLK("camera.emc", "tegra_camera_ctrl",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_BW, 0, TEGRA210_CLK_ID_EMC_CAMERA_USER),
+	SHARED_EMC_CLK("camera_iso.emc", "tegra_camera_ctrl",	"iso.emc",	&tegra_clk_emc,	NULL, 0, SHARED_ISO_BW, 0, TEGRA210_CLK_ID_EMC_CAMERA_ISO_USER),
 	SHARED_EMC_CLK("iso.emc",	"iso",		"emc",	&tegra_clk_emc, NULL, 0, 0, 0, TEGRA210_CLK_ID_EMC_ISO_USER),
-	SHARED_EMC_CLK("floor.emc",	"floor.emc",	NULL,	&tegra_clk_emc, NULL, 0, 0, 0, 0),
 	SHARED_EMC_CLK("override.emc", "override.emc",	NULL,	&tegra_clk_emc, NULL, 0, SHARED_OVERRIDE, 0, 0),
 	SHARED_EMC_CLK("vic.emc",	"tegra_vic03",	"emc",  &tegra_clk_emc, NULL, 0, 0, 0, TEGRA210_CLK_ID_EMC_VIC_USER),
 	SHARED_EMC_CLK("vic_shared.emc",	"tegra_vic03",	"emc_shared",  &tegra_clk_emc, NULL, 0, SHARED_BW, 0, TEGRA210_CLK_ID_EMC_VIC_SHARED_USER),
 	SHARED_EMC_CLK("battery.emc",	"battery_edp",	"emc",	&tegra_clk_emc, NULL, 0, SHARED_CEILING, 0, 0),
 	SHARED_EMC_CLK("ape.emc", "ape", "emc",  &tegra_clk_emc, NULL, 0, 0, 0, TEGRA210_CLK_ID_EMC_APE_USER),
+	SHARED_EMC_CLK("floor.emc",	"floor.emc",	NULL,	&tegra_clk_emc, NULL, 0, 0, 0, 0),
+	SHARED_EMC_CLK("floor.profile.emc", "profile.emc", "floor", &tegra_clk_emc, NULL,  0, 0, 0, 0),
 	SHARED_EMC_CLK("pcie.emc", "tegra_pcie", "emc",  &tegra_clk_emc, NULL, 0, 0, 0, TEGRA210_CLK_ID_EMC_PCIE_USER),
 
 	DUAL_CBUS_CLK("vic03.cbus",	"tegra_vic03",		"vic03", &tegra_clk_c2bus, "vic03", 0, 0, TEGRA210_CLK_ID_CXBUS_VIC_USER),
@@ -9716,13 +9711,10 @@ static struct clk tegra_visp_clks[] = {
 	SHARED_CLK("override.cbus",	"override.cbus", NULL,	&tegra_clk_cbus,    NULL,   0, SHARED_OVERRIDE, 0),
 	SHARED_LIMIT("cap.vcore.cbus",	"cap.vcore.cbus", NULL,	&tegra_clk_cbus,    NULL,   0, SHARED_CEILING, 0),
 
-#ifndef CONFIG_VI_ONE_DEVICE
-	SHARED_CLK("via.vi.cbus",	"via.vi",	NULL,	&tegra_visp_clks[0], NULL,   0, 0, TEGRA210_CLK_ID_CXBUS_VI_VIA_USER),
-	SHARED_CLK("vib.vi.cbus",	"vib.vi",	NULL,	&tegra_visp_clks[0], NULL,   0, 0, TEGRA210_CLK_ID_CXBUS_VI_VIB_USER),
-#endif
-
 	SHARED_CLK("ispa.isp.cbus",	"ispa.isp",	NULL,	&tegra_visp_clks[1], "ispa", 0, 0, TEGRA210_CLK_ID_CXBUS_ISP_ISPA_USER),
 	SHARED_CLK("ispb.isp.cbus",	"ispb.isp",	NULL,	&tegra_visp_clks[1], "ispb", 0, 0, TEGRA210_CLK_ID_CXBUS_ISP_ISPB_USER),
+	SHARED_CLK("vi_v4l2.cbus",	"vi",		"vi_v4l2",	&tegra_visp_clks[0],	"vi",    0, 0, TEGRA210_CLK_ID_CXBUS_VI_V4L2_USER),
+	SHARED_CLK("vi_bypass.cbus",	"tegra_vi",	"vi_bypass",	&tegra_visp_clks[0],	"vi",    0, 0, TEGRA210_CLK_ID_CXBUS_VI_BYPASS_USER),
 };
 
 /* XUSB clocks */
@@ -9932,7 +9924,6 @@ static struct clk_duplicate tegra_clk_duplicates[] = {
 	CLK_DUPLICATE("cop", "nvavp", "cop"),
 	CLK_DUPLICATE("bsev", "nvavp", "bsev"),
 	CLK_DUPLICATE("cml1", "tegra_sata_cml", NULL),
-	CLK_DUPLICATE("cml0", "tegra_pcie", "cml"),
 	CLK_DUPLICATE("pciex", "tegra_pcie", "pciex"),
 	CLK_DUPLICATE("pex_uphy", "tegra_pcie", "pex_uphy"),
 	CLK_DUPLICATE("clk_m", NULL, "apb_pclk"),
@@ -9971,26 +9962,12 @@ static struct clk_duplicate tegra_clk_duplicates[] = {
 	CLK_DUPLICATE("mclk3", NULL, "cam_mclk1"),
 	CLK_DUPLICATE("mclk", NULL, "cam_mclk2"),
 	CLK_DUPLICATE("mclk2", NULL, "cam_mclk3"),
-#ifdef CONFIG_VI_ONE_DEVICE
-	CLK_DUPLICATE("vi.cbus", "tegra_vi", "vi"),
 	CLK_DUPLICATE("csi", "tegra_vi", "csi"),
 	CLK_DUPLICATE("csus", "tegra_vi", "csus"),
 	CLK_DUPLICATE("vim2_clk", "tegra_vi", "vim2_clk"),
 	CLK_DUPLICATE("cilab", "tegra_vi", "cilab"),
 	CLK_DUPLICATE("cilcd", "tegra_vi", "cilcd"),
 	CLK_DUPLICATE("cile", "tegra_vi", "cile"),
-#else
-	CLK_DUPLICATE("via.vi.cbus", "tegra_vi", "vi"),
-	CLK_DUPLICATE("vib.vi.cbus", "tegra_vi.1", "vi"),
-	CLK_DUPLICATE("csi", "tegra_vi", "csi"),
-	CLK_DUPLICATE("csi", "tegra_vi.1", "csi"),
-	CLK_DUPLICATE("csus", "tegra_vi", "csus"),
-	CLK_DUPLICATE("vim2_clk", "tegra_vi.1", "vim2_clk"),
-	CLK_DUPLICATE("cilab", "tegra_vi", "cilab"),
-	CLK_DUPLICATE("cilcd", "tegra_vi.1", "cilcd"),
-	CLK_DUPLICATE("cile", "tegra_vi.1", "cile"),
-	CLK_DUPLICATE("via.emc", "tegra_vi", "emc"),
-#endif
 	CLK_DUPLICATE("spdif_in", NULL, "spdif_in"),
 	CLK_DUPLICATE("dmic1", "tegra-dmic.0", NULL),
 	CLK_DUPLICATE("dmic2", "tegra-dmic.1", NULL),
@@ -9999,6 +9976,14 @@ static struct clk_duplicate tegra_clk_duplicates[] = {
 	CLK_DUPLICATE("d_audio", "nvadsp", "ahub"),
 	CLK_DUPLICATE("mclk", NULL, "default_mclk"),
 	CLK_DUPLICATE("uart_mipi_cal", "clk72mhz", NULL),
+
+	/* Connection name change for reset controller */
+	CLK_DUPLICATE("i2c1",   "7000c000.i2c",   "i2c"),
+	CLK_DUPLICATE("i2c2",   "7000c400.i2c",   "i2c"),
+	CLK_DUPLICATE("i2c3",   "7000c500.i2c",   "i2c"),
+	CLK_DUPLICATE("i2c4",   "7000c700.i2c",   "i2c"),
+	CLK_DUPLICATE("i2c5",   "7000d000.i2c",   "i2c"),
+	CLK_DUPLICATE("i2c6",   "7000d100.i2c",   "i2c"),
 };
 
 
@@ -10058,7 +10043,6 @@ static struct clk *tegra_ptr_clks[] = {
 	&tegra_pll_e,
 	&tegra_pll_e_hw,
 	&tegra_pll_e_gate,
-	&tegra_cml0_clk,
 	&tegra_cml1_clk,
 	&tegra_pciex_clk,
 	&tegra_pex_uphy_clk,

@@ -21,17 +21,12 @@
 
 #include <linux/ioctl.h>
 #include <linux/i2c.h>
-#include <linux/spi/spi.h>
 #include <linux/uaccess.h>
 #include <linux/cdev.h>
 #include <linux/fs.h>
-#include <linux/device.h>
 
 #define BYTEPOS_IN_WORD(i)  (BITS_PER_BYTE * i)
 #define CHAR_BIT_MASK(i)    (0xFF << BYTEPOS_IN_WORD(i))
-
-#define SPI 0
-#define I2C 1
 
 
 struct saf775x_cmd {
@@ -41,66 +36,23 @@ struct saf775x_cmd {
 	unsigned int val_len;
 };
 
-struct saf775x_control_param {
-	char name[20];
-	unsigned int *reg;
-	unsigned int num_reg;
-	int val;
-};
-
-struct saf775x_control_info {
-	char name[20];
-	int min;
-	int max;
-	int step;
-	int val;
-};
 enum {
 	SAF775X_CONTROL_SET_IOCTL = _IOW(0xF4, 0x01, struct saf775x_cmd),
 	SAF775x_CODEC_RESET_IOCTL = _IO(0xF4, 0x02),
 	SAF775X_CONTROL_GET_IOCTL = _IOR(0xF4, 0x03, struct saf775x_cmd),
-	SAF775X_CONTROL_GET_MIXER = _IOR(0xF4, 0x04,
-					struct saf775x_control_info),
-	SAF775X_CONTROL_SET_MIXER = _IOW(0xF4, 0x05,
-					struct saf775x_control_param),
-	SAF775X_CONTROL_SETIF = _IOW(0xF4, 0x6, unsigned int),
-	SAF775X_CONTROL_GETIF = _IO(0xF4, 0x7),
 };
 
 struct saf775x_ioctl_ops {
-	int (*codec_write)(void *codec,
+	int (*codec_write)(struct i2c_client *codec,
 		unsigned int reg, unsigned int val,
 		unsigned int reg_len, unsigned int val_len);
 	int (*codec_reset)(void);
-	int (*codec_read)(void *codec,
+	int (*codec_read)(struct i2c_client *codec,
 		unsigned char *val, unsigned int val_len);
-	int (*codec_set_ctrl)(void *codec, char *name,
-		unsigned int reg, int val,
-		unsigned int num_reg);
-	int (*codec_get_ctrl)(void *codec,
-		struct saf775x_control_info *info);
-#if defined(CONFIG_SPI_MASTER)
-	int (*codec_flash)(struct spi_device *codec,
-		char *buf, unsigned int size);
-	int (*codec_read_status)(struct spi_device *codec,
-		char *buf, unsigned int size);
-#endif
 };
 
-struct saf775x_device_interfaces {
-	struct i2c_client *client;
-	struct spi_device *spi;
-};
-
-int saf775x_hwdep_create(void);
-
+int saf775x_hwdep_create(struct i2c_client *codec);
 int saf775x_hwdep_cleanup(void);
-
 struct saf775x_ioctl_ops *saf775x_get_ioctl_ops(void);
-
-struct saf775x_device_interfaces *saf775x_get_devifs(void);
-
-unsigned int saf775x_get_active_if(void);
-int saf775x_set_active_if(unsigned int);
 
 #endif /* __SAF775X_IOCTL_H__ */

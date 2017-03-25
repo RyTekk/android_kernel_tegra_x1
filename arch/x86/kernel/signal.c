@@ -596,24 +596,10 @@ badframe:
 	return 0;
 }
 
-/*
- * OK, we're invoking a handler:
- */
-static int signr_convert(int sig)
-{
-#ifdef CONFIG_X86_32
-	struct thread_info *info = current_thread_info();
-
-	if (info->exec_domain && info->exec_domain->signal_invmap && sig < 32)
-		return info->exec_domain->signal_invmap[sig];
-#endif /* CONFIG_X86_32 */
-	return sig;
-}
-
 static int
 setup_rt_frame(struct ksignal *ksig, struct pt_regs *regs)
 {
-	int usig = signr_convert(ksig->sig);
+	int usig = ksig->sig;
 	sigset_t *set = sigmask_to_save();
 	compat_sigset_t *cset = (compat_sigset_t *) set;
 
@@ -686,12 +672,15 @@ handle_signal(struct ksignal *ksig, struct pt_regs *regs)
 	signal_setup_done(failed, ksig, test_thread_flag(TIF_SINGLESTEP));
 }
 
-#ifdef CONFIG_X86_32
-#define NR_restart_syscall	__NR_restart_syscall
-#else /* !CONFIG_X86_32 */
-#define NR_restart_syscall	\
-	test_thread_flag(TIF_IA32) ? __NR_ia32_restart_syscall : __NR_restart_syscall
-#endif /* CONFIG_X86_32 */
+static inline unsigned long get_nr_restart_syscall(const struct pt_regs *regs)
+{
+#if defined(CONFIG_X86_32) || !defined(CONFIG_X86_64)
+	return __NR_restart_syscall;
+#else /* !CONFIG_X86_32 && CONFIG_X86_64 */
+	return test_thread_flag(TIF_IA32) ? __NR_ia32_restart_syscall :
+		__NR_restart_syscall | (regs->orig_ax & __X32_SYSCALL_BIT);
+#endif /* CONFIG_X86_32 || !CONFIG_X86_64 */
+}
 
 /*
  * Note that 'init' is a special process: it doesn't get signals it doesn't
@@ -720,7 +709,7 @@ static void do_signal(struct pt_regs *regs)
 			break;
 
 		case -ERESTART_RESTARTBLOCK:
-			regs->ax = NR_restart_syscall;
+			regs->ax = get_nr_restart_syscall(regs);
 			regs->ip -= 2;
 			break;
 		}

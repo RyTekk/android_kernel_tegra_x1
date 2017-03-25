@@ -165,7 +165,8 @@ static int gk20a_ctrl_alloc_as(
 		goto clean_up;
 	}
 
-	err = gk20a_as_alloc_share(&g->as, args->big_page_size, &as_share);
+	err = gk20a_as_alloc_share(&g->as, args->big_page_size, args->flags,
+				   &as_share);
 	if (err)
 		goto clean_up_file;
 
@@ -206,7 +207,7 @@ static int gk20a_ctrl_open_tsg(struct gk20a *g,
 		goto clean_up;
 	}
 
-	err = g->ops.tsg.open(g, file);
+	err = gk20a_tsg_open(g, file);
 	if (err)
 		goto clean_up_file;
 
@@ -436,16 +437,16 @@ static int nvgpu_gpu_ioctl_wait_for_pause(
 		}
 
 		/* 64 bit read */
-		warps_valid = (u64)gk20a_readl(g, gr_gpc0_tpc0_sm_warp_valid_mask_r() + reg_offset) << 32;
-		warps_valid |= gk20a_readl(g, gr_gpc0_tpc0_sm_warp_valid_mask_r() + reg_offset + 4);
+		warps_valid = (u64)gk20a_readl(g, gr_gpc0_tpc0_sm_warp_valid_mask_r() + reg_offset + 4) << 32;
+		warps_valid |= gk20a_readl(g, gr_gpc0_tpc0_sm_warp_valid_mask_r() + reg_offset);
 
 		/* 64 bit read */
-		warps_paused = (u64)gk20a_readl(g, gr_gpc0_tpc0_sm_dbgr_bpt_pause_mask_r() + reg_offset) << 32;
-		warps_paused |= gk20a_readl(g, gr_gpc0_tpc0_sm_dbgr_bpt_pause_mask_r() + reg_offset + 4);
+		warps_paused = (u64)gk20a_readl(g, gr_gpc0_tpc0_sm_dbgr_bpt_pause_mask_r() + reg_offset + 4) << 32;
+		warps_paused |= gk20a_readl(g, gr_gpc0_tpc0_sm_dbgr_bpt_pause_mask_r() + reg_offset);
 
 		/* 64 bit read */
-		warps_trapped = (u64)gk20a_readl(g, gr_gpc0_tpc0_sm_dbgr_bpt_trap_mask_r() + reg_offset) << 32;
-		warps_trapped |= gk20a_readl(g, gr_gpc0_tpc0_sm_dbgr_bpt_trap_mask_r() + reg_offset + 4);
+		warps_trapped = (u64)gk20a_readl(g, gr_gpc0_tpc0_sm_dbgr_bpt_trap_mask_r() + reg_offset + 4) << 32;
+		warps_trapped |= gk20a_readl(g, gr_gpc0_tpc0_sm_dbgr_bpt_trap_mask_r() + reg_offset);
 
 		w_state[sm_id].valid_warps = warps_valid;
 		w_state[sm_id].trapped_warps = warps_trapped;
@@ -589,8 +590,10 @@ long gk20a_ctrl_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 		set_table_args = (struct nvgpu_gpu_zbc_set_table_args *)buf;
 
 		zbc_val = kzalloc(sizeof(struct zbc_entry), GFP_KERNEL);
-		if (zbc_val == NULL)
+		if (zbc_val == NULL) {
+			gk20a_err(dev_from_gk20a(g), "Failed to allocate memory for zbc_entry\n");
 			return -ENOMEM;
+		}
 
 		zbc_val->format = set_table_args->format;
 		zbc_val->type = set_table_args->type;
@@ -606,15 +609,22 @@ long gk20a_ctrl_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
 			zbc_val->depth = set_table_args->depth;
 			break;
 		default:
+			gk20a_err(dev_from_gk20a(g),
+				"Invalid argument, %d didn't match to any GK20A_ZBC_TYPE\n",
+				zbc_val->type);
 			err = -EINVAL;
 		}
 
 		if (!err) {
 			err = gk20a_busy(dev);
-			if (!err)
+			if (err) {
+				gk20a_err(dev_from_gk20a(g),
+					"failed to power on gpu: %d\n", err);
+			} else {
 				err = g->ops.gr.zbc_set_table(g, &g->gr,
 							     zbc_val);
-			gk20a_idle(dev);
+				gk20a_idle(dev);
+			}
 		}
 
 		if (zbc_val)

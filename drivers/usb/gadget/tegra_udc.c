@@ -1973,6 +1973,7 @@ static void udc_test_mode(struct tegra_udc *udc, u32 test_mode)
 	struct tegra_ep *ep;
 	u32 portsc, bitmask;
 	unsigned long timeout;
+	struct usb_request *usb_req = NULL;
 
 	/* Ack the ep0 IN */
 	if (ep0_prime_status(udc, EP_DIR_IN))
@@ -2018,16 +2019,28 @@ static void udc_test_mode(struct tegra_udc *udc, u32 test_mode)
 		udc->ep0_dir = USB_DIR_IN;
 
 		/* Initialize ep0 status request structure */
-		req = container_of(tegra_alloc_request(NULL, GFP_ATOMIC),
-				struct tegra_req, req);
-		/* allocate a small amount of memory to get valid address */
-		req->req.buf = kmalloc(sizeof(tegra_udc_test_packet),
-					GFP_ATOMIC);
-		req->req.dma = virt_to_phys(req->req.buf);
+		usb_req = tegra_alloc_request(NULL, GFP_ATOMIC);
+		if (usb_req)
+			req = container_of(usb_req, struct tegra_req, req);
+		else {
+			dev_err(ep->udc->gadget.dev.parent,
+				"allocate tegra_req failed\n");
+			goto stall;
+		}
+
+		req->req.buf = (void *) tegra_udc_test_packet;
+		req->req.dma = dma_map_single(ep->udc->gadget.dev.parent,
+						req->req.buf,
+						sizeof(tegra_udc_test_packet),
+						DMA_TO_DEVICE);
+
+		if (dma_mapping_error(ep->udc->gadget.dev.parent,
+					req->req.dma)) {
+			dev_err(ep->udc->gadget.dev.parent, "dma map failed\n");
+			goto stall;
+		}
 
 		/* Fill in the reqest structure */
-		memcpy(req->req.buf, tegra_udc_test_packet,
-					sizeof(tegra_udc_test_packet));
 		req->ep = ep;
 		req->req.length = sizeof(tegra_udc_test_packet);
 		req->req.status = -EINPROGRESS;
@@ -2075,10 +2088,8 @@ static void udc_test_mode(struct tegra_udc *udc, u32 test_mode)
 	return;
 stall:
 	ep0stall(udc);
-	if (req) {
-		kfree(req->req.buf);
+	if (req)
 		tegra_free_request(NULL, &req->req);
-	}
 }
 
 static void setup_received_irq(struct tegra_udc *udc,
@@ -2787,6 +2798,7 @@ static int tegra_udc_setup_qh(struct tegra_udc *udc)
 	u32 dccparams;
 	size_t size;
 	struct resource *res;
+	struct usb_request *usb_req = NULL;
 
 	/* Read Device Controller Capability Parameters register */
 	dccparams = udc_readl(udc, DCCPARAMS_REG_OFFSET);
@@ -2819,8 +2831,14 @@ static int tegra_udc_setup_qh(struct tegra_udc *udc)
 
 	/* Initialize ep0 status request structure */
 	/* FIXME: tegra_alloc_request() ignores ep argument */
-	udc->status_req = container_of(tegra_alloc_request(NULL, GFP_KERNEL),
-			struct tegra_req, req);
+	usb_req = tegra_alloc_request(NULL, GFP_KERNEL);
+	if (usb_req)
+		udc->status_req = container_of(usb_req, struct tegra_req, req);
+	else {
+		ERR("allocate tegra_req failed\n");
+		kfree(udc->eps);
+		return -ENOMEM;
+	}
 	/* Allocate a small amount of memory to get valid address */
 	udc->status_req->req.buf = dma_alloc_coherent(&udc->pdev->dev,
 				STATUS_BUFFER_SIZE, &udc->status_req->req.dma,
@@ -2916,6 +2934,7 @@ static struct tegra_usb_platform_data *tegra_udc_dt_parse_pdata(
 {
 	struct tegra_usb_platform_data *pdata;
 	struct device_node *np = pdev->dev.of_node;
+	u32 current_ua;
 
 	if (!np)
 		return NULL;
@@ -2935,10 +2954,13 @@ static struct tegra_usb_platform_data *tegra_udc_dt_parse_pdata(
 	pdata->u_data.dev.is_xhci =
 		of_property_read_bool(np, "nvidia,enable-xhci-host");
 
-	of_property_read_u32(np, "nvidia,dcp-current-limit-ma",
-				&pdata->u_data.dev.dcp_current_limit_ma);
-	of_property_read_u32(np, "nvidia,qc2-current-limit-ma",
-				&pdata->u_data.dev.qc2_current_limit_ma);
+	of_property_read_u32(np, "nvidia,dcp-current-limit-ua",
+				&current_ua);
+	pdata->u_data.dev.dcp_current_limit_ma = current_ua/1000;
+
+	of_property_read_u32(np, "nvidia,qc2-current-limit-ua",
+				&current_ua);
+	pdata->u_data.dev.qc2_current_limit_ma = current_ua/1000;
 	of_property_read_u32(np, "nvidia,qc2-input-voltage",
 				&pdata->qc2_voltage);
 	of_property_read_u32(np, "nvidia,id-detection-type",
@@ -2968,7 +2990,7 @@ static struct tegra_udc_soc_data tegra_soc_config = {
 
 static struct tegra_udc_soc_data tegra21x_soc_config = {
 	.utmi = {
-		.hssync_start_delay = 0,
+		.hssync_start_delay = 9,
 		.elastic_limit = 16,
 		.idle_wait_delay = 17,
 		.term_range_adj = 6,
@@ -2976,7 +2998,7 @@ static struct tegra_udc_soc_data tegra21x_soc_config = {
 		.xcvr_lsfslew = 2,
 		.xcvr_lsrslew = 2,
 		.xcvr_setup_offset = 0,
-		.xcvr_use_fuses = 0,
+		.xcvr_use_fuses = 1,
 	},
 	.has_hostpc = true,
 	.unaligned_dma_buf_supported = false,

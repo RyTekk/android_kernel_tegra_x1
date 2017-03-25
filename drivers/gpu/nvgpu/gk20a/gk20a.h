@@ -1,7 +1,7 @@
 /*
  * GK20A Graphics
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -177,8 +177,10 @@ struct gpu_ops {
 		u32 (*get_max_lts_per_ltc)(struct gk20a *g);
 		u32* (*get_rop_l2_en_mask)(struct gk20a *g);
 		void (*init_sm_dsm_reg_info)(void);
-		int (*update_smpc_ctxsw_mode)(struct gk20a *g,
-			  struct channel_gk20a *c, bool enable_smpc_ctxsw);
+		int (*wait_empty)(struct gk20a *g, unsigned long end_jiffies,
+		       u32 expect_delay);
+		void (*init_cyclestats)(struct gk20a *g);
+		void (*enable_cde_in_fecs)(void *ctx_ptr);
 	} gr;
 	const char *name;
 	struct {
@@ -187,7 +189,9 @@ struct gpu_ops {
 		void (*init_uncompressed_kind_map)(struct gk20a *g);
 		void (*init_kind_attr)(struct gk20a *g);
 		void (*set_mmu_page_size)(struct gk20a *g);
+		bool (*set_use_full_comp_tag_line)(struct gk20a *g);
 		int (*compression_page_size)(struct gk20a *g);
+		int (*compressible_page_size)(struct gk20a *g);
 		void (*dump_vpr_wpr_info)(struct gk20a *g);
 	} fb;
 	struct {
@@ -221,7 +225,8 @@ struct gpu_ops {
 		int (*alloc_inst)(struct gk20a *g, struct channel_gk20a *ch);
 		void (*free_inst)(struct gk20a *g, struct channel_gk20a *ch);
 		int (*setup_ramfc)(struct channel_gk20a *c, u64 gpfifo_base,
-				u32 gpfifo_entries);
+				u32 gpfifo_entries, u32 flags);
+		int (*resetup_ramfc)(struct channel_gk20a *c);
 		int (*preempt_channel)(struct gk20a *g, u32 hw_chid);
 		int (*update_runlist)(struct gk20a *g, u32 runlist_id,
 				u32 hw_chid, bool add,
@@ -232,7 +237,6 @@ struct gpu_ops {
 		int (*wait_engine_idle)(struct gk20a *g);
 		u32 (*get_num_fifos)(struct gk20a *g);
 		u32 (*get_pbdma_signature)(struct gk20a *g);
-		int (*force_reset_ch)(struct channel_gk20a *ch, bool verbose);
 	} fifo;
 	struct pmu_v {
 		/*used for change of enum zbc update cmd id from ver 0 to ver1*/
@@ -310,10 +314,29 @@ struct gpu_ops {
 		void (*set_perfmon_cntr_index)(struct pmu_gk20a *pmu, u8 val);
 		void (*set_perfmon_cntr_group_id)(struct pmu_gk20a *pmu,
 				u8 gid);
+
+		u8 (*pg_cmd_eng_buf_load_size)(struct pmu_pg_cmd *pg);
+		void (*pg_cmd_eng_buf_load_set_cmd_type)(struct pmu_pg_cmd *pg,
+				u8 value);
+		void (*pg_cmd_eng_buf_load_set_engine_id)(struct pmu_pg_cmd *pg,
+				u8 value);
+		void (*pg_cmd_eng_buf_load_set_buf_idx)(struct pmu_pg_cmd *pg,
+				u8 value);
+		void (*pg_cmd_eng_buf_load_set_pad)(struct pmu_pg_cmd *pg,
+				u8 value);
+		void (*pg_cmd_eng_buf_load_set_buf_size)(struct pmu_pg_cmd *pg,
+				u16 value);
+		void (*pg_cmd_eng_buf_load_set_dma_base)(struct pmu_pg_cmd *pg,
+				u32 value);
+		void (*pg_cmd_eng_buf_load_set_dma_offset)(struct pmu_pg_cmd *pg,
+				u8 value);
+		void (*pg_cmd_eng_buf_load_set_dma_idx)(struct pmu_pg_cmd *pg,
+				u8 value);
 	} pmu_ver;
 	struct {
 		int (*get_netlist_name)(int index, char *name);
 		bool (*is_fw_defined)(void);
+		bool use_dma_for_fw_bootstrap;
 	} gr_ctx;
 	struct {
 		bool (*support_sparse)(struct gk20a *g);
@@ -329,17 +352,20 @@ struct gpu_ops {
 				u32 flags,
 				int rw_flag,
 				bool clear_ctags,
-				bool sparse);
+				bool sparse,
+				bool priv,
+				struct vm_gk20a_mapping_batch *batch);
 		void (*gmmu_unmap)(struct vm_gk20a *vm,
 				u64 vaddr,
 				u64 size,
 				int pgsz_idx,
 				bool va_allocated,
 				int rw_flag,
-				bool sparse);
+				bool sparse,
+				struct vm_gk20a_mapping_batch *batch);
 		void (*vm_remove)(struct vm_gk20a *vm);
 		int (*vm_alloc_share)(struct gk20a_as_share *as_share,
-				      u32 flags);
+				      u32 big_page_size, u32 flags);
 		int (*vm_bind_channel)(struct gk20a_as_share *as_share,
 				struct channel_gk20a *ch);
 		int (*fb_flush)(struct gk20a *g);
@@ -356,21 +382,26 @@ struct gpu_ops {
 		const struct gk20a_mmu_level *
 			(*get_mmu_levels)(struct gk20a *g, u32 big_page_size);
 		void (*init_pdb)(struct gk20a *g, void *inst_ptr, u64 pdb_addr);
+		u64 (*get_iova_addr)(struct gk20a *g, struct scatterlist *sgl,
+					 u32 flags);
 	} mm;
 	struct {
 		int (*prepare_ucode)(struct gk20a *g);
 		int (*pmu_setup_hw_and_bootstrap)(struct gk20a *g);
 		int (*pmu_setup_elpg)(struct gk20a *g);
 		int (*init_wpr_region)(struct gk20a *g);
-		bool lspmuwprinitdone;
+		int (*load_lsfalcon_ucode)(struct gk20a *g, u32 falconidmask);
+		u32  lspmuwprinitdone;
+		u32  lsfloadedfalconid;
 		bool fecsbootstrapdone;
-		u32  fecsrecoveryinprogress;
 	} pmu;
 	struct {
+		void (*disable_slowboot)(struct gk20a *g);
 		int (*init_clk_support)(struct gk20a *g);
 		int (*suspend_clk_support)(struct gk20a *g);
 	} clk;
 	bool privsecurity;
+	bool securegpccs;
 	struct {
 		const struct regop_offset_range* (
 				*get_global_whitelist_ranges)(void);
@@ -401,13 +432,14 @@ struct gpu_ops {
 		u32 intr_mask_restore[4];
 	} mc;
 	struct {
-		int (*open)(struct gk20a *g, struct file *filp);
-		void (*release)(struct kref *ref);
-	} tsg;
-	struct {
 		void (*show_dump)(struct gk20a *g,
 				struct gk20a_debug_output *o);
 	} debug;
+	struct {
+		void (*get_program_numbers)(struct gk20a *g,
+					    u32 block_height_log2,
+					    int *hprog, int *vprog);
+	} cde;
 };
 
 struct gk20a {
@@ -443,8 +475,7 @@ struct gk20a {
 	u32 gr_idle_timeout_default;
 	u32 timeouts_enabled;
 
-	u32 ch_wdt_enabled;
-	struct mutex ch_wdt_lock;
+	struct mutex poweroff_lock;
 
 	bool slcg_enabled;
 	bool blcg_enabled;
@@ -462,6 +493,9 @@ struct gk20a {
 	struct dentry *debugfs_ltc_enabled;
 	struct dentry *debugfs_timeouts_enabled;
 	struct dentry *debugfs_gr_idle_timeout_default;
+	struct dentry *debugfs_bypass_smmu;
+	struct dentry *debugfs_disable_bigpage;
+	struct dentry *debugfs_gr_default_attrib_cb_size;
 #endif
 	struct gk20a_ctxsw_ucode_info ctxsw_ucode_info;
 
@@ -470,7 +504,6 @@ struct gk20a {
 	struct mutex dbg_sessions_lock;
 	int dbg_sessions; /* number attached */
 	int dbg_powergating_disabled_refcount; /*refcount for pg disable */
-	int dbg_timeout_disabled_refcount; /*refcount for timeout disable */
 
 	void (*remove_support)(struct platform_device *);
 

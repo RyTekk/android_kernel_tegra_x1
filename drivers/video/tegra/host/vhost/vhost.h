@@ -54,7 +54,7 @@ u32 vhost_channel_alloc_clientid(u64 handle, u32 moduleid);
 struct nvhost_channel *vhost_find_chan_by_clientid(struct nvhost_master *dev,
 			u32 clientid);
 int vhost_rdwr_module_regs(struct platform_device *ndev, u32 count,
-			u32 block_size, u32 *offsets, u32 *values, u32 write);
+	u32 block_size, u32 __user *offsets, u32 __user *values, u32 write);
 
 int nvhost_virt_init(struct platform_device *dev, int moduleid);
 void nvhost_virt_deinit(struct platform_device *dev);

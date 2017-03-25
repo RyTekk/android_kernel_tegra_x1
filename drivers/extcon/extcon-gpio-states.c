@@ -48,6 +48,7 @@ struct gpio_info {
 struct gpio_extcon_platform_data {
 	const char *name;
 	unsigned long debounce;
+	unsigned long wait_for_gpio_scan;
 	unsigned long irq_flags;
 	struct gpio_info *gpios;
 	int n_gpio;
@@ -56,6 +57,7 @@ struct gpio_extcon_platform_data {
 	struct gpio_extcon_cables *cable_states;
 	int n_cable_states;
 	int cable_detect_delay;
+	int init_state;
 };
 
 struct gpio_extcon_info {
@@ -64,7 +66,7 @@ struct gpio_extcon_info {
 	struct delayed_work work;
 	unsigned long debounce_jiffies;
 	struct timer_list timer;
-	int timer_to_work_jiffies;
+	int gpio_scan_work_jiffies;
 	spinlock_t lock;
 	int *gpio_curr_state;
 	struct gpio_extcon_platform_data *pdata;
@@ -72,7 +74,7 @@ struct gpio_extcon_info {
 	int cable_detect_jiffies;
 };
 
-static void gpio_extcon_work(struct work_struct *work)
+static void gpio_extcon_scan_work(struct work_struct *work)
 {
 	int state = 0;
 	int cstate = -1;
@@ -111,7 +113,7 @@ static void gpio_extcon_notifier_timer(unsigned long _data)
 	if (!wake_lock_active(&gpex->wake_lock))
 		wake_lock_timeout(&gpex->wake_lock, gpex->cable_detect_jiffies);
 
-	schedule_delayed_work(&gpex->work, gpex->timer_to_work_jiffies);
+	schedule_delayed_work(&gpex->work, gpex->gpio_scan_work_jiffies);
 }
 
 static irqreturn_t gpio_irq_handler(int irq, void *dev_id)
@@ -143,14 +145,17 @@ static struct gpio_extcon_platform_data *of_get_platform_data(
 	if (!pdata)
 		return ERR_PTR(-ENOMEM);
 
-	of_property_read_string(np, "extcon-gpio,name", &pdata->name);
+	of_property_read_string(np, "label", &pdata->name);
+	if (!pdata->name)
+		of_property_read_string(np, "extcon-gpio,name", &pdata->name);
 	if (!pdata->name)
 		pdata->name = np->name;
 
 	n_gpio = of_gpio_named_count(np, "gpios");
 	if (n_gpio < 1) {
-		dev_err(&pdev->dev, "Not sufficient gpios\n");
-		return ERR_PTR(-EINVAL);
+		ret = of_property_read_u32(np, "cable-connected-on-boot", &pval);
+		pdata->init_state = (!ret) ? pval : -1;
+		goto parse_cable_names;
 	}
 
 	pdata->n_gpio = n_gpio;
@@ -184,23 +189,13 @@ static struct gpio_extcon_platform_data *of_get_platform_data(
 	else
 		pdata->cable_detect_delay = EXTCON_GPIO_STATE_WAKEUP_TIME;
 
-	pdata->n_out_cables = of_property_count_strings(np,
-					"extcon-gpio,out-cable-names");
-	if (pdata->n_out_cables <= 0) {
-		dev_err(&pdev->dev, "not found out cable names\n");
-		return ERR_PTR(-EINVAL);
-	}
+	ret = of_property_read_u32(np, "extcon-gpio,wait-for-gpio-scan", &pval);
+	if (!ret)
+		pdata->wait_for_gpio_scan = pval;
+	else
+		pdata->wait_for_gpio_scan = 100;
 
-	pdata->out_cable_name = devm_kzalloc(&pdev->dev,
-				(pdata->n_out_cables + 1) *
-				sizeof(*pdata->out_cable_name), GFP_KERNEL);
-	if (!pdata->out_cable_name)
-		return ERR_PTR(-ENOMEM);
-	count = 0;
-	of_property_for_each_string(np, "extcon-gpio,out-cable-names",
-						prop, names)
-		pdata->out_cable_name[count++] = names;
-	pdata->out_cable_name[count] = NULL;
+
 
 	pdata->n_cable_states = of_property_count_u32(np,
 						"extcon-gpio,cable-states");
@@ -226,6 +221,25 @@ static struct gpio_extcon_platform_data *of_get_platform_data(
 			pdata->cable_states[count].cstate = pval;
 	}
 
+parse_cable_names:
+	pdata->n_out_cables = of_property_count_strings(np,
+					"extcon-gpio,out-cable-names");
+	if (pdata->n_out_cables <= 0) {
+		dev_err(&pdev->dev, "not found out cable names\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	pdata->out_cable_name = devm_kzalloc(&pdev->dev,
+				(pdata->n_out_cables + 1) *
+				sizeof(*pdata->out_cable_name), GFP_KERNEL);
+	if (!pdata->out_cable_name)
+		return ERR_PTR(-ENOMEM);
+	count = 0;
+	of_property_for_each_string(np, "extcon-gpio,out-cable-names",
+						prop, names)
+		pdata->out_cable_name[count++] = names;
+	pdata->out_cable_name[count] = NULL;
+
 	return pdata;
 }
 
@@ -244,7 +258,7 @@ static int gpio_extcon_probe(struct platform_device *pdev)
 	if (!pdata)
 		return -EINVAL;
 
-	if (!pdata->irq_flags) {
+	if (!pdata->irq_flags && pdata->n_gpio) {
 		dev_err(&pdev->dev, "IRQ flag is not specified.\n");
 		return -EINVAL;
 	}
@@ -258,7 +272,8 @@ static int gpio_extcon_probe(struct platform_device *pdev)
 	gpex->edev.name = pdata->name;
 	gpex->edev.dev.parent = &pdev->dev;
 	gpex->debounce_jiffies = msecs_to_jiffies(pdata->debounce);
-	gpex->timer_to_work_jiffies = msecs_to_jiffies(100);
+	gpex->gpio_scan_work_jiffies = msecs_to_jiffies(
+						pdata->wait_for_gpio_scan);
 	gpex->edev.supported_cable = pdata->out_cable_name;
 	gpex->cable_detect_jiffies =
 			msecs_to_jiffies(pdata->cable_detect_delay);
@@ -284,7 +299,7 @@ static int gpio_extcon_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	INIT_DELAYED_WORK(&gpex->work, gpio_extcon_work);
+	INIT_DELAYED_WORK(&gpex->work, gpio_extcon_scan_work);
 	setup_timer(&gpex->timer, gpio_extcon_notifier_timer,
 			(unsigned long)gpex);
 
@@ -311,7 +326,19 @@ static int gpio_extcon_probe(struct platform_device *pdev)
 	device_wakeup_enable(gpex->dev);
 
 	/* Perform initial detection */
-	gpio_extcon_work(&gpex->work.work);
+	if (gpex->pdata->n_gpio) {
+		gpio_extcon_scan_work(&gpex->work.work);
+	} else {
+		if (pdata->init_state < 0) {
+			dev_info(gpex->dev, "No Cable connected on boot\n");
+			extcon_set_state(&gpex->edev, 0);
+		} else {
+			dev_info(gpex->dev, "Cable %s connected on boot\n",
+				pdata->out_cable_name[pdata->init_state]);
+			extcon_set_state(&gpex->edev, BIT(pdata->init_state));
+		}
+	}
+
 	return 0;
 
 err:
@@ -353,7 +380,7 @@ static int gpio_extcon_resume(struct device *dev)
 		for (i = 0; i < gpex->pdata->n_gpio; ++i)
 			disable_irq_wake(gpex->pdata->gpios[i].irq);
 	}
-	gpio_extcon_work(&gpex->work.work);
+	gpio_extcon_scan_work(&gpex->work.work);
 
 	return 0;
 }

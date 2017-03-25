@@ -29,10 +29,9 @@
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 
-#include <tegra/mc.h>
-#include <tegra/mcerr.h>
-
-#include <mach/tegra_emc.h>
+#include <linux/platform/tegra/mc.h>
+#include <linux/platform/tegra/mcerr.h>
+#include <linux/platform/tegra/tegra_emc.h>
 
 #define MC_CLIENT_HOTRESET_CTRL		0x200
 #define MC_CLIENT_HOTRESET_STAT		0x204
@@ -52,20 +51,10 @@
 	((MC_LATENCY_ALLOWANCE_VI_2 - MC_LATENCY_ALLOWANCE_BASE) / 4 + 1)
 #endif
 
-/* Will be removed once proper header setup is done. */
-#define MC_SECURITY_CARVEOUT2_BOM		0xc5c
-#define MC_SECURITY_CARVEOUT2_BOM_HI		0xc60
-#define MC_SECURITY_CARVEOUT2_SIZE_128KB	0xc64
-
 static DEFINE_SPINLOCK(tegra_mc_lock);
 int mc_channels;
 void __iomem *mc;
-
-/* Only populated if there are 2 channels. */
-static void __iomem *mc0;
-void __iomem *mc1;
-
-int mc_intr_count;
+void __iomem *mc_regs[MC_MAX_CHANNELS];
 
 /*
  * Return carveout info for @co in @inf. If @nr is non-NULL then the number of
@@ -75,6 +64,15 @@ int mc_intr_count;
 int mc_get_carveout_info(struct mc_carveout_info *inf, int *nr,
 			 enum carveout_desc co)
 {
+#define MC_SECURITY_CARVEOUT(carveout, infop)				\
+	do {								\
+		(infop)->desc = co;					\
+		(infop)->base = mc_readl(carveout ## _BOM) |		\
+			((u64)mc_readl(carveout ## _BOM_HI) & 0x3) << 32; \
+		(infop)->size = mc_readl(carveout ## _SIZE_128KB);	\
+		(infop)->size <<= 17; /* Convert to bytes. */		\
+	} while (0)
+
 	if (!mc) {
 		WARN(1, "Reading carveout info before MC init'ed!\n");
 		return 0;
@@ -90,15 +88,22 @@ int mc_get_carveout_info(struct mc_carveout_info *inf, int *nr,
 		return 0;
 
 	switch (co) {
+	case MC_SECURITY_CARVEOUT1:
+#ifdef MC_SECURITY_CARVEOUT1_BOM
+		MC_SECURITY_CARVEOUT(MC_SECURITY_CARVEOUT1, inf);
+		break;
+#else
+		return -ENODEV;
+#endif
 	case MC_SECURITY_CARVEOUT2:
-		inf->desc = co;
-		inf->base = mc_readl(MC_SECURITY_CARVEOUT2_BOM) |
-		      ((u64)mc_readl(MC_SECURITY_CARVEOUT2_BOM_HI) & 0x3) << 32;
-		inf->size = mc_readl(MC_SECURITY_CARVEOUT2_SIZE_128KB);
-		inf->size <<= 17; /* Convert to bytes. */
+#ifdef MC_SECURITY_CARVEOUT2_BOM
+		MC_SECURITY_CARVEOUT(MC_SECURITY_CARVEOUT2, inf);
+		break;
+#else
+		return -ENODEV;
+#endif
 	default:
-		/* Should never happen. */
-		BUG();
+		return -EINVAL;
 	}
 
 	return 0;
@@ -143,14 +148,17 @@ void tegra_mc_timing_restore(void)
 	u32 *ctx = mc_boot_timing;
 
 	for (off = MC_EMEM_ARB_CFG; off <= MC_EMEM_ARB_TIMING_W2R; off += 4)
-		__mc_raw_writel(0, *ctx++, off);
+		__mc_raw_writel(MC_BROADCAST_CHANNEL, *ctx++, off);
 
 	for (off = MC_EMEM_ARB_DA_TURNS; off <= MC_EMEM_ARB_MISC1; off += 4)
-		__mc_raw_writel(0, *ctx++, off);
+		__mc_raw_writel(MC_BROADCAST_CHANNEL, *ctx++, off);
 
-	__mc_raw_writel(0, *ctx++, MC_EMEM_ARB_RING3_THROTTLE);
-	__mc_raw_writel(0, *ctx++, MC_EMEM_ARB_OVERRIDE);
-	__mc_raw_writel(0, *ctx++, MC_RESERVED_RSV);
+	__mc_raw_writel(MC_BROADCAST_CHANNEL, *ctx++,
+			MC_EMEM_ARB_RING3_THROTTLE);
+	__mc_raw_writel(MC_BROADCAST_CHANNEL, *ctx++,
+			MC_EMEM_ARB_OVERRIDE);
+	__mc_raw_writel(MC_BROADCAST_CHANNEL, *ctx++,
+			MC_RESERVED_RSV);
 
 #if defined(CONFIG_ARCH_TEGRA_12x_SOC)
 	tegra12_mc_latency_allowance_restore(&ctx);
@@ -159,7 +167,7 @@ void tegra_mc_timing_restore(void)
 #else
 	for (off = MC_LATENCY_ALLOWANCE_BASE; off <= MC_LATENCY_ALLOWANCE_VI_2;
 		off += 4)
-		__mc_raw_writel(0, *ctx++, off);
+		__mc_raw_writel(MC_BROADCAST_CHANNEL, *ctx++, off);
 #endif
 
 	mc_writel(*ctx++, MC_INT_MASK);
@@ -345,6 +353,7 @@ EXPORT_SYMBOL(tegra_mc_flush_done);
  */
 static void __iomem *tegra_mc_map_regs(struct platform_device *pdev, int device)
 {
+	struct resource res;
 	const void *prop;
 	void __iomem *regs;
 	void __iomem *regs_start = NULL;
@@ -373,6 +382,12 @@ static void __iomem *tegra_mc_map_regs(struct platform_device *pdev, int device)
 			regs_start = regs;
 	}
 
+	if (of_address_to_resource(pdev->dev.of_node, start, &res))
+		return NULL;
+
+	pr_info("mapped MMIO address: 0x%p -> 0x%lx\n",
+		regs_start, (unsigned long)res.start);
+
 	return regs_start;
 }
 
@@ -390,8 +405,9 @@ static int tegra_mc_probe(struct platform_device *pdev)
 #if defined(CONFIG_TEGRA_MC_EARLY_ACK)
 	u32 reg;
 #endif
+	int i;
 	const void *prop;
-	struct dentry *mc_debugfs_dir;
+	struct dentry *mc_debugfs_dir = NULL;
 	const struct of_device_id *match;
 
 	if (!pdev->dev.of_node)
@@ -412,7 +428,7 @@ static int tegra_mc_probe(struct platform_device *pdev)
 	else
 		mc_channels = be32_to_cpup(prop);
 
-	if (mc_channels != 1 && mc_channels != 2) {
+	if (mc_channels > MC_MAX_CHANNELS || mc_channels < 1) {
 		pr_err("Invalid number of memory channels: %d\n", mc_channels);
 		return -EINVAL;
 	}
@@ -423,21 +439,17 @@ static int tegra_mc_probe(struct platform_device *pdev)
 	mc = tegra_mc_map_regs(pdev, 0);
 	if (!mc)
 		return -ENOMEM;
-	pr_info("MC mapped MMIO address: 0x%p\n", mc);
 
-	if (mc_dual_channel()) {
-		mc0 = tegra_mc_map_regs(pdev, 1);
-		if (!mc0) {
-			pr_err("Failed to make channel 0\n");
-			return -ENOMEM;
+	/* Populate the rest of the channels... */
+	if (mc_channels > 1) {
+		for (i = 1; i <= mc_channels; i++) {
+			mc_regs[i - 1] = tegra_mc_map_regs(pdev, i);
+			if (!mc_regs[i - 1])
+				return -ENOMEM;
 		}
-		pr_info("MC0 mapped MMIO address: 0x%p\n", mc0);
-		mc1 = tegra_mc_map_regs(pdev, 2);
-		if (!mc1) {
-			pr_err("Failed to make channel 0\n");
-			return -ENOMEM;
-		}
-		pr_info("MC1 mapped MMIO address: 0x%p\n", mc1);
+	} else {
+		/* Make channel 0 the same as the MC broadcast range. */
+		mc_regs[0] = mc;
 	}
 
 	tegra_mc_timing_save();
@@ -452,12 +464,12 @@ static int tegra_mc_probe(struct platform_device *pdev)
 	mc_writel(reg, MC_EMEM_ARB_OVERRIDE);
 #endif
 
+#ifdef CONFIG_DEBUG_FS
 	mc_debugfs_dir = debugfs_create_dir("mc", NULL);
-	if (mc_debugfs_dir == NULL) {
+	if (mc_debugfs_dir == NULL)
 		pr_err("Failed to make debugfs node: %ld\n",
 		       PTR_ERR(mc_debugfs_dir));
-		return PTR_ERR(mc_debugfs_dir);
-	}
+#endif
 
 	tegra_mcerr_init(mc_debugfs_dir, pdev);
 

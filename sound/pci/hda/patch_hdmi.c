@@ -4,7 +4,7 @@
  *
  *  Copyright(c) 2008-2010 Intel Corporation. All rights reserved.
  *  Copyright (c) 2006 ATI Technologies Inc.
- *  Copyright (c) 2008-2015, NVIDIA CORPORATION.  All rights reserved.
+ *  Copyright (c) 2008-2016, NVIDIA CORPORATION.  All rights reserved.
  *  Copyright (c) 2008 Wei Ni <wni@nvidia.com>
  *
  *  Authors:
@@ -120,7 +120,9 @@ struct dp_audio_infoframe {
 	u8 type; /* 0x84 */
 	u8 len;  /* 0x1b */
 	u8 ver;  /* 0x11 << 2 */
-
+#ifdef CONFIG_SND_HDA_PLATFORM_NVIDIA_TEGRA
+	u8 checksum;
+#endif
 	u8 CC02_CT47;	/* match with HDMI infoframe from this on */
 	u8 SS01_SF24;
 	u8 CXT04;
@@ -1125,8 +1127,9 @@ static int hdmi_setup_stream(struct hda_codec *codec, hda_nid_t cvt_nid,
 	if (codec->vendor_id == 0x80862807)
 		haswell_verify_pin_D0(codec, pin_nid);
 
-	/* Assuming the HW supports HBR for Tegra21x HDMI */
+	/* Assuming the HW supports HBR for Tegra12x, Tegra21x tegra HDMI */
 	if ((snd_hda_query_pin_caps(codec, pin_nid) & AC_PINCAP_HBR) ||
+		(codec->preset->id == 0x10de0028) ||
 		(codec->preset->id == 0x10de0029)) {
 		pinctl = snd_hda_codec_read(codec, pin_nid, 0,
 					    AC_VERB_GET_PIN_WIDGET_CONTROL, 0);
@@ -1196,6 +1199,16 @@ static int hdmi_pcm_open(struct hda_pcm_stream *hinfo,
 				return -ENODEV;
 			}
 		}
+#ifndef CONFIG_ANDROID
+		if (!eld->info.lpcm_sad_ready) {
+			/* hdmi detected, wait for eld available */
+			int wait_count = 3;
+
+			do {
+				usleep_range(5000, 10000);
+			} while (!eld->info.lpcm_sad_ready && wait_count-- > 0);
+		}
+#endif
 		if (!eld->info.lpcm_sad_ready)
 			return -ENODEV;
 		hinfo->pcm_open_retry_count = 0;
@@ -1564,6 +1577,9 @@ static bool check_non_pcm_per_cvt(struct hda_codec *codec, hda_nid_t cvt_nid)
  * HDMI callbacks
  */
 
+#define is_pcm_format(format) \
+	((format & (1 << AC_FMT_TYPE_SHIFT)) == (AC_FMT_TYPE_PCM))
+
 static int generic_hdmi_playback_pcm_prepare(struct hda_pcm_stream *hinfo,
 					   struct hda_codec *codec,
 					   unsigned int stream_tag,
@@ -1590,7 +1606,8 @@ static int generic_hdmi_playback_pcm_prepare(struct hda_pcm_stream *hinfo,
 		(codec->preset->id == 0x10de002a)) {
 		int err = 0;
 
-		if (substream->runtime->channels == 2)
+		if ((substream->runtime->channels == 2) &&
+			is_pcm_format(format))
 			tegra_hdmi_audio_null_sample_inject(true);
 		else
 			tegra_hdmi_audio_null_sample_inject(false);
@@ -1641,6 +1658,15 @@ static int hdmi_pcm_close(struct hda_pcm_stream *hinfo,
 	int pinctl;
 
 	if (hinfo->nid) {
+#if defined(CONFIG_SND_HDA_PLATFORM_NVIDIA_TEGRA) && defined(CONFIG_TEGRA_DC)
+		if ((codec->preset->id == 0x10de0020) ||
+			(codec->preset->id == 0x10de0022) ||
+			(codec->preset->id == 0x10de0028) ||
+			(codec->preset->id == 0x10de0029) ||
+			(codec->preset->id == 0x10de002a)) {
+			tegra_hdmi_audio_null_sample_inject(false);
+		}
+#endif
 		cvt_idx = cvt_nid_to_cvt_index(spec, hinfo->nid);
 		if (snd_BUG_ON(cvt_idx < 0))
 			return -EINVAL;

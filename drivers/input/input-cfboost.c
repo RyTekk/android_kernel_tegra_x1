@@ -80,8 +80,6 @@ static struct device *gpu_device;
 module_param(boost_gpu, uint, 0644);
 static DEFINE_MUTEX(gpu_device_lock);
 
-static unsigned long last_boost_jiffies;
-
 int cfb_add_device(struct device *dev)
 {
 	mutex_lock(&gpu_device_lock);
@@ -146,11 +144,7 @@ static void cfb_input_event(struct input_handle *handle, unsigned int type,
 			    unsigned int code, int value)
 {
 	trace_input_cfboost_event("event", type, code, value);
-	if (jiffies < last_boost_jiffies ||
-		jiffies > last_boost_jiffies + msecs_to_jiffies(boost_time/2)) {
-		queue_kthread_work(&boost_worker, &boost_work);
-		last_boost_jiffies = jiffies;
-	}
+	queue_kthread_work(&boost_worker, &boost_work);
 }
 
 static int cfb_input_connect(struct input_handler *handler,
@@ -193,15 +187,18 @@ static void cfb_input_disconnect(struct input_handle *handle)
 
 /* XXX make configurable */
 static const struct input_device_id cfb_ids[] = {
-	{ /* touch screens send this at wakeup */
+	{ /* raydium touch screen */
 		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |
-				INPUT_DEVICE_ID_MATCH_MSCIT,
-		.evbit = { BIT_MASK(EV_MSC) },
-		.mscbit = {BIT_MASK(MSC_ACTIVITY)},
-	},
-	{ /* trigger on any touch screen events */
-		.flags = INPUT_DEVICE_ID_MATCH_EVBIT,
+				INPUT_DEVICE_ID_MATCH_KEYBIT,
 		.evbit = { BIT_MASK(EV_ABS) },
+		.keybit = {[BIT_WORD(BTN_TOOL_RUBBER)] =
+			BIT_MASK(BTN_TOOL_RUBBER) },
+	},
+	{ /* other touch screen */
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |
+				INPUT_DEVICE_ID_MATCH_KEYBIT,
+		.evbit = { BIT_MASK(EV_ABS) },
+		.keybit = {[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH) },
 	},
 	{ /* mouse */
 		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |

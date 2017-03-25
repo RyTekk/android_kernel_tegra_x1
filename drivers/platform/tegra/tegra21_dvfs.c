@@ -93,7 +93,7 @@ static struct dvfs_rail tegra21_dvfs_rail_vdd_cpu = {
 	.stats = {
 		.bin_uV = 6250, /* 6.25mV */
 	},
-	.version = "p4v57_p4Av05",
+	.version = "p4v58_p4Av07",
 };
 
 static struct dvfs_rail tegra21_dvfs_rail_vdd_core = {
@@ -131,6 +131,8 @@ static struct dvfs_rail *tegra21_dvfs_rails[] = {
 	&tegra21_dvfs_rail_vdd_core,
 	&tegra21_dvfs_rail_vdd_gpu,
 };
+
+static struct clk *dfll_clk;
 
 /* FIXME: Remove after bringup */
 #define BRINGUP_CVB_V_MARGIN	25
@@ -192,6 +194,32 @@ static struct dvfs_rail *tegra21_dvfs_rails[] = {
 		{ 0,	   { }, { }, }, \
 	}
 
+/*
+ * This function solves the relationship between CPU and GPU Vmin
+ * and sets the new Vmin in cl_dvfs.
+ */
+static int tegra21_dvfs_rel_vdd_gpu_vdd_cpu(struct dvfs_rail *vdd_gpu,
+				struct dvfs_rail *vdd_cpu)
+{
+	int new_cl_dvfs_mv;
+
+	new_cl_dvfs_mv = max(vdd_gpu->millivolts, vdd_gpu->new_millivolts);
+
+	tegra_dvfs_set_rail_relations_dfll_vmin(dfll_clk, new_cl_dvfs_mv);
+
+	return max(vdd_cpu->new_millivolts, new_cl_dvfs_mv);
+}
+
+
+static struct dvfs_relationship tegra21_dvfs_relationships[] = {
+	{
+		.from = &tegra21_dvfs_rail_vdd_gpu,
+		.to = &tegra21_dvfs_rail_vdd_cpu,
+		.solve = tegra21_dvfs_rel_vdd_gpu_vdd_cpu,
+		.solved_at_nominal = true,
+	},
+};
+
 #define CPU_CVB_TABLE_EUCM1	\
 	.freqs_mult = KHZ,	\
 	.speedo_scale = 100,	\
@@ -241,7 +269,100 @@ static struct dvfs_rail *tegra21_dvfs_rails[] = {
 		{ 0,	   { }, { }, }, \
 	}
 
+#define CPU_CVB_TABLE_EUCM2_JOINT_RAIL \
+	.freqs_mult = KHZ,	\
+	.speedo_scale = 100,	\
+	.voltage_scale = 1000,	\
+	.cvb_table = {		\
+		/* f	  dfll:    c0,       c1,       c2    pll:    c0,       c1,       c2 */   \
+		{  204000, {  742283 ,        0,        0 }, {        0,        0,        0 } }, \
+		{  306000, {  776249 ,        0,        0 }, {        0,        0,        0 } }, \
+		{  408000, {  810215 ,        0,        0 }, {        0,        0,        0 } }, \
+		{  510000, {  844181 ,        0,        0 }, {        0,        0,        0 } }, \
+		{  612000, {  878147 ,        0,        0 }, {        0,        0,        0 } }, \
+		{  714000, {  912113 ,        0,        0 }, {        0,        0,        0 } }, \
+		{  816000, {  946079 ,        0,        0 }, {        0,        0,        0 } }, \
+		{  918000, {  980045 ,        0,        0 }, {        0,        0,        0 } }, \
+		{ 1020000, {  1014011,        0,        0 }, { -2875621,   358099,    -8585 } }, \
+		{ 1122000, {  1047977,        0,        0 }, {   -52225,   104159,    -2816 } }, \
+		{ 1224000, {  1081943,        0,        0 }, {  1076868,     8356,     -727 } }, \
+		{ 1326000, {  1090000,        0,        0 }, {  2208191,   -84659,     1240 } }, \
+		{ 1479000, {  1090000,        0,        0 }, {  2519460,  -105063,     1611 } }, \
+		{ 1504500, {  1120000,        0,        0 }, {  2639809,  -108729,     1626 } }, \
+		{ 0,	   { }, { }, }, \
+	}
+
 static struct cpu_cvb_dvfs cpu_cvb_dvfs_table[] = {
+	{
+		.speedo_id = 10,
+		.process_id = 0,
+		.dfll_tune_data  = {
+			.tune0		= 0xFFEAD0FF,
+			.tune0_high_mv	= 0xFFEAD0FF,
+			.tune_high_min_millivolts = 864,
+			.tune1		= 0x020091D9,
+			.droop_rate_min = 1000000,
+			.min_millivolts = 840,
+		},
+		.pll_tune_data = {
+			.min_millivolts = 950,
+		},
+		.max_mv = 1120,
+		.max_freq = 1504500,
+		CPU_CVB_TABLE_EUCM2_JOINT_RAIL,
+	},
+	{
+		.speedo_id = 10,
+		.process_id = 1,
+		.dfll_tune_data  = {
+			.tune0		= 0xFFEAD0FF,
+			.tune0_high_mv	= 0xFFEAD0FF,
+			.tune_high_min_millivolts = 864,
+			.tune1		= 0x025501D0,
+			.droop_rate_min = 1000000,
+			.min_millivolts = 840,
+		},
+		.pll_tune_data = {
+			.min_millivolts = 950,
+		},
+		.max_mv = 1120,
+		.max_freq = 1504500,
+		CPU_CVB_TABLE_EUCM2_JOINT_RAIL,
+	},
+
+	{
+		.speedo_id = 9,
+		.process_id = 0,
+		.dfll_tune_data  = {
+			.tune0		= 0xFFEAD0FF,
+			.tune1		= 0x020091D9,
+			.droop_rate_min = 1000000,
+			.min_millivolts = 900,
+		},
+		.pll_tune_data = {
+			.min_millivolts = 950,
+		},
+		.max_mv = 1162,
+		.max_freq = 1555500,
+		CPU_CVB_TABLE_EUCM2,
+	},
+	{
+		.speedo_id = 9,
+		.process_id = 1,
+		.dfll_tune_data  = {
+			.tune0		= 0xFFEAD0FF,
+			.tune1		= 0x025501D0,
+			.droop_rate_min = 1000000,
+			.min_millivolts = 900,
+		},
+		.pll_tune_data = {
+			.min_millivolts = 950,
+		},
+		.max_mv = 1162,
+		.max_freq = 1555500,
+		CPU_CVB_TABLE_EUCM2,
+	},
+
 	{
 		.speedo_id = 8,
 		.process_id = 0,
@@ -1100,7 +1221,7 @@ static struct dvfs qspi_sdr_dvfs_table[] = {
 };
 
 static struct dvfs qspi_ddr_dvfs_table[] = {
-	CORE_DVFS("qspi",		-1, -1, 1, KHZ,	  81600,   81600,   81600,   81600,   81600,   81600,   81600,   81600,   81600,   81600,   81600,   81600,   81600,   81600,   81600),
+	CORE_DVFS("qspi",		-1, -1, 1, KHZ,	 163200,  163200,  163200,  163200,  163200,  163200,  163200,  163200,  163200,  163200,  163200,  163200,  163200,  163200,  163200),
 };
 
 static int tegra_dvfs_disable_core_set(const char *arg,
@@ -2043,9 +2164,7 @@ static int __init get_core_nominal_mv_index(int speedo_id)
 		core_edp_voltage = 1125;	/* default 1.125V EDP limit */
 
 	mv = min(mv, core_edp_voltage);
-#ifndef CONFIG_TEGRA_CORE_DVFS
-	mv = min(mv, 1000);		/* Vmax if scaling is disabled */
-#endif
+
 	/* Round nominal level down to the nearest core scaling step */
 	for (i = 0; i < MAX_DVFS_FREQS; i++) {
 		if ((core_millivolts[i] == 0) || (mv < core_millivolts[i]))
@@ -2138,7 +2257,14 @@ void __init tegra21x_init_dvfs(void)
 	int gpu_max_freq_index = 0;
 	int cpu_max_freq_index = 0;
 	int cpu_lp_max_freq_index = 0;
+	bool darcy_sku = false;
+	bool joint_xpu_rail = false;
 
+#ifdef CONFIG_OF
+	joint_xpu_rail = of_property_read_bool(of_chosen,
+					"nvidia,tegra-joint_xpu_rail");
+	darcy_sku = of_machine_is_compatible("nvidia,darcy");
+#endif
 #ifndef CONFIG_TEGRA_CORE_DVFS
 	tegra_dvfs_core_disabled = true;
 #endif
@@ -2194,6 +2320,20 @@ void __init tegra21x_init_dvfs(void)
 	/* Init rail structures and dependencies */
 	tegra_dvfs_init_rails(tegra21_dvfs_rails,
 		ARRAY_SIZE(tegra21_dvfs_rails));
+
+	if (darcy_sku && joint_xpu_rail) {
+		pr_info("tegra_dvfs: CPU-GPU realtionship for Darcy SKU\n");
+		/* Add DVFS relationships */
+		tegra_dvfs_add_relationships(tegra21_dvfs_relationships,
+				ARRAY_SIZE(tegra21_dvfs_relationships));
+
+		/* Get handle for dfll clock that will be used for
+		 * solving the relationship and setting new Vmin
+		 * of CL DVFS */
+		dfll_clk = tegra_get_clock_by_name("dfll_cpu");
+		if (!dfll_clk)
+			pr_err("DVFS:%s: dfll cpu clock is NULL!", __func__);
+	}
 
 	/* Search core dvfs table for speedo/process matching entries and
 	   initialize dvfs-ed clocks */
@@ -2252,6 +2392,7 @@ int tegra_dvfs_rail_post_enable(struct dvfs_rail *rail)
 /* Core voltage and bus cap object and tables */
 static struct kobject *cap_kobj;
 static struct kobject *gpu_kobj;
+static struct kobject *emc_kobj;
 
 static struct core_dvfs_cap_table tegra21_core_cap_table[] = {
 	{ .cap_name = "cap.vcore.c2bus" },
@@ -2286,6 +2427,20 @@ static struct core_bus_rates_table tegra21_gpu_rates_sysfs = {
 		.attr = {.name = "gpu_available_rates", .mode = 0444} },
 	.time_at_user_rate_attr = {
 		.attr = {.name = "gpu_time_at_user_rate", .mode = 0444} },
+};
+
+static struct core_bus_limit_table tegra21_emc_floor_sysfs = {
+	.limit_clk_name = "floor.profile.emc",
+	.refcnt_attr = {.attr = {.name = "emc_floor_state", .mode = 0644} },
+	.level_attr  = {.attr = {.name = "emc_floor_rate", .mode = 0644} },
+	.pm_qos_class = PM_QOS_EMC_FREQ_MIN,
+};
+
+static struct core_bus_rates_table tegra21_emc_rates_sysfs = {
+	.bus_clk_name = "emc",
+	.rate_attr = {.attr = {.name = "emc_rate", .mode = 0444} },
+	.available_rates_attr = {
+		.attr = {.name = "emc_available_rates", .mode = 0444} },
 };
 
 /*
@@ -2377,7 +2532,31 @@ static int __init tegra21_dvfs_init_core_cap(void)
 		return 0;
 	}
 
-	pr_info("tegra dvfs: tegra sysfs gpu interface is initialized\n");
+	emc_kobj = kobject_create_and_add("tegra_emc", kernel_kobj);
+	if (!emc_kobj) {
+		pr_err("tegra21_dvfs: failed to create sysfs emc object\n");
+		return 0;
+	}
+
+	ret = tegra_init_sysfs_shared_bus_rate(&tegra21_emc_rates_sysfs,
+					       1, emc_kobj);
+	if (ret) {
+		pr_err("tegra21_dvfs: failed to init emc rates interface (%d)\n",
+		       ret);
+		kobject_del(emc_kobj);
+		return 0;
+	}
+
+	ret = tegra_init_shared_bus_floor(&tegra21_emc_floor_sysfs,
+					  1, emc_kobj);
+	if (ret) {
+		pr_err("tegra21_dvfs: failed to init emc floor interface (%d)\n",
+		       ret);
+		kobject_del(emc_kobj);
+		return 0;
+	}
+
+	pr_info("tegra dvfs: tegra sysfs gpu & emc interface is initialized\n");
 
 	return 0;
 }

@@ -1,7 +1,7 @@
 /*
  * camera.c - generic camera device driver
  *
- * Copyright (c) 2013-2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * Contributors:
  *	Charlie Huang <chahuang@nvidia.com>
@@ -33,7 +33,6 @@
 #include <linux/clk.h>
 
 #include "t124/t124.h"
-#include <isp.h>
 #include <media/camera.h>
 
 #include "camera_platform.h"
@@ -1198,7 +1197,7 @@ static int camera_remove(struct platform_device *dev)
 
 	camera_ref_lock();
 
-	atomic_xchg(&cam_desc.in_use, 0);
+	(void)atomic_xchg(&cam_desc.in_use, 0);
 	misc_deregister(&cam_desc.miscdev);
 
 	list_for_each_entry(cam, cam_desc.app_list, list) {
@@ -1212,9 +1211,6 @@ static int camera_remove(struct platform_device *dev)
 		camera_remove_device(cdev);
 	}
 
-#ifdef TEGRA_12X_OR_HIGHER_CONFIG
-	tegra_isp_unregister_mfi_cb();
-#endif
 	camera_debugfs_remove();
 
 	kfree(cam_desc.layout);
@@ -1253,10 +1249,6 @@ static int camera_probe(struct platform_device *dev)
 	strcpy(cam_desc.dname, "camera.pcl");
 	dev_set_drvdata(&dev->dev, &cam_desc);
 
-#ifdef TEGRA_12X_OR_HIGHER_CONFIG
-	camera_dev_sync_init();
-	tegra_isp_register_mfi_cb(camera_dev_sync_cb, NULL);
-#endif
 	of_camera_init(&cam_desc);
 
 	cam_desc.miscdev.name = cam_desc.dname;
@@ -1284,7 +1276,7 @@ static void camera_shutdown(struct platform_device *dev)
 	dev_dbg(&dev->dev, "%s ...\n", __func__);
 
 	camera_ref_lock();
-	atomic_xchg(&cam_desc.in_use, 0);
+	(void)atomic_xchg(&cam_desc.in_use, 0);
 	dev_info(&dev->dev, "%s locked.\n", __func__);
 }
 

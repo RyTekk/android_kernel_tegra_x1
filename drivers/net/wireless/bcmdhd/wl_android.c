@@ -89,9 +89,11 @@
 #define CMD_P2P_DEV_ADDR	"P2P_DEV_ADDR"
 #define CMD_SETFWPATH		"SETFWPATH"
 #define CMD_SETBAND		"SETBAND"
+#define CMD_UPDATE_CHANNEL_LIST "UPDATE_CHANNEL_LIST"
 #define CMD_GETBAND		"GETBAND"
 #define CMD_COUNTRY		"COUNTRY"
 #define CMD_NV_COUNTRY         "NV_COUNTRY"
+#define CMD_RESTRICT_BW_20	"RESTRICT_BW_20"
 #define CMD_P2P_SET_NOA		"P2P_SET_NOA"
 #if !defined WL_ENABLE_P2P_IF
 #define CMD_P2P_GET_NOA			"P2P_GET_NOA"
@@ -113,6 +115,8 @@
 #define CMD_RXRATESTATS		"RXRATESTATS"
 #define CMD_MAXLINKSPEED	"MAXLINKSPEED"
 #define CMD_AMPDU_SEND_DELBA	"AMPDU_SEND_DELBA"
+#define CMD_SETBTCPARAMS	"SETBTCPARAMS"
+#define CMD_GETBTCPARAMS	"GETBTCPARAMS"
 
 /* Commands for iovar settings */
 #define CMD_SETIOVAR           "SETIOVAR"
@@ -257,6 +261,8 @@ int wl_cfg80211_get_p2p_noa(struct net_device *net, char* buf, int len)
 int wl_cfg80211_set_p2p_ps(struct net_device *net, char* buf, int len)
 { return 0; }
 #endif /* WK_CFG80211 */
+int wl_btcoex_set_btcparams(struct net_device *dev, char *command, int total_len);
+int wl_btcoex_get_btcparams(struct net_device *dev, char *command, int total_len);
 
 extern int dhd_set_slpauto_mode(struct net_device *dev, s32 val);
 
@@ -1056,6 +1062,9 @@ int wl_android_wifi_on(struct net_device *dev)
 				break;
 			DHD_ERROR(("\nfailed to power up wifi chip, retry again (%d left) **\n\n",
 				retry));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+			TEGRA_SYSFS_HISTOGRAM_STAT_INC(wifi_on_retry);
+#endif
 #ifdef BCMPCIE
 			dhd_net_bus_devreset(dev, TRUE);
 #endif /* BCMPCIE */
@@ -1063,12 +1072,18 @@ int wl_android_wifi_on(struct net_device *dev)
 		} while (retry-- > 0);
 		if (ret != 0) {
 			DHD_ERROR(("\nfailed to power up wifi chip, max retry reached **\n\n"));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+			TEGRA_SYSFS_HISTOGRAM_STAT_INC(wifi_on_fail);
+#endif
 			goto exit;
 		}
 #ifdef BCMSDIO
 		ret = dhd_net_bus_devreset(dev, FALSE);
 		dhd_net_bus_resume(dev, 1);
 #endif /* BCMSDIO */
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+		TEGRA_SYSFS_HISTOGRAM_STAT_INC(wifi_on_success);
+#endif
 
 #ifndef BCMPCIE
 		if (!ret) {
@@ -1377,8 +1392,8 @@ int wl_android_set_roam_mode(struct net_device *dev, char *command, int total_le
 		return -1;
 	}
 	else
-		DHD_ERROR(("%s: succeeded to set roaming Mode %d, error = %d\n",
-		__FUNCTION__, mode, error));
+		DHD_NV_INFO(("succeeded to set roaming Mode %d, error = %d\n",
+					 mode, error));
 	return 0;
 }
 
@@ -2392,7 +2407,7 @@ static int wl_android_get_link_status(struct net_device *dev, char *command,
 	return bytes_written;
 }
 
-
+extern u32 restrict_bw_20;
 int wl_android_priv_cmd(struct net_device *net, struct ifreq *ifr, int cmd)
 {
 #define PRIVATE_COMMAND_MAX_LEN	8192
@@ -2531,6 +2546,12 @@ int wl_android_priv_cmd(struct net_device *net, struct ifreq *ifr, int cmd)
 	else if (strnicmp(command, CMD_SETBAND, strlen(CMD_SETBAND)) == 0) {
 		uint band = *(command + strlen(CMD_SETBAND) + 1) - '0';
 		bytes_written = wldev_set_band(net, band);
+	} else if (strnicmp(command, CMD_UPDATE_CHANNEL_LIST,
+			strlen(CMD_UPDATE_CHANNEL_LIST)) == 0) {
+#ifdef WL_CFG80211
+		wl_update_wiphybands(NULL, true);
+#endif
+		bytes_written = 0;
 	}
 	else if (strnicmp(command, CMD_GETBAND, strlen(CMD_GETBAND)) == 0) {
 		bytes_written = wl_android_get_band(net, command, priv_cmd.total_len);
@@ -2538,20 +2559,23 @@ int wl_android_priv_cmd(struct net_device *net, struct ifreq *ifr, int cmd)
 #ifdef WL_CFG80211
 	/* CUSTOMER_SET_COUNTRY feature is define for only GGSM model */
 	else if (strnicmp(command, CMD_COUNTRY, strlen(CMD_COUNTRY)) == 0) {
-#ifdef CUSTOMER_HW5
-		char *country_code = command + strlen(CMD_COUNTRY) + 1;
-		/* Customer_hw5 want to keep connections */
-		bytes_written = wldev_set_country(net, country_code, true, false);
-#else
 		/* We use only NV_COUNTRY command to set the country code
-		 * Do not allow default COUNTRY command to set the country code */
+		 * Do not allow default COUNTRY command as third party apps
+		 * can manipulate WiFi country code */
 		bytes_written = 0;
-#endif
 	} else if (strnicmp(command, CMD_NV_COUNTRY, strlen(CMD_NV_COUNTRY)) == 0) {
 		char *country_code = command + strlen(CMD_NV_COUNTRY) + 1;
 		bytes_written = wldev_set_country(net, country_code, true, false);
 	}
 #endif /* WL_CFG80211 */
+	else if (strnicmp(command, CMD_RESTRICT_BW_20, strlen(CMD_GETBAND)) == 0) {
+		bytes_written = -1;
+		uint val = *(command + strlen(CMD_RESTRICT_BW_20) + 1) - '0';
+		if (val == 0 || val == 1) {
+			restrict_bw_20 = val;
+			bytes_written = 0;
+		}
+	}
 	else if (strnicmp(command, CMD_SET_CSA, strlen(CMD_SET_CSA)) == 0) {
 		bytes_written = wl_android_set_csa(net, command, priv_cmd.total_len);
 	} else if (strnicmp(command, CMD_80211_MODE, strlen(CMD_80211_MODE)) == 0) {
@@ -2703,6 +2727,12 @@ int wl_android_priv_cmd(struct net_device *net, struct ifreq *ifr, int cmd)
 		bytes_written = wl_android_set_wfds_hash(net, command, priv_cmd.total_len, 0);
 	}
 #endif /* WLWFDS */
+	else if (strnicmp(command, CMD_SETBTCPARAMS, strlen(CMD_SETBTCPARAMS)) == 0) {
+		bytes_written = wl_btcoex_set_btcparams(net, command, priv_cmd.total_len);
+	}
+	else if (strnicmp(command, CMD_GETBTCPARAMS, strlen(CMD_GETBTCPARAMS)) == 0) {
+		bytes_written = wl_btcoex_get_btcparams(net, command, priv_cmd.total_len);
+	}
 	else {
 		DHD_ERROR(("Unknown PRIVATE command %s - ignored\n", command));
 		snprintf(command, 3, "OK");

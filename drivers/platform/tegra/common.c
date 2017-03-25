@@ -52,6 +52,7 @@
 #endif
 #include <linux/gk20a.h>
 #include <linux/tegra_smmu.h>
+#include <linux/tegra_pm_domains.h>
 
 #ifdef CONFIG_ARM64
 #include <linux/irqchip/arm-gic.h>
@@ -61,6 +62,7 @@
 #include <asm/hardware/cache-l2x0.h>
 #endif
 #include <asm/dma-mapping.h>
+#include <asm/dma-contiguous.h>
 
 #include <mach/nct.h>
 #include <mach/dc.h>
@@ -124,7 +126,49 @@
 #define CONSOLE_MEM_SIZE SZ_512K
 #define FTRACE_MEM_SIZE SZ_512K
 #define RTRACE_MEM_SIZE SZ_512K
-#define PMSG_MEM_SIZE SZ_256K
+#endif
+
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+#ifdef CONFIG_ARCH_TEGRA_HAS_SATA
+static struct of_device_id tegra_sata_pd[] = {
+	{ .compatible = "nvidia, tegra210-sata-pd", },
+	{ .compatible = "nvidia, tegra132-sata-pd", },
+	{ .compatible = "nvidia, tegra124-sata-pd", },
+	{},
+};
+#endif
+
+#ifdef CONFIG_ARCH_TEGRA_HAS_PCIE
+static struct of_device_id tegra_pcie_pd[] = {
+	{ .compatible = "nvidia, tegra210-pcie-pd", },
+	{ .compatible = "nvidia, tegra132-pcie-pd", },
+	{ .compatible = "nvidia, tegra124-pcie-pd", },
+	{},
+};
+#endif
+
+#ifdef CONFIG_TEGRA_XUSB_PLATFORM
+static struct of_device_id tegra_xusba_pd[] = {
+	{ .compatible = "nvidia, tegra210-xusba-pd", },
+	{ .compatible = "nvidia, tegra132-xusba-pd", },
+	{ .compatible = "nvidia, tegra124-xusba-pd", },
+	{},
+};
+
+static struct of_device_id tegra_xusbb_pd[] = {
+	{ .compatible = "nvidia, tegra210-xusbb-pd", },
+	{ .compatible = "nvidia, tegra132-xusbb-pd", },
+	{ .compatible = "nvidia, tegra124-xusbb-pd", },
+	{},
+};
+
+static struct of_device_id tegra_xusbc_pd[] = {
+	{ .compatible = "nvidia, tegra210-xusbc-pd", },
+	{ .compatible = "nvidia, tegra132-xusbc-pd", },
+	{ .compatible = "nvidia, tegra124-xusbc-pd", },
+	{},
+};
+#endif
 #endif
 
 phys_addr_t tegra_bootloader_fb_start;
@@ -166,6 +210,7 @@ static struct board_info main_board_info;
 static struct board_info pmu_board_info;
 static struct board_info display_board_info;
 static int panel_id;
+static int battery_id;
 static struct board_info camera_board_info;
 static int touch_vendor_id;
 static int touch_panel_id;
@@ -202,8 +247,6 @@ EXPORT_SYMBOL(tegra_vpr_dev);
 
 struct device tegra_iram_dev;
 EXPORT_SYMBOL(tegra_iram_dev);
-
-bool G_RECOVERY_HACK;
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/nvsecurity.h>
@@ -693,18 +736,55 @@ static void __init tegra_ramrepair_init(void)
 
 static void __init tegra_init_power(void)
 {
-#ifdef CONFIG_ARCH_TEGRA_HAS_SATA
-	tegra_powergate_partition(TEGRA_POWERGATE_SATA);
+	int partition_id;
+#ifdef CONFIG_TEGRA_XUSB_PLATFORM
+	int partition_id_xusba, partition_id_xusbb, partition_id_xusbc;
 #endif
+
+#ifdef CONFIG_ARCH_TEGRA_HAS_SATA
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_sata_pd);
+	if (partition_id < 0)
+		return;
+#else
+	partition_id = TEGRA_POWERGATE_SATA;
+#endif
+	tegra_powergate_partition(partition_id);
+#endif
+
 #ifdef CONFIG_ARCH_TEGRA_HAS_PCIE
-	tegra_powergate_partition(TEGRA_POWERGATE_PCIE);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_pcie_pd);
+	if (partition_id < 0)
+		return;
+#else
+	partition_id = TEGRA_POWERGATE_PCIE;
+#endif
+	tegra_powergate_partition(partition_id);
 #endif
 
 #if defined(CONFIG_TEGRA_XUSB_PLATFORM)
 	/* powergate xusb partitions by default */
-	tegra_powergate_partition(TEGRA_POWERGATE_XUSBB);
-	tegra_powergate_partition(TEGRA_POWERGATE_XUSBA);
-	tegra_powergate_partition(TEGRA_POWERGATE_XUSBC);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id_xusbb = tegra_pd_get_powergate_id(tegra_xusbb_pd);
+	if (partition_id_xusbb < 0)
+		return;
+
+	partition_id_xusba = tegra_pd_get_powergate_id(tegra_xusba_pd);
+	if (partition_id_xusba < 0)
+		return;
+
+	partition_id_xusbc = tegra_pd_get_powergate_id(tegra_xusbc_pd);
+	if (partition_id_xusbc < 0)
+		return;
+#else
+	partition_id_xusbb = TEGRA_POWERGATE_XUSBB;
+	partition_id_xusba = TEGRA_POWERGATE_XUSBA;
+	partition_id_xusbc = TEGRA_POWERGATE_XUSBC;
+#endif
+	tegra_powergate_partition(partition_id_xusbb);
+	tegra_powergate_partition(partition_id_xusba);
+	tegra_powergate_partition(partition_id_xusbc);
 #endif
 
 }
@@ -884,9 +964,8 @@ void __init tegra11x_init_early(void)
 #ifdef CONFIG_ARCH_TEGRA_12x_SOC
 void __init tegra12x_init_early(void)
 {
-	if (of_find_compatible_node(NULL, NULL, "arm,psci") ||
-	    of_find_compatible_node(NULL, NULL, "arm,psci-0.2"))
-			tegra_with_secure_firmware = 1;
+	if (of_find_compatible_node(NULL, NULL, "arm,psci-0.2"))
+		tegra_with_secure_firmware = 1;
 
 	display_tegra_dt_info();
 	tegra_apb_io_init();
@@ -903,6 +982,7 @@ void __init tegra12x_init_early(void)
 	tegra_clk_init_from_table(tegra12x_clk_init_table);
 	tegra_clk_init_cbus_plls_from_table(tegra12x_cbus_init_table);
 	tegra_clk_init_from_table(tegra12x_sbus_init_table);
+	tegra_non_dt_clock_reset_init();
 	tegra_powergate_init();
 #ifndef CONFIG_ARM64
 	tegra30_hotplug_init();
@@ -1083,15 +1163,6 @@ static int __init tegra_nck_arg(char *options)
 early_param("nck", tegra_nck_arg);
 #endif	/* CONFIG_TEGRA_USE_NCT */
 
-static int __init tegra_kernel_type(char *options)
-{
-	G_RECOVERY_HACK = false;
-	if (!strcmp(options, "recovery"))
-		G_RECOVERY_HACK = true;
-	return 0;
-}
-__setup("android.kerneltype=", tegra_kernel_type);
-
 enum panel_type get_panel_type(void)
 {
 	return board_panel_type;
@@ -1135,6 +1206,19 @@ bool tegra_is_bl_display_initialized(int instance)
 		return false;
 	}
 }
+
+int tegra_get_board_battery_id(void)
+{
+	return battery_id;
+}
+
+static int __init tegra_board_battery_id(char *options)
+{
+	char *p = options;
+	battery_id = memparse(p, &p);
+	return battery_id;
+}
+__setup("androidboot.batterytype=", tegra_board_battery_id);
 
 int tegra_get_touch_vendor_id(void)
 {
@@ -1737,7 +1821,17 @@ static struct platform_device ramoops_dev  = {
 static void __init tegra_reserve_ramoops_memory(unsigned long reserve_size)
 {
 	ramoops_data.mem_size = reserve_size;
+#ifndef CONFIG_ANDROID
+	/* Uboot touches non carved out memory during reboot. But for this
+	 * feature to work, memory should not be overwritten by bootloader
+	 * (cboot/u-boot). L4T does not uses NCT carveout region. So, have
+	 * repurposed this carveout memory for pstore
+	 */
+#define RAMOOPS_CARVEOUT_START 0xff03f000
+	ramoops_data.mem_address = RAMOOPS_CARVEOUT_START;
+#else
 	ramoops_data.mem_address = memblock_end_of_4G() - reserve_size;
+#endif
 	ramoops_data.record_size = RECORD_MEM_SIZE;
 #ifdef CONFIG_PSTORE_CONSOLE
 	ramoops_data.console_size = CONSOLE_MEM_SIZE;
@@ -1747,9 +1841,6 @@ static void __init tegra_reserve_ramoops_memory(unsigned long reserve_size)
 #endif
 #ifdef CONFIG_PSTORE_RTRACE
 	ramoops_data.rtrace_size = RTRACE_MEM_SIZE;
-#endif
-#ifdef CONFIG_PSTORE_PMSG
-	ramoops_data.pmsg_size = PMSG_MEM_SIZE;
 #endif
 	ramoops_data.dump_oops = 1;
 	if (memblock_remove(ramoops_data.mem_address, ramoops_data.mem_size))
@@ -2109,14 +2200,16 @@ out:
 #endif
 
 	/* Keep these at the end */
-	if (tegra_vpr_resize && carveout_size) {
+	if (tegra_vpr_resize && carveout_size &&
+	    !dev_get_cma_area(&tegra_generic_cma_dev)) {
 		if (dma_declare_contiguous(&tegra_generic_cma_dev,
 			carveout_size, 0, memblock_end_of_4G()))
 			pr_err("dma_declare_contiguous failed for generic\n");
 		tegra_carveout_size = carveout_size;
 	}
 
-	if (tegra_vpr_resize && tegra_vpr_size)
+	if (tegra_vpr_resize && tegra_vpr_size &&
+	    !dev_get_cma_area(&tegra_vpr_cma_dev))
 		if (dma_declare_contiguous(&tegra_vpr_cma_dev,
 			tegra_vpr_size, 0, memblock_end_of_4G()))
 			pr_err("dma_declare_contiguous failed VPR carveout\n");
@@ -2136,16 +2229,16 @@ void tegra_reserve4(ulong carveout_size, ulong fb_size,
 
 void tegra_get_fb_resource(struct resource *fb_res)
 {
-	fb_res->start = (resource_size_t) tegra_fb_start;
+	fb_res->start = (resource_size_t) tegra_bootloader_fb_start;
 	fb_res->end = fb_res->start +
-			(resource_size_t) tegra_fb_size - 1;
+			(resource_size_t) tegra_bootloader_fb_size - 1;
 }
 
 void tegra_get_fb2_resource(struct resource *fb2_res)
 {
-	fb2_res->start = (resource_size_t) tegra_fb2_start;
+	fb2_res->start = (resource_size_t) tegra_bootloader_fb2_start;
 	fb2_res->end = fb2_res->start +
-			(resource_size_t) tegra_fb2_size - 1;
+			(resource_size_t) tegra_bootloader_fb2_size - 1;
 }
 
 
@@ -2305,13 +2398,6 @@ static int __init dfll_freq_cmd_line(char *line)
 }
 early_param("dfll_boot_req_khz", dfll_freq_cmd_line);
 
-static int __init tegra_bl_buildtime(char *options)
-{
-	pr_info("Bootloader Build time: %s\n", options);
-	return 0;
-}
-__setup("bl_buildtime=", tegra_bl_buildtime);
-
 void __init display_tegra_dt_info(void)
 {
 	int ret_d;
@@ -2373,13 +2459,24 @@ static int __init tegra_get_last_reset_reason(void)
 #define RESET_STR(REASON) "last reset is due to "#REASON"\n"
 	char *reset_reason[] = {
 		RESET_STR(power on reset),
-		RESET_STR(watchdog timeout),
+		RESET_STR(tegra watchdog timeout),
 		RESET_STR(sensor),
 		RESET_STR(software reset),
 		RESET_STR(deep sleep reset),
+		RESET_STR(pmic watchdog timeout),
 	};
+	/* read PMC_SCRATCH203, if last reset due to pmic watchdog, stored by
+	 * nvtboot
+	 */
+	u32 val = readl(IO_ADDRESS(TEGRA_PMC_BASE) + PMC_SCRATCH203);
+	if (val & 0x2)
+		/* reset-reason due to pmic watchdog, set val to index of array
+		 * reset_reason so that it points to "pmic watchdog timeout"
+		 */
+		val = 5;
+	else
+		val = readl(IO_ADDRESS(TEGRA_PMC_BASE) + PMC_RST_STATUS) & 0x7;
 
-	u32 val = readl(IO_ADDRESS(TEGRA_PMC_BASE) + PMC_RST_STATUS) & 0x7;
 	if (val >= ARRAY_SIZE(reset_reason))
 		pr_info("last reset value is invalid 0x%x\n", val);
 	else {

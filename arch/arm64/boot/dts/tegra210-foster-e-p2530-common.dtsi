@@ -1,7 +1,7 @@
 /*
  * arch/arm64/boot/dts/tegra210-foster-e-p2530-common.dtsi
  *
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,10 +28,10 @@
 #include "tegra210-platforms/tegra210-p2530-common.dtsi"
 #include "tegra210-platforms/tegra210-foster-e-power-tree-p2530-0932-e00.dtsi"
 #include "tegra210-platforms/tegra210-foster-e-gpio-p2530-0930-e00.dtsi"
-#include "tegra210-platforms/tegra210-foster-e-pinmux-p2530-0930-e00.dtsi"
 #include "tegra210-platforms/tegra210-pinmux-drive-sdmmc-common.dtsi"
 #include "tegra210-platforms/tegra210-loki-e-comms.dtsi"
 #include "tegra210-platforms/tegra210-foster-e-pwm-fan.dtsi"
+#include "tegra210-platforms/tegra210-foster-e-camera.dtsi"
 #include "tegra210-platforms/tegra210-ers-hdmi-e2190-1100-a00.dtsi"
 #include "tegra210-platforms/tegra210-foster-e-thermal-fan-est.dtsi"
 #include "tegra210-platforms/tegra210-loki-e-keys-p2530-0032-e00.dtsi"
@@ -39,6 +39,7 @@
 #include <dt-bindings/iio/meter/ina3221x.h>
 #include "tegra210-platforms/tegra210-sysedp.dtsi"
 #include "tegra210-platforms/tegra210-audio.dtsi"
+#include "tegra210-platforms/tegra210-loki-e-cpufreq.dtsi"
 
 / {
 	host1x {
@@ -50,6 +51,7 @@
 			nvidia,cmu-enable = <1>;
 			nvidia,fb-bpp = <32>; /* bits per pixel */
 			nvidia,fb-flags = <TEGRA_FB_FLIP_ON_PROBE>;
+			nvidia,dc-or-node = "/host1x/sor1";
 		};
 	};
 
@@ -61,6 +63,18 @@
 
 			spi-hv {
 				nvidia,io-pad-init-voltage = <IO_PAD_VOLTAGE_1_8V>;
+			};
+
+			gpio {
+				nvidia,io-pad-init-voltage = <IO_PAD_VOLTAGE_1_8V>;
+				nvidia,deep-power-down-enable;
+			};
+
+			sdmmc1 {
+				nvidia,enable-dynamic-pad-voltage;
+			};
+			sdmmc3 {
+				nvidia,enable-dynamic-pad-voltage;
 			};
 		};
 	};
@@ -135,11 +149,16 @@
 		dt-override-status-odm-data = <0x01000000 0x00000000>;
 	};
 
+	psy_extcon {
+		status = "okay";
+		power-supply,default-ac-cable-connected;
+	};
+
 	/* Put common control config here */
 	xusb_pad_ctl: xusb_padctl {
 		nvidia,ss_portmap = <0x0321>;
 		nvidia,lane_owner = <0xF056>; /* Use 0xF to disable lane assign */
-		nvidia,otg_portmap = <0x0100>;
+		nvidia,otg_portmap = <0x0>;
 		status = "okay";
 	};
 
@@ -188,6 +207,12 @@
 
 		sw_lid {
 			status="disabled";
+		};
+	};
+
+	gpio-timed-keys {
+		power {
+			gpios = <&gpio TEGRA_GPIO(X, 7) GPIO_ACTIVE_LOW>;
 		};
 	};
 
@@ -248,6 +273,9 @@
 	};
 
 	bcmdhd_wlan {
+		fw_path = "/system/vendor/firmware/fw_bcmdhd.bin";
+		nv_path = "/system/etc/nvram_foster_e_4354.txt";
+		tuned_nv_path = "/system/etc/nvram_foster_e_antenna_tuned_4354.txt";
 		country_code_map {
 			CC1 {
 				iso_abbrev = "XV";
@@ -381,8 +409,8 @@
 			};
 			CC27 {
 				iso_abbrev = "IN";
-				custom_locale = "Q2";
-				custom_locale_rev = <998>;
+				custom_locale = "E0";
+				custom_locale_rev = <994>;
 			};
 		};
 	};

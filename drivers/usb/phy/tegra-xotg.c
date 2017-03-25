@@ -28,9 +28,13 @@
 #include <linux/extcon.h>
 #include <asm/unaligned.h>
 #include <mach/tegra_usb_pad_ctrl.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 #include "linux/usb/hcd.h"
 #include "linux/usb/otg.h"
 #include "tegra-xotg.h"
+
+#define MAX_USB_PORTS 8
 
 int xotg_debug_level = LEVEL_INFO;
 module_param(xotg_debug_level, int, S_IRUGO|S_IWUSR);
@@ -41,6 +45,7 @@ module_param(session_supported, bool, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(session_supported, "session supported");
 
 static const char driver_name[] = "tegra-xotg";
+static void xotg_work(struct work_struct *work);
 
 static void xotg_print_status(struct xotg *xotg)
 {
@@ -115,6 +120,23 @@ static void xotg_print_status(struct xotg *xotg)
 	}
 }
 
+static void xotg_roothub_resume(struct xotg *xotg)
+{
+	struct usb_phy *phy = &xotg->phy;
+	struct usb_otg *otg = phy->otg;
+	struct usb_hcd *shared_hcd, *main_hcd;
+
+	if (otg->xhcihost) {
+		shared_hcd = bus_to_hcd(otg->xhcihost);
+		/* let host go in elpg */
+		usb_hcd_resume_root_hub(shared_hcd);
+	}
+	if (otg->host) {
+		main_hcd = bus_to_hcd(otg->host);
+		/* let host go in elpg */
+		usb_hcd_resume_root_hub(main_hcd);
+	}
+}
 static void xotg_notify_event(struct xotg *xotg, int event)
 {
 	spin_lock(&xotg->phy.sync_lock);
@@ -221,9 +243,6 @@ static int xotg_alloc_timer(struct xotg *xotg,
 
 	init_timer(temp_timer_list);
 
-	if (!temp_timer_list)
-		return 1;
-
 	temp_timer_list->function = xotg_timer_comp;
 	temp_timer_list->expires = msecs_to_jiffies(expires);
 	temp_timer_list->data = data;
@@ -253,7 +272,7 @@ static void b_srp_response_wait_timer(unsigned long data)
 	 */
 	xotg->xotg_timer_list.b_srp_response_wait_tmout = 1;
 
-	schedule_delayed_work(&xotg->otg_work, 0);
+	queue_work(xotg->otg_wq, &xotg->otg_work);
 }
 
 static void xotg_timer_comp(unsigned long timeout)
@@ -263,7 +282,7 @@ static void xotg_timer_comp(unsigned long timeout)
 
 	xotg_dbg(xotg->dev, "timer expired\n");
 	*(int *)timeout = 1;
-	schedule_delayed_work(&xotg->otg_work, 0);
+	queue_work(xotg->otg_wq, &xotg->otg_work);
 }
 
 static void b_srp_done_timer(unsigned long data)
@@ -276,7 +295,7 @@ static void b_srp_done_timer(unsigned long data)
 		xotg->xotg_vars.b_srp_done = 1;
 		xotg->xotg_vars.b_srp_initiated = 0;
 	}
-	schedule_delayed_work(&xotg->otg_work, 0);
+	queue_work(xotg->otg_wq, &xotg->otg_work);
 }
 
 static int xotg_init_timers(struct xotg *xotg)
@@ -310,6 +329,16 @@ static int xotg_init_timers(struct xotg *xotg)
 			a_wait_bcon_tmout);
 	if (status) {
 		xotg_err(xotg->dev, "error in init list a_wait_bcon_tmr\n");
+		return status;
+	}
+
+	/* tst_maint timer */
+	status = xotg_alloc_timer(xotg, &xotg->xotg_timer_list.a_tst_maint_tmr,
+			&xotg_timer_comp, TA_TST_MAINT,
+			(unsigned long)&xotg->xotg_timer_list.
+			a_tst_maint_tmout);
+	if (status) {
+		xotg_err(xotg->dev, "error in init list a_tst_maint_tmr\n");
 		return status;
 	}
 
@@ -514,7 +543,7 @@ static void xotg_drive_vbus(struct xotg *xotg, bool start)
 	xotg->vbus_on = start;
 	spin_unlock_irqrestore(&xotg->vbus_lock, flags);
 
-	schedule_work(&xotg->vbus_work);
+	queue_work(xotg->otg_wq, &xotg->vbus_work);
 }
 
 static void xotg_enable_srp_detect(struct xotg *xotg, bool enable)
@@ -530,8 +559,7 @@ static void xotg_enable_srp_detect(struct xotg *xotg, bool enable)
 				USB2_BATTERY_CHRG_OTGPAD_SRP_INTR_EN;
 	} else {
 		reg &= ~(USB2_BATTERY_CHRG_OTGPAD_SRP_DETECT_EN |
-				USB2_BATTERY_CHRG_OTGPAD_SRP_INTR_EN |
-				USB2_BATTERY_CHRG_OTGPAD_SRP_DETECTED);
+				USB2_BATTERY_CHRG_OTGPAD_SRP_INTR_EN);
 	}
 	tegra_usb_pad_reg_write(
 		XUSB_PADCTL_USB2_BATTERY_CHRG_OTGPAD_CTL0_0(port), reg);
@@ -588,13 +616,7 @@ static int xotg_enable_gadget(struct xotg *xotg, bool start)
 			"driver->%s not defined but %s vbus override\n",
 			start ? "resume" : "suspend",
 			start ? "setting" : "clearing");
-		if (start)
-			tegra_usb_pad_reg_update(XUSB_PADCTL_USB2_VBUS_ID_0,
-				USB2_VBUS_ID_0_VBUS_OVERRIDE,
-				USB2_VBUS_ID_0_VBUS_OVERRIDE);
-		else
-			tegra_usb_pad_reg_update(XUSB_PADCTL_USB2_VBUS_ID_0,
-				USB2_VBUS_ID_0_VBUS_OVERRIDE, 0);
+
 		return 1;
 	}
 
@@ -698,7 +720,7 @@ static int xotg_start_hnp(struct usb_otg *otg)
 
 	xotg->xotg_vars.b_conn = 0;
 	xotg->phy.otg->host->b_hnp_enable = 1;
-	schedule_delayed_work(&xotg->otg_work, 0);
+	queue_work(xotg->otg_wq, &xotg->otg_work);
 	return 0;
 }
 
@@ -721,7 +743,7 @@ static int xotg_start_srp(struct usb_otg *otg)
 	xotg_info(xotg->dev, "state %s -> a_suspend\n",
 		usb_otg_state_string(xotg->phy.state));
 	xotg->phy.state = OTG_STATE_A_SUSPEND;
-	schedule_delayed_work(&xotg->otg_work, 0);
+	queue_work(xotg->otg_wq, &xotg->otg_work);
 	return 0;
 }
 
@@ -733,7 +755,7 @@ static int xotg_start_srp(struct usb_otg *otg)
  */
 static void xotg_work(struct work_struct *work)
 {
-	struct xotg *xotg = container_of(work, struct xotg, otg_work.work);
+	struct xotg *xotg = container_of(work, struct xotg, otg_work);
 	enum usb_otg_state from_state;
 	struct usb_gadget *gadget = xotg->phy.otg->gadget;
 	unsigned long flags;
@@ -744,8 +766,11 @@ static void xotg_work(struct work_struct *work)
 
 	from_state = xotg->phy.state;
 
-	if (!gadget)
-		xotg_warn(xotg->dev, "gadget driver not loaded yet ?\n");
+	if (!gadget && (xotg->phy.state == OTG_STATE_B_PERIPHERAL)) {
+		xotg_err(xotg->dev, "gadget driver not loaded yet ?\n");
+		spin_unlock_irqrestore(&xotg->lock, flags);
+		return;
+	}
 
 	xotg_dbg(xotg->dev, "switching from %s\n",
 		usb_otg_state_string(from_state));
@@ -833,12 +858,20 @@ static void xotg_work(struct work_struct *work)
 			state_changed = 1;
 			xotg->xotg_vars.a_srp_det = 0;
 			xotg->phy.state = OTG_STATE_A_IDLE;
-			/* TODO: check if we need to drive the vbus */
 			xotg->phy.otg->default_a = 1;
-			/* A-device. Need to drive the vbus, but
-			 * don't start the VBUS yet
-			 */
-			xotg_drive_vbus(xotg, 1);
+			xotg->xotg_reqs.a_bus_req = 1;
+
+			if (!xotg->xotg_timer_list.b_ssend_srp_tmout) {
+				xotg_dbg(xotg->dev,
+					"del_timer b_ssend_srp_tmr\n");
+				del_timer_sync(
+					&xotg->xotg_timer_list.b_ssend_srp_tmr);
+			} else if (xotg->xotg_timer_list.b_ssend_srp_tmout) {
+				xotg->xotg_timer_list.b_ssend_srp_tmout = 0;
+			}
+			spin_unlock_irqrestore(&xotg->lock, flags);
+			xotg_work(&xotg->otg_work);
+			return;
 		} else if (xotg->xotg_vars.b_sess_vld) {
 			xotg_info(xotg->dev, "state b_idle -> b_peripheral\n");
 			state_changed = 1;
@@ -851,6 +884,16 @@ static void xotg_work(struct work_struct *work)
 			 * if we are a B-device. essentially do nothing
 			 * but set the host port to rxdetect
 			 */
+
+			/* A host has responded to the SRP request by enabling
+			 * the VBUS before TB_SRP_FAIL. Delete the timer.
+			 */
+			if (!xotg->xotg_timer_list.b_srp_response_wait_tmout) {
+				xotg_dbg(xotg->dev,
+					"del_timer b_srp_response_wait_tmr\n");
+				del_timer_sync(&xotg->xotg_timer_list.
+						b_srp_response_wait_tmr);
+			}
 		} else if (xotg->xotg_reqs.b_bus_req &&
 			xotg->xotg_timer_list.b_ssend_srp_tmout) {
 			/* FIXME: b_bus_req (only?) or power_up also */
@@ -893,6 +936,13 @@ static void xotg_work(struct work_struct *work)
 				b_srp_response_wait_tmr, jiffies +
 					msecs_to_jiffies(TB_SRP_FAIL));
 			}
+		} else if (xotg->xotg_timer_list.b_srp_response_wait_tmout) {
+			xotg->xotg_timer_list.b_srp_response_wait_tmout = 0;
+			/* inform the user above that A-device
+			 * has not responded
+			 */
+			xotg_warn(xotg->dev,
+				"A-host not responding to SRP request\n");
 		}
 		if (state_changed && !xotg->xotg_timer_list.b_ssend_srp_tmout) {
 			/* do stuff to cleanup the B_IDLE state */
@@ -935,7 +985,11 @@ static void xotg_work(struct work_struct *work)
 			/* FIXME state has to be changed to B_IDLE */
 			xotg->phy.state = OTG_STATE_B_IDLE;
 		}
-		if (state_changed &&
+		/* We delete the timer only when the state is changed due
+		 * to Micro-A being attached. We should not delete the timer
+		 * when state is changed due to b_srp_done
+		 */
+		if (state_changed && !xotg->id &&
 			!xotg->xotg_timer_list.b_srp_response_wait_tmout) {
 			xotg_dbg(xotg->dev,
 				"del_timer b_srp_response_wait_tmr\n");
@@ -1048,7 +1102,7 @@ static void xotg_work(struct work_struct *work)
 			 */
 			usb_bus_start_enum(xotg->phy.otg->host,
 					xotg->hs_otg_port);
-		} else if (!xotg->id && !xotg->xotg_vars.b_sess_vld) {
+		} else if (!xotg->id || !xotg->xotg_vars.b_sess_vld) {
 			xotg_info(xotg->dev, "state b_wait_acon -> b_idle\n");
 			state_changed = 1;
 			xotg->phy.state = OTG_STATE_B_IDLE;
@@ -1057,6 +1111,15 @@ static void xotg_work(struct work_struct *work)
 			/* start the b_ssend_srp timer
 			 * note currently b_sess_vld = 0,
 			 */
+
+			xotg_set_reverse_id(xotg, false);
+
+			if (xotg_enable_gadget(xotg, 1) == 1) {
+				/* should not happen */
+				xotg_err(xotg->dev,
+				"xotg_enable_gadget(xotg, 1) failed\n");
+			}
+
 			xotg_dbg(xotg->dev,
 				"starting TB_SSEND_SRP(1.6s) timer\n");
 			xotg->xotg_timer_list.b_ssend_srp_tmout = 0;
@@ -1066,8 +1129,21 @@ static void xotg_work(struct work_struct *work)
 			xotg->xotg_timer_list.b_ase0_brst_tmout) {
 			xotg_info(xotg->dev,
 				"state b_wait_acon -> b_peripheral\n");
-			if (xotg->xotg_timer_list.b_ase0_brst_tmout)
+			if (xotg->xotg_timer_list.b_ase0_brst_tmout) {
+				xotg_warn(xotg->dev,
+					"No Repsonse from A-Device\n");
 				xotg->xotg_timer_list.b_ase0_brst_tmout = 0;
+
+			}
+
+			xotg_set_reverse_id(xotg, false);
+			if (xotg_enable_gadget(xotg, 1) == 1) {
+				/* should not happen */
+				xotg_err(xotg->dev,
+				"xotg_enable_gadget(xotg, 0) failed\n");
+			}
+
+
 			/* this case is when A is signalling a resume
 			 * before it saw B lower its D+ resistor
 			 */
@@ -1140,29 +1216,29 @@ static void xotg_work(struct work_struct *work)
 			xotg->xotg_timer_list.b_ssend_srp_tmout = 0;
 			mod_timer(&xotg->xotg_timer_list.b_ssend_srp_tmr,
 				jiffies + msecs_to_jiffies(TB_SSEND_SRP));
+
+			/* ID floating caused host ELPG exit if hcd was in
+			 * ELPG so make sure host enters to ELPG again.
+			 */
+			xotg_roothub_resume(xotg);
 		} else if (!xotg->xotg_reqs.a_bus_drop &&
 				(xotg->xotg_reqs.a_bus_req ||
 					xotg->xotg_vars.a_srp_det)) {
 			/* drive vbus */
-			if (session_supported) {
-				xotg_info(xotg->dev, "state a_idle -> a_wait_vrise\n");
-				xotg->phy.state = OTG_STATE_A_WAIT_VRISE;
-				if (xotg->xotg_vars.a_srp_det)
-					xotg->xotg_vars.a_srp_det = 0;
+			xotg_info(xotg->dev, "state a_idle -> a_wait_vrise\n");
+			xotg->phy.state = OTG_STATE_A_WAIT_VRISE;
+			if (xotg->xotg_vars.a_srp_det)
+				xotg->xotg_vars.a_srp_det = 0;
 
-				xotg_drive_vbus(xotg, 1);
+			xotg_drive_vbus(xotg, 1);
 
-				/* wait for T_A_VBUS_RISE time */
-				xotg_dbg(xotg->dev,
-					"starting TA_VBUS_RISE(100ms) timer\n");
-				xotg->xotg_timer_list.a_wait_vrise_tmout = 0;
-				mod_timer(&xotg->xotg_timer_list.
-					a_wait_vrise_tmr, jiffies +
-					msecs_to_jiffies(TA_VBUS_RISE));
-			} else {
-				xotg_info(xotg->dev, "state a_idle -> a_wait_bcon\n");
-				xotg->phy.state = OTG_STATE_A_WAIT_BCON;
-			}
+			/* wait for T_A_VBUS_RISE time */
+			xotg_dbg(xotg->dev,
+				"starting TA_VBUS_RISE(100ms) timer\n");
+			xotg->xotg_timer_list.a_wait_vrise_tmout = 0;
+			mod_timer(&xotg->xotg_timer_list.
+				a_wait_vrise_tmr, jiffies +
+				msecs_to_jiffies(TA_VBUS_RISE));
 		}
 	}
 	break;
@@ -1229,6 +1305,9 @@ static void xotg_work(struct work_struct *work)
 		xotg_dbg(xotg->dev, "id=%d, a_wait_vfall_tmout=%d\n",
 			xotg->id, xotg->xotg_timer_list.a_wait_vfall_tmout);
 
+		if (xotg->xotg_vars.otg_test_device_enumerated)
+			xotg->xotg_vars.otg_test_device_enumerated = 0;
+
 		if (xotg->id) {
 			xotg_info(xotg->dev, "state a_wait_vfall -> b_idle\n");
 			state_changed = 1;
@@ -1254,10 +1333,14 @@ static void xotg_work(struct work_struct *work)
 			xotg_enable_srp_detect(xotg, true);
 
 			xotg->phy.otg->default_a = 1;
-			/* no driving the vbus yet */
 			if (!session_supported)
 				xotg_drive_vbus(xotg, 1);
 		}
+		/* ID ground caused host ELPG exit if hcd was in
+		 * ELPG so make sure host enters to ELPG again.
+		 * Also enable vbus if session is not suppported
+		 */
+		xotg_roothub_resume(xotg);
 		if (state_changed &&
 			!xotg->xotg_timer_list.a_wait_vrise_tmout) {
 			/* delete the timer to wait for vfall */
@@ -1282,8 +1365,11 @@ static void xotg_work(struct work_struct *work)
 			xotg->xotg_timer_list.a_wait_bcon_tmout) {
 			xotg_info(xotg->dev,
 				"state a_wait_bcon -> a_wait_vfall\n");
-			if (xotg->xotg_timer_list.a_wait_bcon_tmout)
+			if (xotg->xotg_timer_list.a_wait_bcon_tmout) {
 				xotg->xotg_timer_list.a_wait_bcon_tmout = 0;
+				xotg_warn(xotg->dev,
+					"No Response from Device\n");
+			}
 			state_changed = 1;
 			xotg->phy.state = OTG_STATE_A_WAIT_VFALL;
 
@@ -1346,7 +1432,7 @@ static void xotg_work(struct work_struct *work)
 		if (xotg->id || xotg->xotg_reqs.a_bus_drop) {
 			xotg_info(xotg->dev, "state a_host -> a_wait_vfall\n");
 			xotg->phy.state = OTG_STATE_A_WAIT_VFALL;
-
+			state_changed = 1;
 			/* do actions */
 			xotg_drive_vbus(xotg, 0);
 			xotg_dbg(xotg->dev,
@@ -1358,26 +1444,24 @@ static void xotg_work(struct work_struct *work)
 			/*&& !xotg->xotg_vars.a_bus_suspend*/) {
 			xotg_info(xotg->dev, "state a_host -> a_wait_bcon\n");
 			xotg->phy.state = OTG_STATE_A_WAIT_BCON;
+			state_changed = 1;
 
-			/* do actions
-			 * start a_wait_bcon_tmout timer only if session is
-			 * supported. Make sure to enable session_supported
-			 * before running PET OTG test for A_SRP/HNP
-			 */
-			if (session_supported) {
-				xotg_dbg(xotg->dev,
-				"starting TA_WAIT_BCON(9sec) timer\n");
-				xotg->xotg_timer_list.a_wait_bcon_tmout = 0;
-				mod_timer(
-				&xotg->xotg_timer_list.a_wait_bcon_tmr,
+			if (xotg->xotg_vars.otg_test_device_enumerated)
+				xotg->xotg_vars.otg_test_device_enumerated = 0;
+
+			/* do actions */
+			xotg_dbg(xotg->dev,
+			"starting TA_WAIT_BCON(9sec) timer\n");
+			xotg->xotg_timer_list.a_wait_bcon_tmout = 0;
+			mod_timer(&xotg->xotg_timer_list.a_wait_bcon_tmr,
 				jiffies + msecs_to_jiffies(TA_WAIT_BCON));
-			}
 		} else if (!xotg->xotg_reqs.a_bus_req) {
 			xotg_info(xotg->dev, "state a_host -> a_suspend\n");
 			/* TODO: a_bus_drop = !a_bus_req. So, will this
 			 * else-if get executed anytime at all ?
 			 */
 			xotg->phy.state = OTG_STATE_A_SUSPEND;
+			state_changed = 1;
 
 			/* start a timer to keep track of B-device
 			 * signalling a disconnect. Once b_hnp_enable is
@@ -1393,7 +1477,27 @@ static void xotg_work(struct work_struct *work)
 					a_aidl_bdis_tmr, jiffies +
 					msecs_to_jiffies(TA_AIDL_BDIS));
 			}
+		}  else if (xotg->xotg_timer_list.a_tst_maint_tmout) {
+			xotg_dbg(xotg->dev,
+				"TST_MAINT timeout. Driving Vbus Off\n");
+			xotg->xotg_timer_list.a_tst_maint_tmout = 0;
+			if (session_supported)
+				xotg_drive_vbus(xotg, 0);
+		} else if (xotg->xotg_vars.start_tst_maint_timer) {
+			xotg_dbg(xotg->dev,
+				"Starting the TST_MAINT timer\n");
+			xotg->xotg_vars.start_tst_maint_timer = 0;
+			xotg->xotg_timer_list.a_tst_maint_tmout = 0;
+			mod_timer(&xotg->xotg_timer_list.a_tst_maint_tmr,
+				jiffies + msecs_to_jiffies(TA_TST_MAINT));
 		}
+		if (state_changed &&
+		   (xotg->phy.state != OTG_STATE_A_SUSPEND) &&
+		   (!xotg->xotg_timer_list.a_tst_maint_tmout)) {
+			xotg_dbg(xotg->dev, "del_timer a_tst_maint_tmr");
+			del_timer_sync(&xotg->xotg_timer_list.a_tst_maint_tmr);
+		}
+
 	}
 	break;
 	/* triggered by following:
@@ -1461,10 +1565,15 @@ static void xotg_work(struct work_struct *work)
 					"xotg_suspend_host(R)failed\n");
 			}
 
+			tegra_usb_pad_reg_update(XUSB_PADCTL_USB2_VBUS_ID_0,
+				USB2_VBUS_ID_0_VBUS_OVERRIDE,
+				USB2_VBUS_ID_0_VBUS_OVERRIDE);
+
 			if (!xotg_enable_gadget(xotg, 1) == 1) {
 				xotg_err(xotg->dev,
 				"xotg_enable_gadget(xotg, 1) failed\n");
 			}
+
 		} else if (!xotg->xotg_vars.b_conn &&
 				!xotg->phy.otg->host->b_hnp_enable) {
 			xotg_info(xotg->dev,
@@ -1484,7 +1593,23 @@ static void xotg_work(struct work_struct *work)
 			xotg->xotg_timer_list.a_wait_bcon_tmout = 0;
 			mod_timer(&xotg->xotg_timer_list.a_wait_bcon_tmr,
 				jiffies + msecs_to_jiffies(4000));
+		} else if (xotg->xotg_timer_list.a_tst_maint_tmout) {
+			xotg_dbg(xotg->dev,
+				"TST_MAINT timeout. Drive VBUS OFF\n");
+			xotg->xotg_timer_list.a_tst_maint_tmout = 0;
+			if (session_supported)
+				xotg_drive_vbus(xotg, 0);
 		}
+
+		if (state_changed &&
+		   !xotg->xotg_timer_list.a_tst_maint_tmout) {
+			xotg_dbg(xotg->dev,
+				"del_timer a_tst_maint_tmr %p\n",
+				&xotg->xotg_timer_list.a_tst_maint_tmr);
+			del_timer_sync(
+				&xotg->xotg_timer_list.a_tst_maint_tmr);
+		}
+
 		if (state_changed &&
 			xotg->phy.otg->host->b_hnp_enable &&
 			!xotg->xotg_timer_list.a_aidl_bdis_tmout) {
@@ -1505,6 +1630,9 @@ static void xotg_work(struct work_struct *work)
 				"state a_peripheral -> a_wait_vfall\n");
 			state_changed = 1;
 			xotg->phy.state = OTG_STATE_A_WAIT_VFALL;
+			xotg_set_reverse_id(xotg, false);
+			tegra_usb_pad_reg_update(XUSB_PADCTL_USB2_VBUS_ID_0,
+				USB2_VBUS_ID_0_VBUS_OVERRIDE, 0);
 			/* stop drive vbus */
 			xotg_drive_vbus(xotg, 0);
 			/* enable the srp detect */
@@ -1521,7 +1649,14 @@ static void xotg_work(struct work_struct *work)
 			state_changed = 1;
 			xotg->phy.state = OTG_STATE_A_WAIT_BCON;
 
+			if (xotg->xotg_vars.otg_test_device_enumerated)
+				xotg->xotg_vars.otg_test_device_enumerated = 0;
+
 			xotg_set_reverse_id(xotg, false);
+
+			tegra_usb_pad_reg_update(XUSB_PADCTL_USB2_VBUS_ID_0,
+				USB2_VBUS_ID_0_VBUS_OVERRIDE, 0);
+
 
 			xotg_dbg(xotg->dev,
 				"starting TA_WAIT_BCON(9sec) timer\n");
@@ -1579,7 +1714,7 @@ static int xotg_notify_connect(struct usb_phy *phy, enum usb_device_speed speed)
 	}
 	spin_unlock_irqrestore(&xotg->lock, flags);
 
-	schedule_delayed_work(&xotg->otg_work, 0);
+	queue_work(xotg->otg_wq, &xotg->otg_work);
 	return 0;
 }
 
@@ -1612,7 +1747,7 @@ static int xotg_set_suspend(struct usb_phy *phy, int suspend)
 				xotg->xotg_vars.a_bus_resume = 0;
 			}
 			spin_unlock_irqrestore(&xotg->lock, flags);
-			xotg_work(&xotg->otg_work.work);
+			xotg_work(&xotg->otg_work);
 			return 0;
 		default:
 			xotg_warn(xotg->dev, "suspend: default.\n");
@@ -1626,7 +1761,7 @@ static int xotg_set_suspend(struct usb_phy *phy, int suspend)
 		}
 	}
 	spin_unlock_irqrestore(&xotg->lock, flags);
-	schedule_delayed_work(&xotg->otg_work, 0);
+	queue_work(xotg->otg_wq, &xotg->otg_work);
 	return 0;
 }
 
@@ -1648,9 +1783,15 @@ static int xotg_set_vbus(struct usb_phy *phy, int on)
 		xotg_notify_event(xotg, USB_EVENT_HANDLE_OTG_PP);
 		xotg->phy.otg->default_a = 1;
 		xotg->id = 0;
-		schedule_delayed_work(&xotg->otg_work, 0);
+		queue_work(xotg->otg_wq, &xotg->otg_work);
 	} else {
-		if (!xotg->device_connected) {
+		/* If the device is an OTG test device like PET, then
+		 * always move the state machine without waiting for the
+		 * disconnect as the PET can just remove the ID with out
+		 * disconnecting D+
+		 */
+		if (xotg->xotg_vars.otg_test_device_enumerated ||
+		   !xotg->device_connected) {
 			tegra_usb_pad_reg_update(XUSB_PADCTL_USB2_VBUS_ID_0,
 				USB2_VBUS_ID_0_ID_OVERRIDE,
 				USB2_VBUS_ID_0_ID_OVERRIDE_RID_FLOAT);
@@ -1658,7 +1799,7 @@ static int xotg_set_vbus(struct usb_phy *phy, int on)
 			xusb_enable_pad_protection(1);
 			xotg->phy.otg->default_a = 0;
 			xotg->id = 1;
-			schedule_delayed_work(&xotg->otg_work, 0);
+			queue_work(xotg->otg_wq, &xotg->otg_work);
 		}
 	}
 	spin_unlock_irqrestore(&xotg->lock, flags);
@@ -1697,9 +1838,18 @@ static int xotg_notify_disconnect(struct usb_phy *phy,
 		xotg_set_vbus(phy, 0);
 	} else {
 		spin_unlock_irqrestore(&xotg->lock, flags);
-		schedule_delayed_work(&xotg->otg_work, 0);
+		queue_work(xotg->otg_wq, &xotg->otg_work);
 	}
 
+	return 0;
+}
+
+static int xotg_notify_otg_test_device(struct usb_phy *phy)
+{
+	struct xotg *xotg = container_of(phy, struct xotg, phy);
+	xotg->xotg_vars.otg_test_device_enumerated = 1;
+	xotg->xotg_vars.start_tst_maint_timer = 1;
+	xotg_work(&xotg->otg_work);
 	return 0;
 }
 
@@ -1725,6 +1875,46 @@ static int xotg_set_power(struct usb_phy *phy, unsigned ma)
 	return 0;
 }
 
+static void xotg_get_otg_port_num(struct xotg *xotg)
+{
+	struct device_node *node = NULL;
+	struct device_node *padctl = NULL;
+	int otg_portmap, ret, port;
+
+	node = xotg->dev->of_node;
+	if (node != NULL) {
+		padctl = of_parse_phandle(node, "nvidia,common_padctl", 0);
+		ret = of_property_read_u32(padctl, "nvidia,otg_portmap",
+							&otg_portmap);
+		if (ret < 0) {
+			xotg_err(xotg->dev,
+				"Fail to get otg_portmap, ret (%d)\n", ret);
+		} else {
+			/* otg_portmap - bit-field indicating which OTG ports
+			 * are controlled by XUDC/XHCI
+			 * bit[0-7]  : SS ports
+			 * bit[8-15] : HS ports
+			 * T210 has only 4 ports [0-3] for SS and [8-11] for HS.
+			 * We will search for all possible 8 positions incase
+			 * future chips have more than 4 ports.
+			 */
+			for (port = 0; port < MAX_USB_PORTS; port++) {
+				if (BIT(port) & otg_portmap) {
+					xotg->ss_otg_port = port;
+					break;
+				}
+			}
+
+			for (port = 0; port < MAX_USB_PORTS; port++) {
+				if (BIT(XUSB_UTMI_INDEX + port) & otg_portmap) {
+					xotg->hs_otg_port = port;
+					break;
+				}
+			}
+		}
+	}
+}
+
 static void xotg_struct_init(struct xotg *xotg)
 {
 	/* initialize the spinlock */
@@ -1737,6 +1927,7 @@ static void xotg_struct_init(struct xotg *xotg)
 	xotg->phy.set_vbus = xotg_set_vbus;
 	xotg->phy.notify_connect = xotg_notify_connect;
 	xotg->phy.notify_disconnect = xotg_notify_disconnect;
+	xotg->phy.notify_otg_test_device = xotg_notify_otg_test_device;
 
 	xotg->phy.otg->phy = &xotg->phy;
 	xotg->phy.otg->set_host = xotg_set_host;
@@ -1749,9 +1940,6 @@ static void xotg_struct_init(struct xotg *xotg)
 	xotg_dbg(xotg->dev, "UNDEFINED\n");
 	xotg->phy.state = OTG_STATE_UNDEFINED;
 
-	/* hs_otg_port = 0 , ss_otg_port = 0 */
-	xotg->hs_otg_port = 0;
-	xotg->ss_otg_port = 0;
 	xotg->device_connected = false;
 
 	/* app reqs to -1 */
@@ -1799,7 +1987,7 @@ static int xotg_start(struct xotg *xotg)
 	}
 	xotg->phy.state = OTG_STATE_UNDEFINED;
 
-	schedule_delayed_work(&xotg->otg_work, 0);
+	queue_work(xotg->otg_wq, &xotg->otg_work);
 	return 0;
 }
 
@@ -1885,7 +2073,7 @@ static irqreturn_t xotg_irq(int irq, void *data)
 	/* write to clear the status */
 	tegra_usb_pad_reg_write(XUSB_PADCTL_USB2_VBUS_ID_0, vbus_id_reg);
 
-	schedule_delayed_work(&xotg->otg_work, 0);
+	queue_work(xotg->otg_wq, &xotg->otg_work);
 	spin_unlock_irqrestore(&xotg->lock, flags);
 	return IRQ_HANDLED;
 }
@@ -1919,7 +2107,7 @@ static int xotg_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, xotg);
 	xotg->phy.type = USB_PHY_TYPE_UNDEFINED;
 	dev_set_drvdata(&pdev->dev, xotg);
-
+	xotg_get_otg_port_num(xotg);
 	/* store the otg phy */
 	status = usb_add_phy(&xotg->phy, USB_PHY_TYPE_USB3);
 	if (status) {
@@ -1967,13 +2155,18 @@ static int xotg_probe(struct platform_device *pdev)
 	/* workqueue to handle the state transitions of A-device/B-device
 	 * as defined in the OTG spec.
 	 */
-	INIT_DELAYED_WORK(&xotg->otg_work, xotg_work);
+	xotg->otg_wq = alloc_workqueue("OTG WQ\n", WQ_HIGHPRI|WQ_UNBOUND, 0);
+	if (!xotg->otg_wq) {
+		xotg_err(xotg->dev, "Work Queue Allocation Failed\n");
+		goto error5;
+	}
+	INIT_WORK(&xotg->otg_work, xotg_work);
 
 	/* initialize timers */
 	status = xotg_init_timers(xotg);
 	if (status) {
 		xotg_err(xotg->dev, "timer init failed\n");
-		goto error5;
+		goto error6;
 	}
 
 	/* regulator for usb_vbus, to be moved to OTG driver */
@@ -1981,14 +2174,14 @@ static int xotg_probe(struct platform_device *pdev)
 	if (IS_ERR_OR_NULL(xotg->usb_vbus_reg)) {
 		xotg_err(xotg->dev, "usb_vbus regulator not found: %ld\n",
 			PTR_ERR(xotg->usb_vbus_reg));
-		goto error6;
+		goto error7;
 	}
 
 	/* start OTG */
 	status = xotg_start(xotg);
 	if (status) {
 		xotg_err(xotg->dev, "xotg_start failed\n");
-		goto error7;
+		goto error8;
 	}
 
 	/* extcon for id pin */
@@ -2004,18 +2197,20 @@ static int xotg_probe(struct platform_device *pdev)
 	status = device_create_file(xotg->dev, &dev_attr_debug);
 	if (status) {
 		xotg_err(xotg->dev, "failed to device_create_file\n");
-		goto error8;
+		goto error9;
 	}
 
 	return status;
 
-error8:
+error9:
 	extcon_unregister_notifier(xotg->id_extcon_dev,
 		&xotg->id_extcon_nb);
-error7:
+error8:
 	devm_regulator_put(xotg->usb_vbus_reg);
-error6:
+error7:
 	xotg_deinit_timers(xotg);
+error6:
+	destroy_workqueue(xotg->otg_wq);
 error5:
 	devm_free_irq(&pdev->dev, xotg->usb_irq, xotg);
 error4:
@@ -2040,6 +2235,7 @@ static int __exit xotg_remove(struct platform_device *pdev)
 	device_remove_file(&pdev->dev, &dev_attr_debug);
 	devm_regulator_put(xotg->usb_vbus_reg);
 	xotg_deinit_timers(xotg);
+	destroy_workqueue(xotg->otg_wq);
 	devm_free_irq(&pdev->dev, xotg->nv_irq, xotg);
 	devm_free_irq(&pdev->dev, xotg->usb_irq, xotg);
 	usb_remove_phy(&xotg->phy);

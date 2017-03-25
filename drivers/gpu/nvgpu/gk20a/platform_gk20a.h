@@ -22,8 +22,6 @@
 #include <linux/pm_domain.h>
 #include <linux/dma-attrs.h>
 
-#define GK20A_CLKS_MAX		4
-
 struct gk20a;
 struct channel_gk20a;
 struct gr_ctx_buffer_desc;
@@ -57,7 +55,7 @@ struct gk20a_platform {
 
 	/* Clock configuration is stored here. Platform probe is responsible
 	 * for filling this data. */
-	struct clk *clk[GK20A_CLKS_MAX];
+	struct clk *clk[3];
 	int num_clks;
 
 	/* Delay before rail gated */
@@ -80,9 +78,6 @@ struct gk20a_platform {
 
 	/* Adaptative ELPG: true = enable flase = disable */
 	bool enable_aelpg;
-
-	/* Timeout for per-channel watchdog (in mS) */
-	u32 ch_wdt_timeout_ms;
 
 	/* Enable SMMU bypass by default */
 	bool bypass_smmu;
@@ -183,6 +178,7 @@ struct gk20a_platform {
 	int (*reset_assert)(struct platform_device *pdev);
 	int (*reset_deassert)(struct platform_device *pdev);
 	struct clk *clk_reset;
+	struct dvfs_rail *gpu_rail;
 
 	bool virtual_dev;
 #ifdef CONFIG_TEGRA_GR_VIRTUALIZATION

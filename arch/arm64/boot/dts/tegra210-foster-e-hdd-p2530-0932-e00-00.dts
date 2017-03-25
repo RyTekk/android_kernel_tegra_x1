@@ -18,6 +18,7 @@
  *
  */
 #include "tegra210-foster-e-p2530-common.dtsi"
+#include "tegra210-platforms/tegra210-foster-e-pinmux-p2530-0930-e00.dtsi"
 #include "tegra210-platforms/tegra210-foster-e-extcon-p2530-0930-e00.dtsi"
 #include "tegra210-platforms/tegra210-loki-e-emc-a00.dtsi"
 #include "tegra210-platforms/tegra210-foster-powermon-p2530-0930-e00.dtsi"
@@ -28,12 +29,20 @@
 	nvidia,dtsfilename = __FILE__;
 	nvidia,fastboot-usb-pid = <0xb422>;
 
-	chosen {
-		fastboot-instructions = "Tap on power button to navigate menu options.\nHold down power button for 2 sec and release for selecting an option.\nOem unlock may take upto 2 hours.\n";
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "foster_e_hdd";
+		};
 	};
 
 	xusb_padctl {
 		nvidia,enable-sata-port;
+	};
+
+	chosen {
+		fastboot-instructions = "Tap on power button to navigate menu options.\nHold down power button for 2 sec and release for selecting an option.\nOem unlock may take upto 2 hours.\n";
+		satafw-partition = "RP4";
 	};
 
 	sata@70020000 {
@@ -53,10 +62,9 @@
 	};
 
 	pmc@7000e400 {
-		prod-settings {
-			prod_c_platform_pad_rail {
-				prod = <0 0x48 0xFF5BFFFF 0x00A40000
-					0 0xE4 0xFF5BFFFF 0x00200000>;
+		io-pad-defaults {
+			gpio {
+				nvidia,io-pad-init-voltage = <IO_PAD_VOLTAGE_3_3V>;
 			};
 		};
 	};

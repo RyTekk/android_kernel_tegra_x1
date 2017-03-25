@@ -1,7 +1,7 @@
 /*
  * GM20B L2
  *
- * Copyright (c) 2014-2015 NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016 NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -25,7 +25,6 @@
 
 #include "gk20a/ltc_common.c"
 #include "gk20a/gk20a.h"
-#include "gk20a/gk20a_allocator.h"
 
 
 static int gm20b_ltc_init_comptags(struct gk20a *g, struct gr_gk20a *gr)
@@ -53,10 +52,8 @@ static int gm20b_ltc_init_comptags(struct gk20a *g, struct gr_gk20a *gr)
 
 	gk20a_dbg_fn("");
 
-	if (max_comptag_lines == 0) {
-		gr->compbit_store.size = 0;
+	if (max_comptag_lines == 0)
 		return 0;
-	}
 
 	if (max_comptag_lines > hw_max_comptag_lines)
 		max_comptag_lines = hw_max_comptag_lines;
@@ -92,9 +89,9 @@ static int gm20b_ltc_init_comptags(struct gk20a *g, struct gr_gk20a *gr)
 	if (err)
 		return err;
 
-	gk20a_allocator_init(&gr->comp_tags, "comptag",
-			      1, /* start */
-			      max_comptag_lines - 1); /* length*/
+	err = gk20a_comptag_allocator_init(&gr->comp_tags, max_comptag_lines);
+	if (err)
+		return err;
 
 	gr->comptags_per_cacheline = comptags_per_cacheline;
 	gr->slices_per_ltc = slices_per_ltc;
@@ -117,7 +114,7 @@ int gm20b_ltc_cbc_ctrl(struct gk20a *g, enum gk20a_cbc_op op,
 
 	trace_gk20a_ltc_cbc_ctrl_start(g->dev->name, op, min, max);
 
-	if (gr->compbit_store.size == 0)
+	if (gr->compbit_store.mem.size == 0)
 		return 0;
 
 	mutex_lock(&g->mm.l2_op_lock);
@@ -167,7 +164,7 @@ int gm20b_ltc_cbc_ctrl(struct gk20a *g, enum gk20a_cbc_op op,
 out:
 	trace_gk20a_ltc_cbc_ctrl_done(g->dev->name);
 	mutex_unlock(&g->mm.l2_op_lock);
-	return 0;
+	return err;
 }
 
 void gm20b_ltc_init_fs_state(struct gk20a *g)
@@ -193,6 +190,7 @@ void gm20b_ltc_init_fs_state(struct gk20a *g)
 	reg = gk20a_readl(g, ltc_ltcs_ltss_intr_r());
 	reg &= ~ltc_ltcs_ltss_intr_en_evicted_cb_m();
 	reg &= ~ltc_ltcs_ltss_intr_en_illegal_compstat_access_m();
+	reg &= ~ltc_ltcs_ltss_intr_en_illegal_compstat_m();
 	gk20a_writel(g, ltc_ltcs_ltss_intr_r(), reg);
 }
 
@@ -287,16 +285,17 @@ u32 gm20b_ltc_cbc_fix_config(struct gk20a *g, int base)
  */
 void gm20b_flush_ltc(struct gk20a *g)
 {
-	u32 op_pending;
-	unsigned long now, timeout;
+	unsigned long timeout;
+	int ltc;
 
 #define __timeout_init()				\
 	do {						\
-		now = jiffies;	timeout = now + HZ;	\
+		timeout = jiffies + HZ;			\
 	} while (0)
 #define __timeout_check()						\
 	do {								\
-		if (tegra_platform_is_silicon() && time_after(now, timeout)) { \
+		if (tegra_platform_is_silicon() &&			\
+		    time_after(jiffies, timeout)) {			\
 			gk20a_err(dev_from_gk20a(g), "L2 flush timeout!"); \
 			break;						\
 		}							\
@@ -312,19 +311,18 @@ void gm20b_flush_ltc(struct gk20a *g)
 		ltc_ltcs_ltss_tstg_cmgmt1_clean_evict_first_class_true_f());
 
 	/* Wait on each LTC individually. */
-	__timeout_init();
-	do {
-		op_pending = gk20a_readl(g, ltc_ltc0_ltss_tstg_cmgmt1_r());
-		__timeout_check();
-	} while (op_pending &
-		 ltc_ltc0_ltss_tstg_cmgmt1_clean_pending_f());
+	for (ltc = 0; ltc < g->ltc_count; ltc++) {
+		u32 op_pending;
 
-	__timeout_init();
-	do {
-		op_pending = gk20a_readl(g, ltc_ltc1_ltss_tstg_cmgmt1_r());
-		__timeout_check();
-	} while (op_pending &
-		 ltc_ltc1_ltss_tstg_cmgmt1_clean_pending_f());
+		__timeout_init();
+		do {
+			int cmgmt1 = ltc_ltc0_ltss_tstg_cmgmt1_r() +
+				     ltc * proj_ltc_stride_v();
+			op_pending = gk20a_readl(g, cmgmt1);
+			__timeout_check();
+		} while (op_pending &
+			 ltc_ltc0_ltss_tstg_cmgmt1_clean_pending_f());
+	}
 
 	/* And invalidate. */
 	gk20a_writel(g, ltc_ltcs_ltss_tstg_cmgmt0_r(),
@@ -335,19 +333,17 @@ void gm20b_flush_ltc(struct gk20a *g)
 	     ltc_ltcs_ltss_tstg_cmgmt0_invalidate_evict_first_class_true_f());
 
 	/* Wait on each LTC individually. */
-	__timeout_init();
-	do {
-		op_pending = gk20a_readl(g, ltc_ltc0_ltss_tstg_cmgmt0_r());
-		__timeout_check();
-	} while (op_pending &
-		 ltc_ltc0_ltss_tstg_cmgmt0_invalidate_pending_f());
-
-	__timeout_init();
-	do {
-		op_pending = gk20a_readl(g, ltc_ltc1_ltss_tstg_cmgmt0_r());
-		__timeout_check();
-	} while (op_pending &
-		 ltc_ltc1_ltss_tstg_cmgmt0_invalidate_pending_f());
+	for (ltc = 0; ltc < g->ltc_count; ltc++) {
+		u32 op_pending;
+		__timeout_init();
+		do {
+			int cmgmt0 = ltc_ltc0_ltss_tstg_cmgmt0_r() +
+				     ltc * proj_ltc_stride_v();
+			op_pending = gk20a_readl(g, cmgmt0);
+			__timeout_check();
+		} while (op_pending &
+			 ltc_ltc0_ltss_tstg_cmgmt0_invalidate_pending_f());
+	}
 }
 
 static int gm20b_determine_L2_size_bytes(struct gk20a *g)

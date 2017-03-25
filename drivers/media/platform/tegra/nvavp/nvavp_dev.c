@@ -1,7 +1,7 @@
 /*
  * drivers/media/video/tegra/nvavp/nvavp_dev.c
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This file is licensed under the terms of the GNU General Public License
  * version 2. This program is licensed "as is" without any warranty of any
@@ -108,6 +108,13 @@ static void __iomem *nvavp_reg_base;
 #define IS_VIDEO_CHANNEL_ID(channel_id)	(channel_id == NVAVP_VIDEO_CHANNEL ? 1: 0)
 
 #define SCLK_BOOST_RATE		40000000
+
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+static struct of_device_id tegra_vde_pd[] = {
+	{ .compatible = "nvidia,tegra132-vde-pd", },
+	{ .compatible = "nvidia,tegra124-vde-pd", },
+};
+#endif
 
 static bool boost_sclk;
 #if defined(CONFIG_TEGRA_NVAVP_AUDIO)
@@ -524,11 +531,19 @@ static struct clk *nvavp_clk_get(struct nvavp_info *nvavp, int id)
 static int nvavp_powergate_vde(struct nvavp_info *nvavp)
 {
 	int ret = 0;
+	int partition_id;
 
 	dev_dbg(&nvavp->nvhost_dev->dev, "%s++\n", __func__);
 
 	/* Powergate VDE */
-	ret = tegra_powergate_partition(TEGRA_POWERGATE_VDEC);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_vde_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_VDEC;
+#endif
+	ret = tegra_powergate_partition(partition_id);
 	if (ret)
 		dev_err(&nvavp->nvhost_dev->dev,
 				"%s: powergate failed\n",
@@ -540,11 +555,19 @@ static int nvavp_powergate_vde(struct nvavp_info *nvavp)
 static int nvavp_unpowergate_vde(struct nvavp_info *nvavp)
 {
 	int ret = 0;
+	int partition_id;
 
 	dev_dbg(&nvavp->nvhost_dev->dev, "%s++\n", __func__);
 
 	/* UnPowergate VDE */
-	ret = tegra_unpowergate_partition(TEGRA_POWERGATE_VDEC);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_vde_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_VDEC;
+#endif
+	ret = tegra_unpowergate_partition(partition_id);
 	if (ret)
 		dev_err(&nvavp->nvhost_dev->dev,
 				"%s: unpowergate failed\n",
@@ -881,6 +904,7 @@ static int nvavp_pushbuffer_update(struct nvavp_info *nvavp, u32 phys_addr,
 	u32 wordcount = 0;
 	u32 index, value = -1;
 	int ret = 0;
+	u32 max_index = 0;
 
 	mutex_lock(&nvavp->open_lock);
 	nvavp_runtime_get(nvavp);
@@ -896,7 +920,9 @@ static int nvavp_pushbuffer_update(struct nvavp_info *nvavp, u32 phys_addr,
 	mutex_lock(&channel_info->pushbuffer_lock);
 
 	/* check for pushbuffer wrapping */
-	if (channel_info->pushbuf_index >= channel_info->pushbuf_fence)
+	max_index = channel_info->pushbuf_fence;
+	max_index = ext_ucode_flag ? max_index : max_index - (sizeof(u32) * 4);
+	if (channel_info->pushbuf_index >= max_index)
 		channel_info->pushbuf_index = 0;
 
 	if (!ext_ucode_flag) {
@@ -1560,6 +1586,12 @@ static int nvavp_pushbuffer_submit_ioctl(struct file *filp, unsigned int cmd,
 	if (!hdr.cmdbuf.mem)
 		return 0;
 
+	if (hdr.num_relocs > NVAVP_MAX_RELOCATION_COUNT) {
+		dev_err(&nvavp->nvhost_dev->dev,
+			"invalid num_relocs %d\n", hdr.num_relocs);
+		return -EINVAL;
+	}
+
 	if (copy_from_user(clientctx->relocs, (void __user *)hdr.relocs,
 			sizeof(struct nvavp_reloc) * hdr.num_relocs)) {
 		return -EFAULT;
@@ -1570,6 +1602,14 @@ static int nvavp_pushbuffer_submit_ioctl(struct file *filp, unsigned int cmd,
 		dev_err(&nvavp->nvhost_dev->dev,
 			"invalid cmd buffer handle %08x\n", hdr.cmdbuf.mem);
 		return PTR_ERR(cmdbuf_dmabuf);
+	}
+
+	if ((hdr.cmdbuf.offset & 3)
+		|| (hdr.cmdbuf.offset >= cmdbuf_dmabuf->size)) {
+		dev_err(&nvavp->nvhost_dev->dev,
+			"invalid cmdbuf offset %d\n", hdr.cmdbuf.offset);
+		ret = -EINVAL;
+		goto err_dmabuf_attach;
 	}
 
 	cmdbuf_attach = dma_buf_attach(cmdbuf_dmabuf, &nvavp->nvhost_dev->dev);
@@ -1609,6 +1649,18 @@ static int nvavp_pushbuffer_submit_ioctl(struct file *filp, unsigned int cmd,
 			goto err_reloc_info;
 		}
 
+		if ((clientctx->relocs[i].cmdbuf_offset & 3)
+			|| (clientctx->relocs[i].cmdbuf_offset >=
+				cmdbuf_dmabuf->size)
+			|| (clientctx->relocs[i].cmdbuf_offset >=
+				(cmdbuf_dmabuf->size - hdr.cmdbuf.offset))) {
+			dev_err(&nvavp->nvhost_dev->dev,
+				"invalid reloc offset in cmdbuf %d\n",
+				clientctx->relocs[i].cmdbuf_offset);
+			ret = -EINVAL;
+			goto err_reloc_info;
+		}
+
 		reloc_addr = cmdbuf_data +
 			     (clientctx->relocs[i].cmdbuf_offset >> 2);
 
@@ -1617,6 +1669,17 @@ static int nvavp_pushbuffer_submit_ioctl(struct file *filp, unsigned int cmd,
 			ret = PTR_ERR(target_dmabuf);
 			goto target_dmabuf_fail;
 		}
+
+		if ((clientctx->relocs[i].target_offset & 3)
+			|| (clientctx->relocs[i].target_offset >=
+				target_dmabuf->size)) {
+			dev_err(&nvavp->nvhost_dev->dev,
+				"invalid target offset in reloc %d\n",
+				clientctx->relocs[i].target_offset);
+			ret = -EINVAL;
+			goto target_attach_fail;
+		}
+
 		target_attach = dma_buf_attach(target_dmabuf,
 					       &nvavp->nvhost_dev->dev);
 		if (IS_ERR(target_attach)) {

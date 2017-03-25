@@ -50,6 +50,38 @@
 #ifndef _hw_perf_gk20a_h_
 #define _hw_perf_gk20a_h_
 
+static inline u32 perf_pmasys_control_r(void)
+{
+	return 0x001b4000;
+}
+static inline u32 perf_pmasys_control_membuf_status_v(u32 r)
+{
+	return (r >> 4) & 0x1;
+}
+static inline u32 perf_pmasys_control_membuf_status_overflowed_v(void)
+{
+	return 0x00000001;
+}
+static inline u32 perf_pmasys_control_membuf_status_overflowed_f(void)
+{
+	return 0x10;
+}
+static inline u32 perf_pmasys_control_membuf_clear_status_f(u32 v)
+{
+	return (v & 0x1) << 5;
+}
+static inline u32 perf_pmasys_control_membuf_clear_status_v(u32 r)
+{
+	return (r >> 5) & 0x1;
+}
+static inline u32 perf_pmasys_control_membuf_clear_status_doit_v(void)
+{
+	return 0x00000001;
+}
+static inline u32 perf_pmasys_control_membuf_clear_status_doit_f(void)
+{
+	return 0x20;
+}
 static inline u32 perf_pmasys_mem_block_r(void)
 {
 	return 0x001b4070;
@@ -73,6 +105,22 @@ static inline u32 perf_pmasys_mem_block_target_lfb_v(void)
 static inline u32 perf_pmasys_mem_block_target_lfb_f(void)
 {
 	return 0x0;
+}
+static inline u32 perf_pmasys_mem_block_target_sys_coh_v(void)
+{
+	return 0x00000002;
+}
+static inline u32 perf_pmasys_mem_block_target_sys_coh_f(void)
+{
+	return 0x20000000;
+}
+static inline u32 perf_pmasys_mem_block_target_sys_ncoh_v(void)
+{
+	return 0x00000003;
+}
+static inline u32 perf_pmasys_mem_block_target_sys_ncoh_f(void)
+{
+	return 0x30000000;
 }
 static inline u32 perf_pmasys_mem_block_valid_f(u32 v)
 {
@@ -102,6 +150,10 @@ static inline u32 perf_pmasys_outbase_r(void)
 {
 	return 0x001b4074;
 }
+static inline u32 perf_pmasys_outbase_ptr_f(u32 v)
+{
+	return (v & 0x7ffffff) << 5;
+}
 static inline u32 perf_pmasys_outbaseupper_r(void)
 {
 	return 0x001b4078;
@@ -113,5 +165,41 @@ static inline u32 perf_pmasys_outbaseupper_ptr_f(u32 v)
 static inline u32 perf_pmasys_outsize_r(void)
 {
 	return 0x001b407c;
+}
+static inline u32 perf_pmasys_outsize_numbytes_f(u32 v)
+{
+	return (v & 0x7ffffff) << 5;
+}
+static inline u32 perf_pmasys_mem_bytes_r(void)
+{
+	return 0x001b4084;
+}
+static inline u32 perf_pmasys_mem_bytes_numbytes_f(u32 v)
+{
+	return (v & 0xfffffff) << 4;
+}
+static inline u32 perf_pmasys_mem_bump_r(void)
+{
+	return 0x001b4088;
+}
+static inline u32 perf_pmasys_mem_bump_numbytes_f(u32 v)
+{
+	return (v & 0xfffffff) << 4;
+}
+static inline u32 perf_pmasys_enginestatus_r(void)
+{
+	return 0x001b40a4;
+}
+static inline u32 perf_pmasys_enginestatus_rbufempty_f(u32 v)
+{
+	return (v & 0x1) << 4;
+}
+static inline u32 perf_pmasys_enginestatus_rbufempty_empty_v(void)
+{
+	return 0x00000001;
+}
+static inline u32 perf_pmasys_enginestatus_rbufempty_empty_f(void)
+{
+	return 0x10;
 }
 #endif

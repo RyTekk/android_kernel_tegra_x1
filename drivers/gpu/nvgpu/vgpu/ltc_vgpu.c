@@ -1,7 +1,7 @@
 /*
  * Virtualized GPU L2
  *
- * Copyright (c) 2014 NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2015 NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -33,6 +33,7 @@ static int vgpu_ltc_init_comptags(struct gk20a *g, struct gr_gk20a *gr)
 {
 	struct gk20a_platform *platform = gk20a_get_platform(g->dev);
 	u32 max_comptag_lines = 0;
+	int err;
 
 	gk20a_dbg_fn("");
 
@@ -41,9 +42,10 @@ static int vgpu_ltc_init_comptags(struct gk20a *g, struct gr_gk20a *gr)
 	if (max_comptag_lines < 2)
 		return -ENXIO;
 
-	gk20a_allocator_init(&gr->comp_tags, "comptag",
-			      1, /* start */
-			      max_comptag_lines - 1); /* length*/
+	err = gk20a_comptag_allocator_init(&gr->comp_tags, max_comptag_lines);
+	if (err)
+		return err;
+
 	return 0;
 }
 

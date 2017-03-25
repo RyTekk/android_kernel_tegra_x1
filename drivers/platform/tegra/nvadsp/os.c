@@ -5,7 +5,7 @@
  * Copyright (C) 2011 Texas Instruments, Inc.
  * Copyright (C) 2011 Google, Inc.
  *
- * Copyright (C) 2014-2015 NVIDIA Corporation. All rights reserved.
+ * Copyright (C) 2014-2016 NVIDIA Corporation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -79,10 +79,12 @@
 #define ENABLE_MBOX2_FULL_INT	0xFFFFFFFF
 
 #define LOGGER_TIMEOUT		20 /* in ms */
-#define ADSP_WFE_TIMEOUT	5000 /* in ms */
-#define LOGGER_COMPLETE_TIMEOUT	5000 /* in ms */
+#define ADSP_WFE_TIMEOUT	1000 /* in ms */
+#define LOGGER_COMPLETE_TIMEOUT	1000 /* in ms */
 
 #define MIN_ADSP_FREQ 51200000lu /* in Hz */
+
+#define DUMP_BUFF 128
 
 struct nvadsp_debug_log {
 	struct device		*dev;
@@ -94,27 +96,31 @@ struct nvadsp_debug_log {
 	struct completion	complete;
 };
 
+struct crash_handler {
+	nvadsp_crash_handler	handler;
+	void			*arg;
+};
+
 struct nvadsp_os_data {
-#if !CONFIG_SYSTEM_FPGA
-	void __iomem		*reset_reg;
-#endif
+	void __iomem		*unit_fpga_reset_reg;
 	const struct firmware	*os_firmware;
 	struct platform_device	*pdev;
 	struct global_sym_info	*adsp_glo_sym_tbl;
 	void __iomem		*misc_base;
 	struct resource		**dram_region;
 	struct nvadsp_debug_log	logger;
-	struct nvadsp_cnsl   console;
+	struct nvadsp_cnsl	console;
 	struct work_struct	restart_os_work;
 	int			adsp_num_crashes;
 	bool			adsp_os_fw_loaded;
 	struct mutex		fw_load_lock;
 	bool			os_running;
 	struct mutex		os_run_lock;
-	u32			adsp_load_addr;
-	u32			adsp_os_size;
-	u32			app_alloc_addr;
-	u32			app_size;
+	dma_addr_t		adsp_os_addr;
+	size_t			adsp_os_size;
+	dma_addr_t		app_alloc_addr;
+	size_t			app_size;
+	struct crash_handler	crash_handler;
 };
 
 static struct nvadsp_os_data priv;
@@ -475,25 +481,6 @@ struct global_sym_info *find_global_symbol(const char *sym_name)
 	return NULL;
 }
 
-static void *get_debug_ram(const struct firmware *fw, int *size)
-{
-	struct device *dev = &priv.pdev->dev;
-	struct elf32_shdr *shdr;
-	int addr;
-
-	shdr = nvadsp_get_section(fw, DEBUG_RAM_REGION);
-	if (!shdr) {
-		dev_info(dev, "section %s not found\n", DEBUG_RAM_REGION);
-		return ERR_PTR(-EINVAL);
-	}
-
-	dev_dbg(dev, "the %s is present at 0x%x\n",
-		DEBUG_RAM_REGION, shdr->sh_addr);
-	addr = shdr->sh_addr;
-	*size = shdr->sh_size;
-	return nvadsp_da_to_va_mappings(addr, *size);
-}
-
 static void *get_mailbox_shared_region(const struct firmware *fw)
 {
 	struct device *dev;
@@ -579,12 +566,20 @@ static int nvadsp_os_elf_load(const struct firmware *fw)
 
 		/* put the segment where the remote processor expects it */
 		if (filesz) {
-			if (!is_adsp_dram_addr(da)) {
+			if (is_adsp_dram_addr(da))
+				memcpy(va, elf_data + offset, filesz);
+			else if ((da == drv_data->evp_base[ADSP_EVP_BASE]) &&
+				(filesz == drv_data->evp_base[ADSP_EVP_SIZE])) {
+
 				drv_data->state.evp_ptr = va;
 				memcpy(drv_data->state.evp,
-				       elf_data + offset, filesz);
-			} else
-				memcpy(va, elf_data + offset, filesz);
+					elf_data + offset, filesz);
+			} else {
+				dev_err(dev, "can't load mem pa:0x%x va:%p\n",
+						da, va);
+				ret = -EINVAL;
+				break;
+			}
 		}
 	}
 
@@ -604,9 +599,9 @@ static int allocate_memory_for_adsp_os(void)
 	size_t size;
 	int ret = 0;
 
-#if defined(CONFIG_TEGRA_NVADSP_ON_SMMU)
-	addr = priv.adsp_load_addr;
+	addr = priv.adsp_os_addr;
 	size = priv.adsp_os_size;
+#if defined(CONFIG_TEGRA_NVADSP_ON_SMMU)
 	dram_va = dma_alloc_at_coherent(dev, size, &addr, GFP_KERNEL);
 	if (!dram_va) {
 		dev_err(dev, "unable to allocate SMMU pages\n");
@@ -614,19 +609,9 @@ static int allocate_memory_for_adsp_os(void)
 		goto end;
 	}
 #else
-	struct nvadsp_platform_data *plat_data = pdev->dev.platform_data;
-
-	if (IS_ERR_OR_NULL(plat_data)) {
-		dev_err(dev, "carvout is NULL\n");
-		ret = -ENOMEM;
-		goto end;
-	}
-
-	addr = plat_data->co_pa;
-	size = plat_data->co_size;
-	dram_va = ioremap_nocache(addr, plat_data->co_size);
+	dram_va = ioremap_nocache(addr, size);
 	if (!dram_va) {
-		dev_err(dev, "remap failed for addr %llx\n", plat_data->co_pa);
+		dev_err(dev, "remap failed for addr 0x%llx\n", addr);
 		ret = -ENOMEM;
 		goto end;
 	}
@@ -639,19 +624,19 @@ end:
 static void deallocate_memory_for_adsp_os(struct device *dev)
 {
 #if defined(CONFIG_TEGRA_NVADSP_ON_SMMU)
-	void *va = nvadsp_da_to_va_mappings(priv.adsp_load_addr,
+	void *va = nvadsp_da_to_va_mappings(priv.adsp_os_addr,
 			priv.adsp_os_size);
-	dma_free_coherent(dev, priv.adsp_load_addr, va, priv.adsp_os_size);
+	dma_free_coherent(dev, priv.adsp_os_addr, va, priv.adsp_os_size);
 #endif
 }
 
 int nvadsp_os_load(void)
 {
+	struct nvadsp_shared_mem *shared_mem;
 	struct nvadsp_drv_data *drv_data;
 	const struct firmware *fw;
 	struct device *dev;
 	int ret = 0;
-	void *ptr;
 
 	if (!priv.pdev) {
 		pr_err("ADSP Driver is not initialized\n");
@@ -686,12 +671,11 @@ int nvadsp_os_load(void)
 		goto release_firmware;
 	}
 
-	priv.logger.debug_ram_rdr =
-		get_debug_ram(fw, &priv.logger.debug_ram_sz);
-	if (IS_ERR_OR_NULL(priv.logger.debug_ram_rdr))
-		dev_err(dev, "Ram debug logging facility not available\n");
-
-	/* hold the pointer to the device */
+	shared_mem = get_mailbox_shared_region(fw);
+	drv_data->shared_adsp_os_data = shared_mem;
+	/* set logger strcuture with required properties */
+	priv.logger.debug_ram_rdr = shared_mem->os_args.logger;
+	priv.logger.debug_ram_sz = sizeof(shared_mem->os_args.logger);
 	priv.logger.dev = dev;
 
 	dev_info(dev, "Loading ADSP OS firmware %s\n", NVADSP_FIRMWARE);
@@ -707,8 +691,6 @@ int nvadsp_os_load(void)
 		dev_err(dev, "Memory allocation dynamic apps failed\n");
 		goto deallocate_os_memory;
 	}
-	ptr = get_mailbox_shared_region(fw);
-	drv_data->shared_adsp_os_data = ptr;
 	priv.os_firmware = fw;
 	priv.adsp_os_fw_loaded = true;
 	wake_up(&priv.logger.wait_queue);
@@ -725,6 +707,14 @@ end:
 	return ret;
 }
 EXPORT_SYMBOL(nvadsp_os_load);
+
+
+void nvadsp_register_crash_handler(nvadsp_crash_handler handler, void *arg)
+{
+	priv.crash_handler.handler = handler;
+	priv.crash_handler.arg = arg;
+}
+EXPORT_SYMBOL(nvadsp_register_crash_handler);
 
 /*
  * Static adsp freq to emc freq lookup table
@@ -747,46 +737,63 @@ u32 adsp_to_emc_freq(u32 adspfreq)
 		return 0;		/* emc min */
 }
 
-static int nvadsp_set_boot_freqs(struct nvadsp_drv_data *drv_data)
+static int nvadsp_set_ape_emc_freq(struct nvadsp_drv_data *drv_data)
 {
-	struct nvadsp_shared_mem *shared_mem;
-	struct nvadsp_os_args *os_args;
+	unsigned long ape_emc_freq = drv_data->ape_emc_freq * 1000; /* in Hz */
+	struct device *dev = &priv.pdev->dev;
+	int ret;
+
+#ifdef CONFIG_TEGRA_ADSP_DFS
+	 /* pass adsp freq in KHz. adsp_emc_freq in Hz */
+	ape_emc_freq = adsp_to_emc_freq(drv_data->adsp_freq / 1000) * 1000;
+#endif
+	dev_dbg(dev, "requested adsp cpu freq %luKHz",
+		drv_data->adsp_freq / 1000);
+	dev_dbg(dev, "ape.emc freq %luHz\n", ape_emc_freq / 1000);
+
+	ret = clk_set_rate(drv_data->ape_emc_clk, ape_emc_freq);
+
+	dev_dbg(dev, "ape.emc freq %luKHz\n",
+		clk_get_rate(drv_data->ape_emc_clk) / 1000);
+	return ret;
+}
+
+static int nvadsp_set_ape_freq(struct nvadsp_drv_data *drv_data)
+{
+	unsigned long ape_freq = drv_data->ape_freq * 1000; /* in Hz*/
+	struct device *dev = &priv.pdev->dev;
+	int ret;
+
+#ifdef CONFIG_TEGRA_ADSP_ACTMON
+	ape_freq = drv_data->adsp_freq / ADSP_TO_APE_CLK_RATIO;
+#endif
+	dev_dbg(dev, "ape freq %luKHz", ape_freq / 1000);
+
+	ret = clk_set_rate(drv_data->ape_clk, ape_freq);
+
+	dev_dbg(dev, "ape freq %luKHz\n",
+		clk_get_rate(drv_data->ape_clk) / 1000);
+	return ret;
+}
+
+static int set_adsp_clks_and_timer_prescalar(struct nvadsp_drv_data *drv_data)
+{
+	struct nvadsp_shared_mem *shared_mem = drv_data->shared_adsp_os_data;
+	struct nvadsp_os_args *os_args = &shared_mem->os_args;
+	struct device *dev = &priv.pdev->dev;
 	unsigned long max_adsp_freq;
-	unsigned long ape_emc_freq;
 	unsigned long adsp_freq;
-	unsigned long ape_freq;
-	struct device *dev;
 	u32 max_index;
 	u32 cur_index;
 	int ret = 0;
 
-	dev = &priv.pdev->dev;
-
-	shared_mem = drv_data->shared_adsp_os_data;
-	os_args = &shared_mem->os_args;
 	adsp_freq = drv_data->adsp_freq * 1000; /* in Hz*/
-	ape_freq = drv_data->ape_freq * 1000; /* in Hz*/
-	ape_emc_freq = drv_data->ape_emc_freq * 1000; /* in Hz */
 
-	if (drv_data->adsp_cpu_clk) {
-		max_adsp_freq = clk_round_rate(drv_data->adsp_cpu_clk,
-					ULONG_MAX);
-		max_index = max_adsp_freq / MIN_ADSP_FREQ;
-		cur_index = adsp_freq / MIN_ADSP_FREQ;
-	} else {
-		ret = -EINVAL;
-		goto end;
-	}
+	max_adsp_freq = clk_round_rate(drv_data->adsp_cpu_clk,
+				ULONG_MAX);
+	max_index = max_adsp_freq / MIN_ADSP_FREQ;
+	cur_index = adsp_freq / MIN_ADSP_FREQ;
 
-	if (!drv_data->ape_clk) {
-		ret = -EINVAL;
-		goto end;
-	}
-
-	if (!drv_data->ape_emc_clk) {
-		ret = -EINVAL;
-		goto end;
-	}
 
 	if (!adsp_freq)
 		/* Set max adsp boot freq */
@@ -809,51 +816,111 @@ static int nvadsp_set_boot_freqs(struct nvadsp_drv_data *drv_data)
 	os_args->timer_prescalar = cur_index - 1;
 
 	adsp_freq = cur_index * MIN_ADSP_FREQ;
-	drv_data->adsp_freq = adsp_freq / 1000; /* adsp_freq in KHz*/
-
-#ifdef CONFIG_TEGRA_ADSP_ACTMON
-	ape_freq = adsp_freq / ADSP_TO_APE_CLK_RATIO;
-#endif
-
-#ifdef CONFIG_TEGRA_ADSP_DFS
-	 /* pass adsp freq in KHz. adsp_emc_freq in Hz */
-	ape_emc_freq = adsp_to_emc_freq(adsp_freq / 1000) * 1000;
-#endif
-	dev_dbg(dev, "requested adsp cpu freq %luKHz",  adsp_freq / 1000);
-	dev_dbg(dev, "ape freq %luKHz", ape_freq / 1000);
-	dev_dbg(dev, "ape.emc freq %luHz\n", ape_emc_freq / 1000);
 
 	ret = clk_set_rate(drv_data->adsp_cpu_clk, adsp_freq);
 	if (ret)
 		goto end;
 
-	ret = clk_set_rate(drv_data->ape_clk, ape_freq);
-	if (ret)
-		goto end;
-
-	ret = clk_set_rate(drv_data->ape_emc_clk, ape_emc_freq);
+	drv_data->adsp_freq = adsp_freq / 1000; /* adsp_freq in KHz*/
 
 end:
-	dev_dbg(dev, "adsp-cpu-freq: %luKHz ape-freq: %luKHz ape.emc-freq: %luKHz\n",
-		clk_get_rate(drv_data->adsp_cpu_clk) / 1000,
-		clk_get_rate(drv_data->ape_clk) / 1000,
-		clk_get_rate(drv_data->ape_emc_clk) / 1000);
+	dev_dbg(dev, "adsp cpu freq %luKHz\n",
+		clk_get_rate(drv_data->adsp_cpu_clk) / 1000);
 	dev_dbg(dev, "timer prescalar %x\n", os_args->timer_prescalar);
 
 	return ret;
 }
+
+static int deassert_adsp(struct nvadsp_drv_data *drv_data)
+{
+	struct device *dev = &priv.pdev->dev;
+
+	if (drv_data->adsp_unit_fpga) {
+		dev_info(dev, "De-asserting ADSP UNIT-FPGA\n");
+		writel(drv_data->unit_fpga_reset[ADSP_DEASSERT],
+				priv.unit_fpga_reset_reg);
+		return 0;
+	}
+
+	if (drv_data->adsp_clk) {
+		dev_dbg(dev, "deasserting adsp...\n");
+		tegra_periph_reset_deassert(drv_data->adsp_clk);
+		udelay(200);
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static int assert_adsp(struct nvadsp_drv_data *drv_data)
+{
+	struct device *dev = &priv.pdev->dev;
+
+	if (drv_data->adsp_unit_fpga) {
+		if (drv_data->unit_fpga_reset[ADSP_ASSERT]) {
+			dev_info(dev, "Asserting ADSP UNIT-FPGA\n");
+			writel(drv_data->unit_fpga_reset[ADSP_ASSERT],
+				priv.unit_fpga_reset_reg);
+		}
+		return 0;
+	}
+
+	if (drv_data->adsp_clk) {
+		tegra_periph_reset_assert(drv_data->adsp_clk);
+		udelay(200);
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static int nvadsp_set_boot_freqs(struct nvadsp_drv_data *drv_data)
+{
+	int ret;
+
+	/* on Unit-FPGA do not set clocks, return Sucess */
+	if (drv_data->adsp_unit_fpga)
+		return 0;
+
+	if (drv_data->adsp_cpu_clk) {
+		ret = set_adsp_clks_and_timer_prescalar(drv_data);
+		if (ret)
+			goto end;
+	} else {
+		ret = -EINVAL;
+		goto end;
+	}
+
+	if (drv_data->ape_clk) {
+		ret = nvadsp_set_ape_freq(drv_data);
+		if (ret)
+			goto end;
+	}
+
+	if (drv_data->ape_emc_clk) {
+		ret = nvadsp_set_ape_emc_freq(drv_data);
+		if (ret)
+			goto end;
+	}
+
+end:
+	return ret;
+}
+
 static int __nvadsp_os_start(void)
 {
 	struct nvadsp_drv_data *drv_data;
 	struct device *dev;
-
-#if !CONFIG_SYSTEM_FPGA
-	u32 val;
-#endif
 	int ret = 0;
 
 	dev = &priv.pdev->dev;
 	drv_data = platform_get_drvdata(priv.pdev);
+
+
+	dev_dbg(dev, "ADSP is booting on %s\n",
+		drv_data->adsp_unit_fpga ? "UNIT-FPGA" : "SILICON");
+
+	assert_adsp(drv_data);
 
 	dev_dbg(dev, "Copying EVP...\n");
 	copy_io_in_l(drv_data->state.evp_ptr,
@@ -863,19 +930,9 @@ static int __nvadsp_os_start(void)
 	ret = nvadsp_set_boot_freqs(drv_data);
 	if (ret)
 		goto end;
-
-	if (drv_data->adsp_clk) {
-		dev_dbg(dev, "deasserting adsp...\n");
-		tegra_periph_reset_deassert(drv_data->adsp_clk);
-		udelay(200);
-	} else {
-		ret = -EINVAL;
+	ret = deassert_adsp(drv_data);
+	if (ret)
 		goto end;
-	}
-
-#if !CONFIG_SYSTEM_FPGA
-	writel(APE_RESET, priv.reset_reg);
-#endif
 
 	dev_dbg(dev, "Waiting for ADSP OS to boot up...\n");
 	ret = wait_for_adsp_os_load_complete();
@@ -910,6 +967,55 @@ err:
 	return ret;
 }
 
+static void dump_adsp_logs(void)
+{
+	int i = 0;
+	char buff[DUMP_BUFF] = { };
+	int buff_iter = 0;
+	char last_char;
+	struct nvadsp_debug_log *logger = &priv.logger;
+	struct device *dev = &priv.pdev->dev;
+	char *ptr = logger->debug_ram_rdr;
+
+	dev_err(dev, "Dumping ADSP logs ........\n");
+
+	for (i = 0; i < logger->debug_ram_sz; i++) {
+		last_char = *(ptr + i);
+		if ((last_char != EOT) && (last_char != 0)) {
+			if ((last_char == '\n') || (last_char == '\r') ||
+					(buff_iter == DUMP_BUFF)) {
+				dev_err(dev, "[ADSP OS] %s\n", buff);
+				memset(buff, 0, sizeof(buff));
+				buff_iter = 0;
+			} else {
+				buff[buff_iter++] = last_char;
+			}
+		}
+	}
+	dev_err(dev, "End of ADSP log dump  .....\n");
+}
+
+static void print_agic_irq_states(void)
+{
+	struct device *dev = &priv.pdev->dev;
+	int i;
+
+	for (i = INT_AGIC_START; i < INT_AGIC_END; i++) {
+		dev_info(dev, "irq %d is %s and %s\n", i,
+		tegra_agic_irq_is_pending(i) ?
+			"pending" : "not pending",
+		tegra_agic_irq_is_active(i) ?
+			"active" : "not active");
+	}
+}
+
+static void dump_adsp_sys(void)
+{
+	dump_adsp_logs();
+	dump_mailbox_regs();
+	print_agic_irq_states();
+}
+
 int nvadsp_os_start(void)
 {
 	struct nvadsp_drv_data *drv_data;
@@ -937,15 +1043,22 @@ int nvadsp_os_start(void)
 	if (priv.os_running)
 		goto unlock;
 
+#ifdef CONFIG_PM_RUNTIME
 	ret = pm_runtime_get_sync(&priv.pdev->dev);
 	if (ret)
 		goto unlock;
+#endif
 	ret = __nvadsp_os_start();
 	if (ret) {
 		priv.os_running = drv_data->adsp_os_running = false;
 		/* if start fails call pm suspend of adsp driver */
+		dev_err(dev, "adsp failed to boot with ret = %d\n", ret);
+		dump_adsp_sys();
+#ifdef CONFIG_PM_RUNTIME
 		pm_runtime_put_sync(&priv.pdev->dev);
+#endif
 		goto unlock;
+
 	}
 	priv.os_running = drv_data->adsp_os_running = true;
 	drv_data->adsp_os_suspended = false;
@@ -1006,14 +1119,8 @@ static int __nvadsp_os_suspend(void)
 
 	drv_data->adsp_os_suspended = true;
 
-	tegra_periph_reset_assert(drv_data->adsp_clk);
-	udelay(200);
+	assert_adsp(drv_data);
 
-	ret = pm_runtime_put_sync(&priv.pdev->dev);
-	if (ret) {
-		dev_err(dev, "failed in pm_runtime_put_sync\n");
-		goto out;
-	}
  out:
 	return ret;
 }
@@ -1048,14 +1155,10 @@ static void __nvadsp_os_stop(bool reload)
 	 * Reset it in either case. On failure, whole APE reset is
 	 * required (happens on next APE power domain cycle).
 	 */
-	tegra_periph_reset_assert(drv_data->adsp_clk);
-	udelay(200);
+	assert_adsp(drv_data);
 
-	/* Don't reload ADSPOS if ADSP state is not WFI/WFE */
-	if (WARN_ON(err <= 0)) {
+	if (WARN_ON(err <= 0))
 		dev_err(dev, "ADSP is unable to enter wfi state\n");
-		goto end;
-	}
 
 	if (reload) {
 		struct nvadsp_debug_log *logger = &priv.logger;
@@ -1074,9 +1177,11 @@ static void __nvadsp_os_stop(bool reload)
 		/* load a fresh copy of adsp.elf */
 		if (nvadsp_os_elf_load(fw))
 			dev_err(dev, "failed to reload %s\n", NVADSP_FIRMWARE);
+		unload_all_apps();
+		reset_hwmbox_queue();
+		clear_mbox_queue();
 	}
 
- end:
 	return;
 }
 
@@ -1096,24 +1201,21 @@ void nvadsp_os_stop(void)
 	drv_data = platform_get_drvdata(priv.pdev);
 
 	mutex_lock(&priv.os_run_lock);
-	/* check if os is running else exit */
-	if (!priv.os_running)
-		goto end;
-
-	__nvadsp_os_stop(true);
-
 	priv.os_running = drv_data->adsp_os_running = false;
 
+	__nvadsp_os_stop(true);
+#ifdef CONFIG_PM_RUNTIME
 	err = pm_runtime_put_sync(dev);
 	if (err)
 		dev_err(dev, "failed in pm_runtime_put_sync\n");
-end:
+#endif
 	mutex_unlock(&priv.os_run_lock);
 }
 EXPORT_SYMBOL(nvadsp_os_stop);
 
 int nvadsp_os_suspend(void)
 {
+	struct device *dev = &priv.pdev->dev;
 	struct nvadsp_drv_data *drv_data;
 	int ret = -EINVAL;
 
@@ -1138,8 +1240,17 @@ int nvadsp_os_suspend(void)
 		goto unlock;
 	}
 	ret = __nvadsp_os_suspend();
-	if (!ret)
+	if (!ret) {
+#ifdef CONFIG_PM_RUNTIME
+		ret = pm_runtime_put_sync(&priv.pdev->dev);
+		if (ret)
+			dev_err(dev, "failed in pm_runtime_put_sync\n");
+#endif
 		priv.os_running = drv_data->adsp_os_running = false;
+	} else {
+		dev_err(&priv.pdev->dev, "suspend failed with %d\n", ret);
+		dump_adsp_sys();
+	}
 unlock:
 	mutex_unlock(&priv.os_run_lock);
 end:
@@ -1147,15 +1258,17 @@ end:
 }
 EXPORT_SYMBOL(nvadsp_os_suspend);
 
-static void nvadsp_os_restart(struct work_struct *work)
+static void nvadsp_wdt_worker(struct work_struct *work)
 {
 	struct nvadsp_os_data *data =
 		container_of(work, struct nvadsp_os_data, restart_os_work);
+	struct nvadsp_drv_data *drv_data = platform_get_drvdata(priv.pdev);
 	int wdt_virq = tegra_agic_irq_get_virq(INT_ADSP_WDT);
 	struct device *dev = &data->pdev->dev;
 
 	disable_irq(wdt_virq);
-	nvadsp_os_stop();
+	dump_adsp_sys();
+	assert_adsp(drv_data);
 
 	if (tegra_agic_irq_is_active(INT_ADSP_WDT)) {
 		dev_info(dev, "wdt interrupt is active hence clearing\n");
@@ -1170,17 +1283,14 @@ static void nvadsp_os_restart(struct work_struct *work)
 	dev_info(dev, "wdt interrupt is not pending or active...enabling\n");
 	enable_irq(wdt_virq);
 
+	if (priv.crash_handler.handler)
+		priv.crash_handler.handler(priv.crash_handler.arg);
+
 	data->adsp_num_crashes++;
-	if (data->adsp_num_crashes >= ALLOWED_CRASHES) {
+	if (data->adsp_num_crashes >= ALLOWED_CRASHES)
 		/* making pdev NULL so that externally start is not called */
-		priv.pdev = NULL;
 		dev_crit(dev, "ADSP has crashed too many times(%d)\n",
 			 data->adsp_num_crashes);
-		return;
-	}
-
-	if (nvadsp_os_start())
-		dev_crit(dev, "Unable to restart ADSP OS\n");
 }
 
 static  irqreturn_t adsp_wfi_handler(int irq, void *arg)
@@ -1197,14 +1307,16 @@ static  irqreturn_t adsp_wfi_handler(int irq, void *arg)
 static irqreturn_t adsp_wdt_handler(int irq, void *arg)
 {
 	struct nvadsp_os_data *data = arg;
+	struct nvadsp_drv_data *drv_data;
 	struct device *dev = &data->pdev->dev;
 
-#if CONFIG_SYSTEM_FPGA
-	dev_crit(dev, "ADSP OS Hanged or Crashed! Restarting...\n");
-	schedule_work(&data->restart_os_work);
-#else
-	dev_crit(dev, "ADSP OS Hanged or Crashed!\n");
-#endif
+	drv_data = platform_get_drvdata(data->pdev);
+	if (!drv_data->adsp_unit_fpga) {
+		dev_crit(dev, "ADSP OS Hanged or Crashed! Restarting...\n");
+		schedule_work(&data->restart_os_work);
+	} else {
+		dev_crit(dev, "ADSP OS Hanged or Crashed!\n");
+	}
 	return IRQ_HANDLED;
 }
 
@@ -1216,18 +1328,11 @@ int __init nvadsp_os_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	int ret = 0;
 
-#if !CONFIG_SYSTEM_FPGA
-	priv.reset_reg = ioremap(APE_FPGA_MISC_RST_DEVICES, 1);
-	if (!priv.reset_reg) {
-		dev_err(dev, "unable to map reset addr\n");
-		ret = -EINVAL;
-		goto end;
-	}
-#endif
+	priv.unit_fpga_reset_reg = drv_data->base_regs[UNIT_FPGA_RST];
 	priv.misc_base = drv_data->base_regs[AMISC];
 	priv.dram_region = drv_data->dram_region;
 
-	priv.adsp_load_addr = drv_data->adsp_mem[ADSP_LOAD_ADDR];
+	priv.adsp_os_addr = drv_data->adsp_mem[ADSP_OS_ADDR];
 	priv.adsp_os_size = drv_data->adsp_mem[ADSP_OS_SIZE];
 	priv.app_alloc_addr = drv_data->adsp_mem[ADSP_APP_ADDR];
 	priv.app_size = drv_data->adsp_mem[ADSP_APP_SIZE];
@@ -1255,7 +1360,7 @@ int __init nvadsp_os_probe(struct platform_device *pdev)
 
 	writel(DISABLE_MBOX2_FULL_INT, priv.misc_base + HWMBOX2_REG);
 
-	INIT_WORK(&priv.restart_os_work, nvadsp_os_restart);
+	INIT_WORK(&priv.restart_os_work, nvadsp_wdt_worker);
 	mutex_init(&priv.fw_load_lock);
 	mutex_init(&priv.os_run_lock);
 

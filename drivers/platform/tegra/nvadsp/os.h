@@ -3,7 +3,7 @@
  *
  * A header file containing data structures shared with ADSP OS
  *
- * Copyright (C) 2014-2015 NVIDIA Corporation. All rights reserved.
+ * Copyright (C) 2014-2016 NVIDIA Corporation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -18,17 +18,13 @@
 #ifndef __TEGRA_NVADSP_OS_H
 #define __TEGRA_NVADSP_OS_H
 #include <linux/firmware.h>
+#include "adsp_shared_struct.h"
 
 #define CONFIG_ADSP_DRAM_LOG_WITH_TAG	1
-#define CONFIG_USE_STATIC_APP_LOAD	0
-#define CONFIG_SYSTEM_FPGA		1
 /* enable profiling of load init start */
 #define RECORD_STATS			0
 
 #define SYM_NAME_SZ 128
-
-#define APE_FPGA_MISC_RST_DEVICES 0x702dc800 /*1882048512*/
-#define APE_RESET (1 << 6)
 
 #define AMC_EVP_RESET_VEC_0		0x700
 #define AMC_EVP_UNDEF_VEC_0		0x704
@@ -52,40 +48,6 @@
 
 #define OS_LOAD_TIMEOUT		5000 /* ms */
 #define ADSP_COM_MBOX_ID	2
-
-/*ADSP message pool structure */
-union app_loader_msgq {
-	msgq_t msgq;
-	struct {
-		int32_t header[MSGQ_HEADER_WSIZE];
-		int32_t queue[MSGQ_MAX_QUEUE_WSIZE];
-	};
-};
-
-/* ADSP APP shared message pool */
-struct nvadsp_app_shared_msg_pool {
-	union app_loader_msgq		app_loader_send_message;
-	union app_loader_msgq		app_loader_recv_message;
-} __packed;
-
-/*ADSP shated OS args */
-struct nvadsp_os_args {
-	int32_t timer_prescalar;
-} __packed;
-
-/* ADSP OS shared memory */
-struct nvadsp_shared_mem {
-	struct nvadsp_app_shared_msg_pool app_shared_msg_pool;
-	struct nvadsp_os_args os_args;
-} __packed;
-
-struct app_mem_size {
-	uint64_t dram;
-	uint64_t dram_shared;
-	uint64_t dram_shared_wc;
-	uint64_t aram;
-	uint64_t aram_x;
-};
 
 enum adsp_os_cmd {
 	ADSP_OS_SUSPEND,
@@ -123,6 +85,7 @@ struct adsp_module {
 	uint32_t			adsp_module_ptr;
 	size_t				size;
 	const struct app_mem_size	mem_size;
+	bool				dynamic;
 };
 
 struct app_load_stats {
@@ -173,11 +136,14 @@ struct elf32_shdr *nvadsp_get_section(const struct firmware *, char *);
 struct global_sym_info *find_global_symbol(const char *);
 void update_nvadsp_app_shared_ptr(void *);
 
-struct adsp_module *load_adsp_module(const char *, const char *,
-	struct device *, struct app_load_stats *);
+struct adsp_module *load_adsp_dynamic_module(const char *, const char *,
+	struct device *);
+struct adsp_module *load_adsp_static_module(const char *,
+	struct adsp_shared_app *, struct device *);
 void unload_adsp_module(struct adsp_module *);
 
 int allocate_memory_from_adsp(void **, unsigned int);
 bool is_adsp_dram_addr(u64);
 int wait_for_adsp_os_load_complete(void);
+void unload_all_apps(void);
 #endif /* __TEGRA_NVADSP_OS_H */

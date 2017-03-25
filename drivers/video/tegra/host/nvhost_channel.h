@@ -45,7 +45,7 @@ struct nvhost_channel_ops {
 
 struct nvhost_channel {
 	struct nvhost_channel_ops ops;
-	int refcount;
+	struct kref refcount;
 	int chid;
 	int dev_chid;
 	struct mutex submitlock;
@@ -53,10 +53,8 @@ struct nvhost_channel {
 	struct platform_device *dev;
 	struct nvhost_cdma cdma;
 
-	/* the address space block here
-	 * belongs to the module. but for
-	 * now just keep it here */
-	struct nvhost_as *as;
+	/* pointer to channel address space */
+	struct nvhost_vm *vm;
 
 	/* channel syncpoints */
 	struct mutex syncpts_lock;
@@ -71,6 +69,8 @@ struct nvhost_channel {
 #define channel_op(ch)		(ch->ops)
 
 int nvhost_alloc_channels(struct nvhost_master *host);
+int nvhost_channel_remove_identifier(struct nvhost_device_data *pdata,
+			void *identifier);
 int nvhost_channel_unmap(struct nvhost_channel *ch);
 int nvhost_channel_release(struct nvhost_device_data *pdata);
 int nvhost_channel_list_free(struct nvhost_master *host);

@@ -1,7 +1,7 @@
 /*
  * arch/arm64/boot/dts/tegra210-jetson-e-base-p2595-0000-a00.dts
  *
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,8 +21,8 @@
 #include "tegra210-common.dtsi"
 #include "tegra210-platforms/tegra210-jetson-e-power-tree-p2530-0930-e03.dtsi"
 #include "tegra210-platforms/tegra210-jetson-e-gpio-p2530-0930-e03.dtsi"
-#include "tegra210-platforms/tegra210-jetson-e-pinmux-p2530-0930-e03.dtsi"
 #include "tegra210-platforms/tegra210-pinmux-drive-sdmmc-common.dtsi"
+#include "tegra210-platforms/tegra210-jetson-e-pinmux-p2530-0930-e03.dtsi"
 #include "tegra210-platforms/tegra210-jetson-e-prods.dtsi"
 #include "tegra210-platforms/tegra210-comms-p2530-0930.dtsi"
 #include "tegra210-platforms/tegra210-jetson-e-camera-p2530-0930-e03.dtsi"
@@ -32,22 +32,21 @@
 #include "tegra210-platforms/tegra210-ers-hdmi-e2190-1100-a00.dtsi"
 #include "tegra210-platforms/tegra210-loki-e-sensor-p2530-0032-e00.dtsi"
 #include "tegra210-platforms/tegra210-sdhci.dtsi"
-#include "tegra210-platforms/tegra210-p2530-common.dtsi"
+#include "tegra210-platforms/tegra210-jetson-e-p2530.dtsi"
 #include "tegra210-platforms/tegra210-thermal-fan-est-p2530-0930.dtsi"
 #include "tegra210-platforms/tegra210-keys-p2530-0930.dtsi"
 #include "tegra210-platforms/tegra210-jetson-e-powermon-p2595-0000-a00.dtsi"
 #include <dt-bindings/iio/meter/ina3221x.h>
 #include "tegra210-platforms/tegra210-foster-e-extcon-p2530-0930-e01.dtsi"
-#include "tegra210-platforms/tegra210-loki-e-emc-a01.dtsi"
+#include "tegra210-platforms/tegra210-jetson-e-emc-p2530-e01.dtsi"
 #include "tegra210-platforms/tegra210-edp.dtsi"
 #include "tegra210-platforms/tegra210-sysedp.dtsi"
 #include "tegra210-platforms/tegra210-audio.dtsi"
 #include "tegra210-platforms/tegra210-thermal-nct72-p2530.dtsi"
 #include "tegra210-platforms/tegra210-thermal-Tboard-Tdiode.dtsi"
 #include "tegra210-platforms/tegra210-jetson-e-powermon-p2530-0930-e03.dtsi"
-#include "tegra210-platforms/tegra210-therm-est.dtsi"
 #include "tegra210-platforms/tegra210-jetson-cpufreq.dtsi"
-
+#include "tegra210-platforms/tegra210-overrides/tegra210-power-dvfs-override-ucm1c.dtsi"
 
 / {
 	model = "jetson_e";
@@ -61,7 +60,7 @@
 	#size-cells = <2>;
 
 	chosen {
-        };
+	};
 
 	pmc@7000e400 {
 		nvidia,invert-interrupt;
@@ -76,6 +75,10 @@
 
 			sdmmc3 {
 				nvidia,deep-power-down-enable;
+				nvidia,enable-dynamic-pad-voltage;
+			};
+			sdmmc1 {
+				nvidia,enable-dynamic-pad-voltage;
 			};
 		};
 	};
@@ -169,7 +172,6 @@
 	sata@70020000 {
 		compatible = "nvidia,tegra210-ahci-sata";
 		nvidia,enable-sata-port;
-		nvidia,sata-power-war;
 		status = "okay";
 	};
 
@@ -208,6 +210,73 @@
 				vif-supply = <&en_vdd_cam>;
 				cam2-gpios = <&gpio CAM_PWDN_FQ 0>;
 			};
+
+			ov10823@6_0020 {
+				use_of_node = "yes";
+				dev_name = "ov10823";
+				num = <0>;
+				cam,cam-change-i2c-addr;
+				cam,cam-sids-high-to-low;
+				cam,cam-skip-sw-reset;
+				#cam,cam-i2c-recovery;
+				cam,cam-use-osc-for-mclk;
+				cam,cam-use-26mhz-mclk;
+				default_i2c_sid_low = <OV10823_DEFAULT_I2C_ADDR_SID_LOW>;
+				default_i2c_sid_high = <OV10823_DEFAULT_I2C_ADDR_SID_HIGH>;
+				regw_sid_low = <OV10823_SENSOR_REG_RW_SID_LOW>;
+				regw_sid_high = <OV10823_SENSOR_REG_RW_SID_HIGH>;
+				cam1i2c_addr = <OV10823_I2C_ADDR_CAM1>;
+				cam2i2c_addr = <OV10823_I2C_ADDR_CAM2>;
+				cam3i2c_addr = <OV10823_I2C_ADDR_CAM3>;
+				cam1sid-gpios = <&gpio TEGRA_GPIO(T, 1) 0>;
+				cam2sid-gpios = <&gpio TEGRA_GPIO(S, 5) 0>;
+				cam3sid-gpios = <&gpio TEGRA_GPIO(T, 0) 0>;
+			};
+
+			ov10823@6_0022 {
+				use_of_node = "yes";
+				dev_name = "ov10823";
+				num = <1>;
+				cam,cam-change-i2c-addr;
+				cam,cam-sids-high-to-low;
+				cam,cam-skip-sw-reset;
+				#cam,cam-i2c-recovery;
+				cam,cam-use-osc-for-mclk;
+				cam,cam-use-26mhz-mclk;
+				default_i2c_sid_low = <OV10823_DEFAULT_I2C_ADDR_SID_LOW>;
+				default_i2c_sid_high = <OV10823_DEFAULT_I2C_ADDR_SID_HIGH>;
+				regw_sid_low = <OV10823_SENSOR_REG_RW_SID_LOW>;
+				regw_sid_high = <OV10823_SENSOR_REG_RW_SID_HIGH>;
+				cam1i2c_addr = <OV10823_I2C_ADDR_CAM1>;
+				cam2i2c_addr = <OV10823_I2C_ADDR_CAM2>;
+				cam3i2c_addr = <OV10823_I2C_ADDR_CAM3>;
+				cam1sid-gpios = <&gpio TEGRA_GPIO(T, 1) 0>;
+				cam2sid-gpios = <&gpio TEGRA_GPIO(S, 5) 0>;
+				cam3sid-gpios = <&gpio TEGRA_GPIO(T, 0) 0>;
+			};
+
+			ov10823@6_0024 {
+				use_of_node = "yes";
+				dev_name = "ov10823";
+				num = <2>;
+				cam,cam-change-i2c-addr;
+				cam,cam-sids-high-to-low;
+				cam,cam-skip-sw-reset;
+				#cam,cam-i2c-recovery;
+				cam,cam-use-osc-for-mclk;
+				cam,cam-use-26mhz-mclk;
+				default_i2c_sid_low = <OV10823_DEFAULT_I2C_ADDR_SID_LOW>;
+				default_i2c_sid_high = <OV10823_DEFAULT_I2C_ADDR_SID_HIGH>;
+				regw_sid_low = <OV10823_SENSOR_REG_RW_SID_LOW>;
+				regw_sid_high = <OV10823_SENSOR_REG_RW_SID_HIGH>;
+				cam1i2c_addr = <OV10823_I2C_ADDR_CAM1>;
+				cam2i2c_addr = <OV10823_I2C_ADDR_CAM2>;
+				cam3i2c_addr = <OV10823_I2C_ADDR_CAM3>;
+				cam1sid-gpios = <&gpio TEGRA_GPIO(T, 1) 0>;
+				cam2sid-gpios = <&gpio TEGRA_GPIO(S, 5) 0>;
+				cam3sid-gpios = <&gpio TEGRA_GPIO(T, 0) 0>;
+			};
+
 		};
 		dpd {
 			default-enable;
@@ -235,6 +304,8 @@
 		l6-hvddio-pex-supply = <&max77620_sd3>;
 		vddio-pex-ctl-supply = <&max77620_sd3>;
 		status = "okay";
+
+		iommus = <&smmu TEGRA_SWGROUP_AFI>;
 
 		pci@1,0 {
 			status = "okay";
@@ -284,6 +355,16 @@
 				};
 			};
 		};
+
+		i2c@546c0000 {
+			status = "okay";
+			avdd_dsi_csi-supply = <&max77620_gpio7>;
+		};
+
+		vi {
+			status = "okay";
+			avdd_dsi_csi-supply = <&max77620_gpio7>;
+		};
 	};
 
 	spi@7000da00 {
@@ -300,7 +381,7 @@
 		nvidia,ldo-gpios = <&gpio TEGRA_GPIO(BB, 3) GPIO_ACTIVE_HIGH>;
 		nvidia,hp-det-gpios = <&gpio TEGRA_GPIO(E, 6) GPIO_ACTIVE_HIGH>;
 
-		nvidia,num-codec-link = <4>;
+		nvidia,num-codec-link = <5>;
 
 		nvidia,audio-routing =
 			"x Headphone Jack", 	"x HPOL",
@@ -320,7 +401,9 @@
 			"y IN",		"y Mic",
 			"z Headphone", 	"z OUT",
 			"z IN",		"z Mic",
-			"l IN",		"l OUT";
+			"l IN",		"l OUT",
+			"s Headphone", 	"s OUT",
+			"s IN",		"s Mic";
 
 		nvidia,xbar = <&tegra_axbar>;
 
@@ -339,6 +422,7 @@
 			bclk_ratio = <0>;
 			srate = <48000>;
 			num-channel = <2>;
+			ignore_suspend;
 			name-prefix = "x";
 		};
 		nvidia,dai-link-2 {
@@ -356,6 +440,7 @@
 			bclk_ratio = <4>;
 			srate = <8000>;
 			num-channel = <1>;
+			ignore_suspend;
 			name-prefix = "y";
 		};
 		nvidia,dai-link-3 {
@@ -368,6 +453,7 @@
 			bit-format = "s16_le";
 			srate = <48000>;
 			num-channel = <2>;
+			ignore_suspend;
 			name-prefix = "z";
 		};
 		nvidia,dai-link-4 {
@@ -385,7 +471,26 @@
 			bclk_ratio = <0>;
 			srate = <48000>;
 			num-channel = <2>;
+			ignore_suspend;
 			name-prefix = "l";
+		};
+		nvidia,dai-link-5 {
+			link-name = "spdif-dit-0";
+			cpu-dai = <&tegra_i2s4>;
+			codec-dai = <&spdif_dit0>;
+			cpu-dai-name = "I2S4";
+			codec-dai-name = "dit-hifi";
+			format = "i2s";
+			bitclock-slave;
+			frame-slave;
+			bitclock-noninversion;
+			frame-noninversion;
+			bit-format = "s16_le";
+			bclk_ratio = <0>;
+			srate = <48000>;
+			num-channel = <2>;
+			ignore_suspend;
+			name-prefix = "s";
 		};
 	};
 
@@ -487,9 +592,6 @@
 		AO-therm {
 			status = "okay";
 		};
-		CPU-therm {
-			status="okay";
-		};
 	};
 
 	regulators {
@@ -516,10 +618,6 @@
 			compatible = "realtek,rt5639";
 			reg = <0x1c>;
 		};
-	};
-
-	i2c@546c0000 {
-		avdd_dsi_csi-supply = <&max77620_gpio7>;
 	};
 
 	sysedp {
@@ -773,141 +871,13 @@
 	};
 
 	bcmdhd_wlan {
+		fw_path = "/system/vendor/firmware/fw_bcmdhd.bin";
+		nv_path = "/system/etc/nvram_jetsonE_cv_4354.txt";
 		country_code_map {
 			CC1 {
-				iso_abbrev = "XV";
-				custom_locale = "XV";
-				custom_locale_rev = <997>;
-			};
-			CC2 {
-				iso_abbrev = "US";
-				custom_locale = "Q2";
-				custom_locale_rev = <998>;
-			};
-			CC3 {
-				iso_abbrev = "CA";
-				custom_locale = "Q2";
-				custom_locale_rev = <998>;
-			};
-			CC4 {
-				iso_abbrev = "AT";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC5 {
-				iso_abbrev = "BE";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC6 {
-				iso_abbrev = "BG";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC7 {
-				iso_abbrev = "HR";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC8 {
-				iso_abbrev = "CZ";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC9 {
-				iso_abbrev = "DK";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC10 {
-				iso_abbrev = "FR";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC11 {
-				iso_abbrev = "DE";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC12 {
-				iso_abbrev = "GR";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC13 {
-				iso_abbrev = "HU";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC14 {
-				iso_abbrev = "IT";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC15 {
-				iso_abbrev = "NL";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC16 {
-				iso_abbrev = "NO";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC17 {
-				iso_abbrev = "PL";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC18 {
-				iso_abbrev = "PT";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC19 {
-				iso_abbrev = "RO";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC20 {
-				iso_abbrev = "SK";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC21 {
-				iso_abbrev = "ES";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC22 {
-				iso_abbrev = "SE";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC23 {
-				iso_abbrev = "CH";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC24 {
-				iso_abbrev = "GB";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC25 {
-				iso_abbrev = "EU";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC26 {
-				iso_abbrev = "E0";
-				custom_locale = "E0";
-				custom_locale_rev = <994>;
-			};
-			CC27 {
-				iso_abbrev = "IN";
-				custom_locale = "Q2";
-				custom_locale_rev = <998>;
+				iso_abbrev = "XR";
+				custom_locale = "XR";
+				custom_locale_rev = <122>;
 			};
 		};
 	};
@@ -916,7 +886,7 @@
 		dma-names = "tx";
 	};
 
-        watchdog@60005100 {
-                status = "okay";
-        };
+	watchdog@60005100 {
+		status = "okay";
+	};
 };

@@ -5,7 +5,7 @@
  * Copyright (C) 2011 Samsung Electronics
  * MyungJoo Ham <myungjoo.ham@samsung.com>
  *
- * Copyright (c) 2012-2013, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2012-2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -127,6 +127,24 @@ static void max17042_set_reg(struct i2c_client *client,
 		max17042_write_reg(client, data[i].addr, data[i].data);
 }
 
+static int max17042_get_battery_soc(struct battery_gauge_dev *bg_dev)
+{
+	struct max17042_chip *chip = battery_gauge_get_drvdata(bg_dev);
+	int val;
+
+	val = max17042_read_reg(chip->client, MAX17042_RepSOC);
+	if (val < 0)
+		dev_err(&chip->client->dev, "%s: err %d\n", __func__, val);
+	else {
+		val = val >> 8;
+		val =  battery_gauge_get_adjusted_soc(chip->bg_dev,
+				chip->pdata->threshold_soc,
+				chip->pdata->maximum_soc, val * 100);
+	}
+
+	return val;
+}
+
 static enum power_supply_property max17042_battery_props[] = {
 	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_PRESENT,
@@ -243,7 +261,10 @@ static int max17042_get_property(struct power_supply *psy,
 		if (ret < 0)
 			return ret;
 
-		val->intval = ret >> 8;
+		ret >>= 8;
+		val->intval = battery_gauge_get_adjusted_soc(chip->bg_dev,
+				chip->pdata->threshold_soc,
+				chip->pdata->maximum_soc, ret * 100);
 		chip->cap = val->intval;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
@@ -603,12 +624,11 @@ static inline void max17042_override_por_values(struct max17042_chip *chip)
 	max17042_override_por(client, MAX17042_FCTC, config->fctc);
 	max17042_override_por(client, MAX17042_RCOMP0, config->rcomp0);
 	max17042_override_por(client, MAX17042_TempCo, config->tcompc0);
-	if (chip->chip_type) {
+	if (chip->chip_type)
 		max17042_override_por(client, MAX17042_EmptyTempCo,
 					config->empty_tempco);
-		max17042_override_por(client, MAX17042_K_empty0,
-					config->kempty0);
-	}
+	if (chip->chip_type == MAX17042)
+		max17042_override_por(client, MAX17042_K_empty0, config->kempty0);
 }
 
 static int max17042_init_chip(struct max17042_chip *chip)
@@ -703,18 +723,152 @@ static void max17042_init_worker(struct work_struct *work)
 
 #ifdef CONFIG_OF
 static struct max17042_platform_data *
-max17042_get_pdata(struct device *dev)
+max17042_parse_dt(struct device *dev)
 {
 	struct device_node *np = dev->of_node;
-	u32 prop;
 	struct max17042_platform_data *pdata;
+	struct max17042_config_data *config_data;
+	u32 prop;
+	u16 pval;
+	int ret = 0;
 
 	if (!np)
 		return dev->platform_data;
 
 	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
 	if (!pdata)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
+
+	config_data = devm_kzalloc(dev, sizeof(*config_data), GFP_KERNEL);
+	if (!config_data)
+		return ERR_PTR(-ENOMEM);
+
+	pdata->config_data = config_data;
+
+	ret = of_property_read_u16(np, "maxim,volt-alrt-threshold", &pval);
+	if (!ret)
+		config_data->valrt_thresh = pval;
+
+	ret = of_property_read_u16(np, "maxim,temp-alrt-threshold", &pval);
+	if (!ret)
+		config_data->talrt_thresh = pval;
+
+	ret = of_property_read_u16(np, "maxim,soc-alrt-threshold", &pval);
+	if (!ret)
+		config_data->soc_alrt_thresh = pval;
+
+	ret = of_property_read_u16(np, "maxim,shutdown-timer", &pval);
+	if (!ret)
+		config_data->shdntimer = pval;
+
+	ret = of_property_read_u16(np, "maxim,design-capacity", &pval);
+	if (!ret)
+		config_data->design_cap = pval;
+
+	ret = of_property_read_u16(np, "maxim,rem-cap-soc-tte", &pval);
+	if (!ret)
+		config_data->at_rate = pval;
+
+	ret = of_property_read_u16(np, "maxim,temp-gain", &pval);
+	if (!ret)
+		config_data->tgain = pval;
+
+	ret = of_property_read_u16(np, "maxim,temp-offset", &pval);
+	if (!ret)
+		config_data->toff = pval;
+
+	ret = of_property_read_u16(np, "maxim,voltage-empty", &pval);
+	if (!ret)
+		config_data->vempty = pval;
+
+	ret = of_property_read_u16(np, "maxim,qresidual00", &pval);
+	if (!ret)
+		config_data->qrtbl00 = pval;
+
+	ret = of_property_read_u16(np, "maxim,qresidual10", &pval);
+	if (!ret)
+		config_data->qrtbl10 = pval;
+
+	ret = of_property_read_u16(np, "maxim,qresidual20", &pval);
+	if (!ret)
+		config_data->qrtbl20 = pval;
+
+	ret = of_property_read_u16(np, "maxim,qresidual30", &pval);
+	if (!ret)
+		config_data->qrtbl30 = pval;
+
+	ret = of_property_read_u16(np, "maxim,full-soc-thresh", &pval);
+	if (!ret)
+		config_data->full_soc_thresh = pval;
+
+	ret = of_property_read_u16(np, "maxim,rcomp0", &pval);
+	if (!ret)
+		config_data->rcomp0 = pval;
+
+	ret = of_property_read_u16(np, "maxim,tempco", &pval);
+	if (!ret)
+		config_data->tcompc0 = pval;
+
+	ret = of_property_read_u16(np, "maxim,ichg-termi-current", &pval);
+	if (!ret)
+		config_data->ichgt_term = pval;
+
+	ret = of_property_read_u16(np, "maxim,temp-nom", &pval);
+	if (!ret)
+		config_data->temp_nom = pval;
+
+	ret = of_property_read_u16(np, "maxim,temp-lim", &pval);
+	if (!ret)
+		config_data->temp_lim = pval;
+
+	ret = of_property_read_u16(np, "maxim,filter-config", &pval);
+	if (!ret)
+		config_data->filter_cfg = pval;
+
+	ret = of_property_read_u16(np, "maxim,config", &pval);
+	if (!ret)
+		config_data->config = pval;
+
+	ret = of_property_read_u16(np, "maxim,learn-config", &pval);
+	if (!ret)
+		config_data->learn_cfg = pval;
+
+	ret = of_property_read_u16(np, "maxim,misc-config", &pval);
+	if (!ret)
+		config_data->misc_cfg = pval;
+
+	ret = of_property_read_u16(np, "maxim,full-capacity", &pval);
+	if (!ret)
+		config_data->fullcap = pval;
+
+	ret = of_property_read_u16(np, "maxim,full-capacity-nom", &pval);
+	if (!ret)
+		config_data->fullcapnom = pval;
+
+		ret = of_property_read_u16(np, "maxim,lavg-empty", &pval);
+	if (!ret)
+		config_data->lavg_empty = pval;
+
+	ret = of_property_read_u16(np, "maxim,dqacc", &pval);
+	if (!ret)
+		config_data->dqacc = pval;
+
+	ret = of_property_read_u16(np, "maxim,dpacc", &pval);
+	if (!ret)
+		config_data->dpacc = pval;
+
+	ret = of_property_read_u16(np, "maxim,fctc", &pval);
+	if (!ret)
+		config_data->fctc = pval;
+
+	ret = of_property_read_u16(np, "maxim,kempty", &pval);
+	if (!ret)
+		config_data->kempty0 = pval;
+
+	ret = of_property_read_u16_array(np, "maxim,cell-char-tbl",
+		config_data->cell_char_tbl, ARRAY_SIZE(config_data->cell_char_tbl));
+	if (ret < 0)
+		return ERR_PTR(ret);
 
 	/*
 	 * Require current sense resistor value to be specified for
@@ -725,13 +879,27 @@ max17042_get_pdata(struct device *dev)
 		pdata->enable_current_sense = true;
 	}
 
+	if (!of_property_read_u32(np, "maxim,kernel-threshold-soc", &prop))
+		pdata->threshold_soc = prop;
+
+	if (!of_property_read_u32(np, "maxim,kernel-maximum-soc", &prop))
+		pdata->maximum_soc = prop;
+	else
+		pdata->maximum_soc = 100;
+
+	pdata->enable_por_init = of_property_read_bool(np,
+						"maxim,enable-por-init");
+
+	pdata->is_battery_present = of_property_read_bool(np,
+						"maxim,is-battery-present");
+
 	return pdata;
 }
 #else
 static struct max17042_platform_data *
-max17042_get_pdata(struct device *dev)
+max17048_parse_dt(struct device *dev)
 {
-	return dev->platform_data;
+	return NULL;
 }
 #endif
 
@@ -751,6 +919,7 @@ static int max17042_update_battery_status(struct battery_gauge_dev *bg_dev,
 
 static struct battery_gauge_ops max17042_bg_ops = {
 	.update_battery_status = max17042_update_battery_status,
+	.get_battery_soc = max17042_get_battery_soc,
 };
 
 static struct battery_gauge_info max17042_bgi = {
@@ -775,11 +944,19 @@ static int max17042_probe(struct i2c_client *client,
 
 	chip->client = client;
 	temp_client = client;
-	chip->pdata = max17042_get_pdata(&client->dev);
-	if (!chip->pdata) {
-		dev_err(&client->dev, "no platform data provided\n");
-		return -EINVAL;
+
+	if (client->dev.of_node) {
+		chip->pdata = max17042_parse_dt(&client->dev);
+		if (IS_ERR(chip->pdata))
+			return PTR_ERR(chip->pdata);
+	} else {
+		chip->pdata = client->dev.platform_data;
+		if (!chip->pdata) {
+			dev_err(&client->dev, "no platform data provided\n");
+			return -EINVAL;
+		}
 	}
+
 	i2c_set_clientdata(client, chip);
 
 	ret = max17042_read_reg(chip->client, MAX17042_DevName);
@@ -820,9 +997,9 @@ static int max17042_probe(struct i2c_client *client,
 
 	if (client->irq) {
 		ret = request_threaded_irq(client->irq, NULL,
-						max17042_thread_handler,
-						IRQF_TRIGGER_FALLING,
-						chip->battery.name, chip);
+				max17042_thread_handler,
+				IRQF_ONESHOT | IRQF_TRIGGER_FALLING,
+				chip->battery.name, chip);
 		if (!ret) {
 			reg =  max17042_read_reg(client, MAX17042_CONFIG);
 			reg |= CONFIG_ALRT_BIT_ENBL;
@@ -974,7 +1151,7 @@ static int __init max17042_init(void)
 {
 	return i2c_add_driver(&max17042_i2c_driver);
 }
-subsys_initcall(max17042_init);
+fs_initcall_sync(max17042_init);
 
 static void __exit max17042_exit(void)
 {

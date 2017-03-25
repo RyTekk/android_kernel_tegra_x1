@@ -1,7 +1,7 @@
 /*
  * Tegra Graphics Init for T210 Architecture Chips
  *
- * Copyright (c) 2011-2015, NVIDIA Corporation.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA Corporation.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -21,12 +21,12 @@
 #include <linux/tegra-powergate.h>
 #include <linux/tegra-soc.h>
 
-#include <tegra/mc.h>
+#include <linux/platform/tegra/mc.h>
 
 #include "dev.h"
 #include "nvhost_job.h"
 #include "class_ids.h"
-#include "scale3d.h"
+#include "scale_emc.h"
 
 #include "t210.h"
 #include "t124/t124.h"
@@ -36,7 +36,7 @@
 #include "flcn/flcn.h"
 #include "nvdec/nvdec.h"
 #include "tsec/tsec.h"
-#include "vi.h"
+#include "vi/vi.h"
 #include "isp/isp.h"
 #include "isp/isp_isr_v1.h"
 
@@ -64,6 +64,7 @@ static struct host1x_device_info host1x04_info = {
 	.pts_base	= 0,
 	.pts_limit	= NV_HOST1X_SYNCPT_NB_PTS,
 	.syncpt_policy	= SYNCPT_PER_CHANNEL,
+	.nb_actmons	= 1,
 };
 
 struct nvhost_device_data t21_host1x_info = {
@@ -134,8 +135,7 @@ struct nvhost_device_data t21_ispb_info = {
 };
 #endif
 
-#if defined(CONFIG_VIDEO_TEGRA_VI) || defined(CONFIG_VIDEO_TEGRA_VI_MODULE)
-#ifdef CONFIG_VI_ONE_DEVICE
+#if IS_ENABLED(CONFIG_VIDEO_TEGRA_VI) || IS_ENABLED(CONFIG_VIDEO_TEGRA)
 struct nvhost_device_data t21_vi_info = {
 	.modulemutexes		= {NVMODMUTEX_VI_0},
 	.devfs_name		= "vi",
@@ -153,7 +153,7 @@ struct nvhost_device_data t21_vi_info = {
 	.can_powergate		= true,
 	.moduleid		= NVHOST_MODULE_VI,
 	.clocks = {
-		{"vi", UINT_MAX},
+		{"vi_bypass", UINT_MAX},
 		{"csi", 0},
 		{"cilab", 102000000},
 		{"cilcd", 102000000},
@@ -169,71 +169,6 @@ struct nvhost_device_data t21_vi_info = {
 	.finalize_poweron = nvhost_vi_finalize_poweron,
 };
 EXPORT_SYMBOL(t21_vi_info);
-#else
-struct nvhost_device_data t21_vib_info = {
-	.modulemutexes		= {NVMODMUTEX_VI_1},
-	.devfs_name		= "vi",
-	.class			= NV_VIDEO_STREAMING_VI_CLASS_ID,
-	.exclusive		= true,
-	/* HACK: Mark as keepalive until 1188795 is fixed */
-	.keepalive		= true,
-	.clocks	= {
-		{"vi", UINT_MAX},
-		{"csi", UINT_MAX},
-		{"emc", 0, NVHOST_MODULE_ID_EXTERNAL_MEMORY_CONTROLLER} },
-#ifdef TEGRA_POWERGATE_VE
-	.powergate_id		= TEGRA_POWERGATE_VE,
-#else
-	NVHOST_MODULE_NO_POWERGATE_ID,
-#endif
-	NVHOST_DEFAULT_CLOCKGATE_DELAY,
-	.powergate_delay	= 500,
-	.can_powergate		= true,
-	.moduleid		= NVHOST_MODULE_VI,
-	.ctrl_ops		= &tegra_vi_ctrl_ops,
-	.num_channels		= 1,
-	.bond_out_id		= BOND_OUT_VI,
-};
-
-static struct platform_device tegra_vi01b_device = {
-	.name		= "vi",
-	.id		= 1, /* .1 on the dev node */
-	.dev		= {
-		.platform_data = &t21_vib_info,
-	},
-};
-
-struct nvhost_device_data t21_vi_info = {
-	.modulemutexes		= {NVMODMUTEX_VI_0},
-	.devfs_name		= "vi",
-	.class			= NV_VIDEO_STREAMING_VI_CLASS_ID,
-	.exclusive		= true,
-	/* HACK: Mark as keepalive until 1188795 is fixed */
-	.keepalive		= true,
-#ifdef TEGRA_POWERGATE_VE
-	.powergate_id		= TEGRA_POWERGATE_VE,
-#else
-	NVHOST_MODULE_NO_POWERGATE_ID,
-#endif
-	NVHOST_DEFAULT_CLOCKGATE_DELAY,
-	.powergate_delay	= 500,
-	.can_powergate		= true,
-	.moduleid		= NVHOST_MODULE_VI,
-	.clocks = {
-		{"vi", UINT_MAX},
-		{"csi", 0},
-		{"cilab", 102000000},
-		{"emc", 0, NVHOST_MODULE_ID_EXTERNAL_MEMORY_CONTROLLER} },
-	.ctrl_ops		= &tegra_vi_ctrl_ops,
-	.slave			= &tegra_vi01b_device,
-	.num_channels		= 1,
-	.bond_out_id		= BOND_OUT_VI,
-	.prepare_poweroff = nvhost_vi_prepare_poweroff,
-	.finalize_poweron = nvhost_vi_finalize_poweron,
-};
-EXPORT_SYMBOL(t21_vi_info);
-#endif
-
 #endif
 
 struct nvhost_device_data t21_msenc_info = {
@@ -266,6 +201,8 @@ struct nvhost_device_data t21_msenc_info = {
 	.borps_val		= 0x2008,
 	.actmon_enabled		= true,
 	.firmware_name		= "nvhost_nvenc050.fw",
+	.resource_policy	= RESOURCE_PER_CHANNEL_INSTANCE,
+	.serialize		= true,
 	.bond_out_id		= BOND_OUT_NVENC
 };
 
@@ -279,10 +216,10 @@ struct nvhost_device_data t21_nvdec_info = {
 #else
 	NVHOST_MODULE_NO_POWERGATE_ID,
 #endif
-	NVHOST_DEFAULT_CLOCKGATE_DELAY,
+	.clockgate_delay	= 10,
 	.powergate_delay	= 500,
 	.can_powergate		= true,
-	.clocks			= {{"nvdec", UINT_MAX, 0, TEGRA_MC_CLIENT_NVDEC},
+	.clocks			= {{"nvdec", 0, 0, TEGRA_MC_CLIENT_NVDEC},
 				   {"emc", HOST_NVDEC_EMC_FLOOR,
 				NVHOST_MODULE_ID_EXTERNAL_MEMORY_CONTROLLER} },
 	.engine_cg_regs		= t21x_nvdec_gating_registers,
@@ -300,6 +237,8 @@ struct nvhost_device_data t21_nvdec_info = {
 	.borps_addr		= 0x00001650,
 	.borps_val		= 0x2008,
 	.actmon_enabled		= true,
+	.resource_policy	= RESOURCE_PER_CHANNEL_INSTANCE,
+	.serialize		= true,
 	.bond_out_id		= BOND_OUT_NVDEC,
 };
 
@@ -333,6 +272,8 @@ struct nvhost_device_data t21_nvjpg_info = {
 	.borps_val		= 0x2008,
 	.actmon_enabled		= true,
 	.bond_out_id		= BOND_OUT_NVJPG,
+	.resource_policy	= RESOURCE_PER_CHANNEL_INSTANCE,
+	.serialize		= true,
 	.firmware_name		= "nvhost_nvjpg010.fw",
 };
 
@@ -356,6 +297,8 @@ struct nvhost_device_data t21_tsec_info = {
 	.poweron_reset		= true,
 	.finalize_poweron	= nvhost_tsec_finalize_poweron,
 	.prepare_poweroff	= nvhost_tsec_prepare_poweroff,
+	.resource_policy	= RESOURCE_PER_CHANNEL_INSTANCE,
+	.serialize		= true,
 	.bond_out_id		= BOND_OUT_TSEC,
 };
 
@@ -378,6 +321,8 @@ struct nvhost_device_data t21_tsecb_info = {
 	.poweron_reset		= true,
 	.finalize_poweron	= nvhost_tsec_finalize_poweron,
 	.prepare_poweroff	= nvhost_tsec_prepare_poweroff,
+	.resource_policy	= RESOURCE_PER_CHANNEL_INSTANCE,
+	.serialize		= true,
 	.bond_out_id		= BOND_OUT_TSEC,
 };
 #ifdef CONFIG_ARCH_TEGRA_VIC
@@ -409,9 +354,9 @@ struct nvhost_device_data t21_vic_info = {
 	.engine_can_cg		= true,
 	.poweron_toggle_slcg	= true,
 	.finalize_poweron	= nvhost_vic_finalize_poweron,
-	.scaling_init           = nvhost_scale3d_init,
-	.scaling_deinit         = nvhost_scale3d_deinit,
-	.scaling_post_cb	= &nvhost_scale3d_callback,
+	.scaling_init           = nvhost_scale_emc_init,
+	.scaling_deinit         = nvhost_scale_emc_deinit,
+	.scaling_post_cb	= &nvhost_scale_emc_callback,
 	.actmon_regs            = HOST1X_CHANNEL_ACTMON2_REG_BASE,
 	.linear_emc		= true,
 	.actmon_enabled         = true,
@@ -422,6 +367,7 @@ struct nvhost_device_data t21_vic_info = {
 	.firmware_name		= "vic04_ucode.bin",
 	.bond_out_id		= BOND_OUT_VIC,
 	.aggregate_constraints	= nvhost_vic_aggregate_constraints,
+	.resource_policy	= RESOURCE_PER_CHANNEL_INSTANCE,
 	.num_ppc		= 8,
 };
 #endif

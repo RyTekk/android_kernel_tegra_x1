@@ -32,5 +32,10 @@
 		wlan-pwr-gpio = <&gpio TEGRA_GPIO(H, 0) 0>;
 		wlan-rst-gpio = <&gpio TEGRA_GPIO(H, 1) 0>;
 		status = "okay";
+		/* wifi MAC address */
+		mac-address-chosen-dtb-node = "nvidia,wifi-mac";
+		mac-address-file = "/mnt/factory/wifi/wifi_mac.txt";
+		fw_path = "/system/vendor/firmware/bcm4354/fw_bcmdhd.bin";
+		nv_path = "/system/etc/nvram_4354.txt";
 	};
 };

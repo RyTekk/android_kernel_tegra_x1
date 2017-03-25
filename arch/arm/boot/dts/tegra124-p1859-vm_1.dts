@@ -44,6 +44,13 @@
 		status = "disabled";
 	};
 
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "p1859";
+		};
+	};
+
 	tegra-vcm30t124-alt {
 		status = "disabled";
 	};
@@ -118,9 +125,20 @@
 		status = "disabled";
 	};
 
+	sdhci@700b0600 {
+		status = "disabled";
+	};
+
 	dma@60020000 {
 		dma-channels = <16>;
 		status = "okay";
+	};
+
+	tegra_hv_storage {
+		compatible = "nvidia,tegra-hv-storage";
+		status = "okay";
+		instance = <0>;
+		ivc = <&tegra_hv 23>;
 	};
 
 	tegra_hv_comm {
@@ -166,7 +184,7 @@
 			gpu_as: gpu {
 				iova-start = <0x0 0x80100000>;
 				iova-size = <0x0 0x7BEFFFFF>;
-				alignment = <0xFFFFF>;
+				alignment = <0x20000>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
@@ -174,7 +192,6 @@
 			host1x_as: host1x {
 				iova-start = <0x0 0x80100000>;
 				iova-size = <0x0 0x77EFFFFF>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
@@ -182,7 +199,6 @@
 			nvavp_as: nvavp {
 				iova-start = <0x0 0x80000000>;
 				iova-size = <0x0 0x67FFFFFF>;
-				alignment = <0xFFFFF>;
 				num-pf-page = <0>;
 				gap-page = <0>;
 			};
@@ -267,11 +283,11 @@
 			status = "disabled";
 		};
 
-		nvavp {
+		tsec {
 			status = "disabled";
 		};
 
-		tsec {
+		nvavp {
 			status = "disabled";
 		};
 	};
@@ -353,16 +369,20 @@
 		status = "okay";
 	};
 
-	tegra_carveouts {
-		compatible = "nvidia,carveouts";
-		status = "okay";
-		iommus = <&smmu TEGRA_SWGROUP_HC>;
-		ivm_carveouts {
-			carveout0 {
-				ivm = <&tegra_hv 0>;
-				alloc = <0>;
-			};
+	reserved-memory {
+		ivm0: carveout0 {
+			compatible = "nvidia,ivm_carveout";
+			reg = <0x0 0x70c00000 0x0 0x04c00000>;
+			ivm = <&tegra_hv 0>;
+			alloc = <0>;
+			no-map;
 		};
+	};
+
+	tegra-carveouts {
+		iommus = <&smmu TEGRA_SWGROUP_HC>;
+		status = "okay";
+		memory-region = <&iram &ivm0>;
 	};
 
 	avp-virt {

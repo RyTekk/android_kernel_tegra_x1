@@ -83,7 +83,7 @@ static int hid_start_in(struct hid_device *hid)
 	struct usbhid_device *usbhid = hid->driver_data;
 
 	spin_lock_irqsave(&usbhid->lock, flags);
-	if (hid->open > 0 &&
+	if ((hid->open > 0 || hid->quirks & HID_QUIRK_ALWAYS_POLL) &&
 			!test_bit(HID_DISCONNECTED, &usbhid->iofl) &&
 			!test_bit(HID_SUSPENDED, &usbhid->iofl) &&
 			!test_and_set_bit(HID_IN_RUNNING, &usbhid->iofl)) {
@@ -154,6 +154,20 @@ static void hid_reset(struct work_struct *work)
 	}
 }
 
+/* Workqueue routine to execute disconnect bottom half for the case that
+ * disconnect happens during hid_reset() */
+static void usbhid_disconnect_bh(struct work_struct *work)
+{
+	struct usbhid_device *usbhid =
+		container_of(work, struct usbhid_device, disconnect_bh_work);
+
+	if (test_bit(HID_DISCONNECTED, &usbhid->iofl)) {
+		if (usbhid->hid)
+			hid_destroy_device(usbhid->hid);
+		kfree(usbhid);
+	}
+}
+
 /* Main I/O error handler */
 static void hid_io_error(struct hid_device *hid)
 {
@@ -181,7 +195,7 @@ static void hid_io_error(struct hid_device *hid)
 	if (time_after(jiffies, usbhid->stop_retry)) {
 
 		/* Retries failed, so do a port reset unless we lack bandwidth*/
-		if (test_bit(HID_NO_BANDWIDTH, &usbhid->iofl)
+		if (!test_bit(HID_NO_BANDWIDTH, &usbhid->iofl)
 		     && !test_and_set_bit(HID_RESET_PENDING, &usbhid->iofl)) {
 
 			schedule_work(&usbhid->reset_work);
@@ -293,6 +307,8 @@ static void hid_irq_in(struct urb *urb)
 	case 0:			/* success */
 		usbhid_mark_busy(usbhid);
 		usbhid->retry_delay = 0;
+		if ((hid->quirks & HID_QUIRK_ALWAYS_POLL) && !hid->open)
+			break;
 		hid_input_report(urb->context, HID_INPUT_REPORT,
 				 urb->transfer_buffer,
 				 urb->actual_length, 1);
@@ -795,8 +811,10 @@ void usbhid_close(struct hid_device *hid)
 	if (!--hid->open) {
 		spin_unlock_irq(&usbhid->lock);
 		hid_cancel_delayed_stuff(usbhid);
-		usb_kill_urb(usbhid->urbin);
-		usbhid->intf->needs_remote_wakeup = 0;
+		if (!(hid->quirks & HID_QUIRK_ALWAYS_POLL)) {
+			usb_kill_urb(usbhid->urbin);
+			usbhid->intf->needs_remote_wakeup = 0;
+		}
 	} else {
 		spin_unlock_irq(&usbhid->lock);
 	}
@@ -1192,6 +1210,19 @@ static int usbhid_start(struct hid_device *hid)
 
 	set_bit(HID_STARTED, &usbhid->iofl);
 
+	if (hid->quirks & HID_QUIRK_ALWAYS_POLL) {
+		ret = usb_autopm_get_interface(usbhid->intf);
+		if (ret)
+			goto fail;
+		usbhid->intf->needs_remote_wakeup = 1;
+		ret = hid_start_in(hid);
+		if (ret) {
+			dev_err(&hid->dev,
+				"failed to start in urb: %d\n", ret);
+		}
+		usb_autopm_put_interface(usbhid->intf);
+	}
+
 	/* Some keyboards don't work until their LEDs have been set.
 	 * Since BIOSes do set the LEDs, it must be safe for any device
 	 * that supports the keyboard boot protocol.
@@ -1210,6 +1241,8 @@ static int usbhid_start(struct hid_device *hid)
 				USB_INTERFACE_PROTOCOL_MOUSE)
 		usb_disable_autosuspend(dev);
 #endif
+		/* Disabling the auto-suspend for all Hid devices  */
+		usb_disable_autosuspend(dev);
 	return 0;
 
 fail:
@@ -1229,6 +1262,9 @@ static void usbhid_stop(struct hid_device *hid)
 
 	if (WARN_ON(!usbhid))
 		return;
+
+	if (hid->quirks & HID_QUIRK_ALWAYS_POLL)
+		usbhid->intf->needs_remote_wakeup = 0;
 
 	clear_bit(HID_STARTED, &usbhid->iofl);
 	spin_lock_irq(&usbhid->lock);	/* Sync with error and led handlers */
@@ -1391,6 +1427,7 @@ static int usbhid_probe(struct usb_interface *intf, const struct usb_device_id *
 
 	init_waitqueue_head(&usbhid->wait);
 	INIT_WORK(&usbhid->reset_work, hid_reset);
+	INIT_WORK(&usbhid->disconnect_bh_work, usbhid_disconnect_bh);
 	setup_timer(&usbhid->io_retry, hid_retry_timeout, (unsigned long) hid);
 	spin_lock_init(&usbhid->lock);
 
@@ -1424,8 +1461,15 @@ static void usbhid_disconnect(struct usb_interface *intf)
 	set_bit(HID_DISCONNECTED, &usbhid->iofl);
 	spin_unlock_irq(&usbhid->lock);
 
-	hid_destroy_device(hid);
-	kfree(usbhid);
+	/* If device is disconnected during reset, schedule a bottom half for
+	 * cleaning up later in order to avoid a lockup happens in
+	 * usbhid_close()->hid_cancel_delayed_stuff(). */
+	if (test_bit(HID_RESET_PENDING, &usbhid->iofl))
+		schedule_work(&usbhid->disconnect_bh_work);
+	else {
+		hid_destroy_device(hid);
+		kfree(usbhid);
+	}
 }
 
 static void hid_cancel_delayed_stuff(struct usbhid_device *usbhid)

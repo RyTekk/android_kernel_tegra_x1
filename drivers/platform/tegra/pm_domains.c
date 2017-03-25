@@ -1,7 +1,7 @@
 /*
  * drivers/platform/tegra/pm_domains.c
  *
- * Copyright (c) 2012-2015, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2012-2016, NVIDIA CORPORATION. All rights reserved.
  *
  *
  * This software is licensed under the terms of the GNU General Public
@@ -145,6 +145,14 @@ static struct gpd_dev_ops tegra_pd_ops = {
 };
 
 #ifdef CONFIG_ARCH_TEGRA_21x_SOC
+
+static int scx_enabled = 1;
+
+void disable_scx_states(void)
+{
+	scx_enabled = 0;
+}
+
 static int tegra_mc_clk_power_off(struct generic_pm_domain *genpd)
 {
 	int32_t val = cpu_to_le32(true);
@@ -153,7 +161,8 @@ static int tegra_mc_clk_power_off(struct generic_pm_domain *genpd)
 	if (!pd)
 		return -EINVAL;
 
-	tegra_bpmp_send(MRQ_SCX_ENABLE, &val, sizeof(val));
+	if (scx_enabled)
+		tegra_bpmp_send(MRQ_SCX_ENABLE, &val, sizeof(val));
 
 	return 0;
 }
@@ -166,7 +175,8 @@ static int tegra_mc_clk_power_on(struct generic_pm_domain *genpd)
 	if (!pd)
 		return -EINVAL;
 
-	tegra_bpmp_send(MRQ_SCX_ENABLE, &val, sizeof(val));
+	if (scx_enabled)
+		tegra_bpmp_send(MRQ_SCX_ENABLE, &val, sizeof(val));
 
 	return 0;
 }
@@ -313,6 +323,17 @@ static int tegra_ape_power_on(struct generic_pm_domain *genpd)
 	struct tegra_pm_domain *ape_pd;
 	struct pm_domain_data *pdd;
 	int ret = 0;
+	int partition_id;
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	struct device_node *dn;
+
+	dn = genpd->of_node;
+	ret = of_property_read_u32(dn, "partition-id", &partition_id);
+	if (ret)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_APE;
+#endif
 
 	wake_lock(&tegra_ape_wakelock);
 
@@ -324,7 +345,7 @@ static int tegra_ape_power_on(struct generic_pm_domain *genpd)
 		return ret;
 	}
 
-	ret = tegra_unpowergate_partition(TEGRA_POWERGATE_APE);
+	ret = tegra_unpowergate_partition(partition_id);
 	if (ret) {
 		tegra_ape_pd_disable_clks(ape_pd);
 		wake_unlock(&tegra_ape_wakelock);
@@ -338,7 +359,9 @@ static int tegra_ape_power_on(struct generic_pm_domain *genpd)
 	 */
 	clk_disable_unprepare(ape_pd->clk[ADSP_CLK]);
 
+#ifdef CONFIG_CPU_PM
 	tegra_agic_restore_registers();
+#endif
 
 	list_for_each_entry(pdd, &genpd->dev_list, list_node)
 		TEGRA_PD_DEV_CALLBACK(resume, pdd->dev);
@@ -351,11 +374,24 @@ static int tegra_ape_power_off(struct generic_pm_domain *genpd)
 	struct tegra_pm_domain *ape_pd;
 	struct pm_domain_data *pdd;
 	int ret = 0;
+	int partition_id;
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	struct device_node *dn;
+
+	dn = genpd->of_node;
+	ret = of_property_read_u32(dn, "partition-id", &partition_id);
+	if (ret)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_APE;
+#endif
 
 	list_for_each_entry(pdd, &genpd->dev_list, list_node)
 		TEGRA_PD_DEV_CALLBACK(suspend, pdd->dev);
 
+#ifdef CONFIG_CPU_PM
 	tegra_agic_save_registers();
+#endif
 
 	ape_pd = to_tegra_pd(genpd);
 
@@ -365,7 +401,7 @@ static int tegra_ape_power_off(struct generic_pm_domain *genpd)
 		return ret;
 	}
 
-	ret = tegra_powergate_partition(TEGRA_POWERGATE_APE);
+	ret = tegra_powergate_partition(partition_id);
 
 	wake_unlock(&tegra_ape_wakelock);
 	return ret;
@@ -418,10 +454,16 @@ static inline int __init tegra_init_sdhci(struct generic_pm_domain *pd)
 }
 #endif
 
-static const struct of_device_id tegra21x_pd_match[] __initconst = {
+static const struct of_device_id tegra_pd_match[] __initconst = {
+	{.compatible = "nvidia,tegra124-mc-clk-pd", .data = tegra_init_mc_clk},
+	{.compatible = "nvidia,tegra124-nvavp-pd", .data = NULL},
+	{.compatible = "nvidia,tegra124-sdhci-pd", .data = tegra_init_sdhci},
+	{.compatible = "nvidia,tegra132-mc-clk-pd", .data = tegra_init_mc_clk},
+	{.compatible = "nvidia,tegra132-nvavp-pd", .data = NULL},
+	{.compatible = "nvidia,tegra132-sdhci-pd", .data = tegra_init_sdhci},
 	{.compatible = "nvidia,tegra210-mc-clk-pd", .data = tegra_init_mc_clk},
 	{.compatible = "nvidia,tegra210-ape-pd", .data = tegra_init_ape },
-	{.compatible = "nvidia.tegra210-nvavp-pd", .data = NULL},
+	{.compatible = "nvidia,tegra210-nvavp-pd", .data = NULL},
 	{.compatible = "nvidia,tegra210-adsp-pd", .data = NULL},
 	{.compatible = "nvidia,tegra210-sdhci3-pd", .data = tegra_init_sdhci},
 	{.compatible = "nvidia,tegra210-sdhci2-pd", .data = tegra_init_sdhci},
@@ -433,7 +475,7 @@ static int __init tegra_init_pd(struct device_node *np)
 	struct tegra_pm_domain *tpd;
 	struct generic_pm_domain *gpd;
 	of_tegra_pd_init_cb_t tpd_init_cb;
-	const struct of_device_id *match = of_match_node(tegra21x_pd_match, np);
+	const struct of_device_id *match = of_match_node(tegra_pd_match, np);
 	bool is_off = false;
 
 	tpd = (struct tegra_pm_domain *)kzalloc
@@ -455,7 +497,13 @@ static int __init tegra_init_pd(struct device_node *np)
 		is_off = true;
 
 	pm_genpd_init(gpd, &simple_qos_governor, is_off);
-	pm_genpd_set_poweroff_delay(gpd, 3000);
+
+	/* If some domain specific initializations need to be done,
+	 * they can be done by defining tegra_init_* functions as done
+	 * above, and assigning that function to data field of the above
+	 * table.
+	 */
+
 	of_genpd_add_provider_simple(np, gpd);
 	gpd->of_node = of_node_get(np);
 
@@ -468,7 +516,7 @@ static int __init tegra_init_pm_domain(void)
 	struct device_node *np;
 	int ret = 0;
 
-	for_each_matching_node(np, tegra21x_pd_match) {
+	for_each_matching_node(np, tegra_pd_match) {
 		ret = tegra_init_pd(np);
 		if (ret)
 			return ret;
@@ -534,6 +582,26 @@ void tegra_pd_remove_sd(struct generic_pm_domain *sd)
 		pr_err("Failure to remove %s domain\n", sd->name);
 }
 EXPORT_SYMBOL(tegra_pd_remove_sd);
+
+int tegra_pd_get_powergate_id(struct of_device_id *dev_id)
+{
+	struct device_node *dn = NULL;
+	u32 partition_id;
+	int ret = -EINVAL;
+
+	for_each_matching_node(dn, dev_id) {
+		ret = of_property_read_u32(dn, "partition-id", &partition_id);
+		break;
+	}
+
+	if (ret) {
+		pr_err("Reading powergate-id failed\n");
+		return ret;
+	}
+
+	return partition_id;
+}
+EXPORT_SYMBOL(tegra_pd_get_powergate_id);
 
 #else
 

@@ -3,7 +3,7 @@
  *
  * ADSP OS App management
  *
- * Copyright (C) 2014-2015 NVIDIA Corporation. All rights reserved.
+ * Copyright (C) 2014-2016 NVIDIA Corporation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -29,54 +29,9 @@
 #include "aram_manager.h"
 #include "os.h"
 #include "dev.h"
+#include "adsp_shared_struct.h"
 
-#define APP_LOADER_MBOX_ID		1
-
-#define ADSP_OS_LOAD_TIMEOUT		5000 /* 5000 ms */
-#define APP_FRAME_WAIT_TIMEOUT		5000 /* 5000 ms */
-
-/* ADSP app loader message queue */
-struct run_app_instance_data {
-	uint32_t adsp_mod_ptr;
-	uint64_t host_ref;
-	uint32_t adsp_ref;
-	uint32_t dram_data_ptr;
-	uint32_t dram_shared_ptr;
-	uint32_t dram_shared_wc_ptr;
-	uint32_t aram_ptr;
-	uint32_t aram_flag;
-	uint32_t aram_x_ptr;
-	uint32_t aram_x_flag;
-	struct app_mem_size mem_size;
-	nvadsp_app_args_t app_args;
-	uint32_t stack_size;
-	uint32_t message;
-} __packed;
-
-struct app_loader_data {
-	int32_t header[MSGQ_MESSAGE_HEADER_WSIZE];
-	struct run_app_instance_data	app_init;
-} __packed;
-
-#pragma pack(4)
-union app_loader_message {
-	msgq_message_t msgq_msg;
-	struct app_loader_data data;
-};
-
-struct app_complete_status_data {
-	int32_t header[MSGQ_MESSAGE_HEADER_WSIZE];
-	uint64_t host_ref;
-	uint32_t adsp_ref;
-	int32_t status;
-	uint32_t message;
-} __packed;
-
-#pragma pack(4)
-union app_complete_status_message {
-	msgq_message_t msgq_msg;
-	struct app_complete_status_data data;
-};
+#define DYN_APP_EXTN	".elf"
 
 /*
  * structure to hold the list of app binaries loaded and
@@ -110,6 +65,8 @@ struct nvadsp_app_priv_struct {
 };
 
 static struct nvadsp_app_priv_struct priv;
+
+static void delete_app_instance(nvadsp_app_info_t *);
 
 #ifdef CONFIG_DEBUG_FS
 static int dump_binary_in_2bytes_app_file_node(struct seq_file *s, void *data)
@@ -323,24 +280,37 @@ static struct nvadsp_app_service *get_loaded_service(const char *appfile)
 	return NULL;
 }
 
-static nvadsp_app_handle_t app_load(const char *appfile)
+static inline void extract_appname(char *appname, const char *appfile)
+{
+	char *token = strstr(appfile, DYN_APP_EXTN);
+	int len = token ? token - appfile : strlen(appfile);
+
+	strncpy(appname, appfile, len);
+	appname[len] = '\0';
+}
+
+static nvadsp_app_handle_t app_load(const char *appfile,
+	struct adsp_shared_app *shared_app, bool dynamic)
 {
 	struct device *dev = &priv.pdev->dev;
+	char appname[NVADSP_NAME_SZ] = { };
 	struct nvadsp_app_service *ser;
-	struct app_load_stats stats;
 
+	extract_appname(appname, appfile);
 	mutex_lock(&priv.service_lock_list);
-	ser = get_loaded_service(appfile);
+	ser = get_loaded_service(appname);
 	if (!ser) {
-		dev_dbg(dev, "loading app %s\n", appfile);
+		dev_dbg(dev, "loading app %s %s\n", appfile, appname);
 
 		ser = devm_kzalloc(dev, sizeof(*ser), GFP_KERNEL);
 		if (!ser)
 			goto err;
-		strncpy(ser->name, appfile, NVADSP_NAME_SZ);
+		strncpy(ser->name, appname, NVADSP_NAME_SZ);
 
 		/*load the module in to memory */
-		ser->mod = load_adsp_module(appfile, appfile, dev, &stats);
+		ser->mod = dynamic ?
+			load_adsp_dynamic_module(appfile, appfile, dev) :
+			load_adsp_static_module(appfile, shared_app, dev);
 		if (IS_ERR_OR_NULL(ser->mod))
 			goto err_free_service;
 		ser->mem_size = &ser->mod->mem_size;
@@ -381,7 +351,7 @@ nvadsp_app_handle_t nvadsp_app_load(const char *appname, const char *appfile)
 	if (!drv_data->adsp_os_running)
 		return NULL;
 
-	return app_load(appfile);
+	return app_load(appfile, NULL, true);
 }
 EXPORT_SYMBOL(nvadsp_app_load);
 
@@ -678,10 +648,11 @@ err:
 }
 EXPORT_SYMBOL(nvadsp_app_init);
 
-static void start_app_on_adsp(nvadsp_app_info_t *app,
+static int start_app_on_adsp(nvadsp_app_info_t *app,
 	union app_loader_message *message, bool block)
 {
 	struct nvadsp_app_shared_msg_pool *msg_pool;
+	struct device *dev = &priv.pdev->dev;
 	struct nvadsp_shared_mem *shared_mem;
 	struct nvadsp_drv_data *drv_data;
 	msgq_t *msgq_send;
@@ -703,11 +674,14 @@ static void start_app_on_adsp(nvadsp_app_info_t *app,
 	if (block) {
 		wait_for_completion(&app->wait_for_app_start);
 		if (app->return_status) {
-			pr_info("app instance failed to start\n");
+			dev_err(dev, "%s app instance %d failed to start\n",
+				app->name, app->instance_id);
 			state = (int *)&app->state;
 			*state = NVADSP_APP_STATE_INITIALIZED;
 		}
 	}
+
+	return app->return_status;
 }
 
 int nvadsp_app_start(nvadsp_app_info_t *app)
@@ -715,6 +689,7 @@ int nvadsp_app_start(nvadsp_app_info_t *app)
 	union app_loader_message *message = app->priv;
 	struct app_loader_data *data = &message->data;
 	struct nvadsp_drv_data *drv_data;
+	int ret = -EINVAL;
 
 	if (IS_ERR_OR_NULL(app))
 		return -EINVAL;
@@ -732,9 +707,9 @@ int nvadsp_app_start(nvadsp_app_info_t *app)
 	data->app_init.message = ADSP_APP_START;
 	data->app_init.adsp_ref = app->token;
 	data->app_init.stack_size = app->stack_size;
-	start_app_on_adsp(app, app->priv, true);
+	ret = start_app_on_adsp(app, app->priv, true);
 err:
-	return (app->state == NVADSP_APP_STATE_STARTED) ? 0 : -EINVAL;
+	return ret;
 }
 EXPORT_SYMBOL(nvadsp_app_start);
 
@@ -748,6 +723,7 @@ nvadsp_app_info_t *nvadsp_run_app(nvadsp_os_handle_t os_handle,
 	nvadsp_app_info_t *info =  NULL;
 	struct app_loader_data *data;
 	struct device *dev;
+	int ret;
 
 	if (IS_ERR_OR_NULL(priv.pdev)) {
 		pr_err("ADSP Driver is not initialized\n");
@@ -765,7 +741,7 @@ nvadsp_app_info_t *nvadsp_run_app(nvadsp_os_handle_t os_handle,
 		goto end;
 
 	data = &message.data;
-	service_handle = app_load(appfile);
+	service_handle = app_load(appfile, NULL, true);
 	if (!service_handle) {
 		dev_err(dev, "unable to load the app %s\n", appfile);
 		goto end;
@@ -779,7 +755,11 @@ nvadsp_app_info_t *nvadsp_run_app(nvadsp_os_handle_t os_handle,
 	}
 	data->app_init.message = RUN_ADSP_APP;
 
-	start_app_on_adsp(info, &message, block);
+	ret = start_app_on_adsp(info, &message, block);
+	if (ret) {
+		delete_app_instance(info);
+		info = NULL;
+	}
 end:
 	return info;
 }
@@ -819,9 +799,11 @@ void nvadsp_exit_app(nvadsp_app_info_t *app, bool terminate)
 		return;
 
 	/* TODO: add termination if possible to kill thread on adsp */
-	wait_for_completion(&app->wait_for_app_complete);
-	state = (int *)&app->state;
-	*state = NVADSP_APP_STATE_INITIALIZED;
+	if (app->state == NVADSP_APP_STATE_STARTED) {
+		wait_for_completion(&app->wait_for_app_complete);
+		state = (int *)&app->state;
+		*state = NVADSP_APP_STATE_INITIALIZED;
+	}
 	delete_app_instance(app);
 }
 EXPORT_SYMBOL(nvadsp_exit_app);
@@ -839,28 +821,10 @@ int nvadsp_app_stop(nvadsp_app_info_t *app)
 }
 EXPORT_SYMBOL(nvadsp_app_stop);
 
-void nvadsp_app_unload(nvadsp_app_handle_t handle)
+static void __nvadsp_app_unload(struct nvadsp_app_service *ser)
 {
-	struct nvadsp_drv_data *drv_data;
-	struct nvadsp_app_service *ser;
-	struct device *dev;
+	struct device *dev = &priv.pdev->dev;
 
-	if (!priv.pdev) {
-		pr_err("ADSP Driver is not initialized\n");
-		return;
-	}
-
-	drv_data = platform_get_drvdata(priv.pdev);
-	dev = &priv.pdev->dev;
-
-	if (!drv_data->adsp_os_running)
-		return;
-
-	if (IS_ERR_OR_NULL(handle))
-		return;
-
-	mutex_lock(&priv.service_lock_list);
-	ser = (struct nvadsp_app_service *)handle;
 	if (ser->instance) {
 		dev_err(dev, "cannot unload app %s, has instances %d\n",
 				ser->name, ser->instance);
@@ -873,6 +837,32 @@ void nvadsp_app_unload(nvadsp_app_handle_t handle)
 #endif
 	unload_adsp_module(ser->mod);
 	devm_kfree(dev, ser);
+}
+
+void nvadsp_app_unload(nvadsp_app_handle_t handle)
+{
+	struct nvadsp_drv_data *drv_data;
+	struct nvadsp_app_service *ser;
+
+	if (!priv.pdev) {
+		pr_err("ADSP Driver is not initialized\n");
+		return;
+	}
+
+	drv_data = platform_get_drvdata(priv.pdev);
+
+	if (!drv_data->adsp_os_running)
+		return;
+
+	if (IS_ERR_OR_NULL(handle))
+		return;
+
+	ser = (struct nvadsp_app_service *)handle;
+	if (!ser->mod->dynamic)
+		return;
+
+	mutex_lock(&priv.service_lock_list);
+	__nvadsp_app_unload((struct nvadsp_app_service *)handle);
 	mutex_unlock(&priv.service_lock_list);
 }
 EXPORT_SYMBOL(nvadsp_app_unload);
@@ -896,7 +886,7 @@ static status_t nvadsp_app_receive_handler(uint32_t msg, void *hdata)
 	shared_mem = drv_data->shared_adsp_os_data;
 	msg_pool = &shared_mem->app_shared_msg_pool;
 	msgq_recv = &msg_pool->app_loader_recv_message.msgq;
-	data = &message.data;
+	data = &message.complete_status_data;
 
 	message.msgq_msg.size = MSGQ_MSG_PAYLOAD_WSIZE(*data);
 	if (msgq_dequeue_message(msgq_recv, &message.msgq_msg)) {
@@ -904,14 +894,14 @@ static status_t nvadsp_app_receive_handler(uint32_t msg, void *hdata)
 		return 0;
 	}
 
-	if (unlikely(data->message == OS_LOAD_COMPLETE)) {
+	if (unlikely(data->header.message == OS_LOAD_COMPLETE)) {
 		complete(&priv.os_load_complete);
 		return 0;
 	}
 
 	app = (nvadsp_app_info_t *)data->host_ref;
 	app->return_status = data->status;
-	app->status_msg = data->message;
+	app->status_msg = data->header.message;
 	token = (uint32_t *)&app->token;
 	*token = data->adsp_ref;
 
@@ -920,7 +910,7 @@ static status_t nvadsp_app_receive_handler(uint32_t msg, void *hdata)
 			app->status_msg, app->return_status);
 	}
 
-	switch (data->message) {
+	switch (data->header.message) {
 	case ADSP_APP_START_STATUS:
 		complete_all(&app->wait_for_app_start);
 		break;
@@ -929,6 +919,46 @@ static status_t nvadsp_app_receive_handler(uint32_t msg, void *hdata)
 		break;
 	}
 
+	return 0;
+}
+
+static int load_adsp_static_apps(void)
+{
+	struct nvadsp_app_shared_msg_pool *msg_pool;
+	struct nvadsp_shared_mem *shared_mem;
+	struct nvadsp_drv_data *drv_data;
+	struct platform_device *pdev;
+	struct device *dev;
+	msgq_t *msgq_recv;
+
+	pdev = priv.pdev;
+	dev = &pdev->dev;
+	drv_data = platform_get_drvdata(pdev);
+	shared_mem = drv_data->shared_adsp_os_data;
+	msg_pool = &shared_mem->app_shared_msg_pool;
+	msgq_recv = &msg_pool->app_loader_recv_message.msgq;
+
+	while (1) {
+		union app_complete_status_message message = { };
+		struct adsp_static_app_data *data;
+		struct adsp_shared_app *shared_app;
+		char *name;
+
+		data = &message.static_app_data;
+		message.msgq_msg.size = MSGQ_MSG_PAYLOAD_WSIZE(*data);
+		if (msgq_dequeue_message(msgq_recv, &message.msgq_msg)) {
+			dev_err(dev, "dequeue of static apps failed\n");
+			return -EINVAL;
+		}
+		shared_app = &data->shared_app;
+		name = shared_app->name;
+		if (!shared_app->mod_ptr)
+			break;
+		/* Skip Start on boot apps */
+		if (shared_app->flags & ADSP_APP_FLAG_START_ON_BOOT)
+			continue;
+		app_load(name, shared_app, false);
+	}
 	return 0;
 }
 
@@ -943,9 +973,11 @@ int wait_for_adsp_os_load_complete(void)
 	if (!ret) {
 		dev_err(dev, "ADSP OS loading timed out\n");
 		ret = -ETIMEDOUT;
-	} else
-		ret = 0;
+		goto end;
+	}
 
+	ret = load_adsp_static_apps();
+end:
 	return ret;
 }
 
@@ -977,4 +1009,27 @@ int __init nvadsp_app_module_probe(struct platform_device *pdev)
 #endif
 end:
 	return ret;
+}
+
+void unload_all_apps(void)
+{
+	struct nvadsp_app_service *ser, *ser_next;
+
+	mutex_lock(&priv.service_lock_list);
+	list_for_each_entry_safe(ser, ser_next, &priv.service_list, node) {
+		nvadsp_app_info_t *app, *app_next;
+
+		list_for_each_entry_safe(app, app_next, &ser->app_head, node) {
+			if (app->state == NVADSP_APP_STATE_STARTED) {
+				app->status_msg = ADSP_APP_COMPLETE_STATUS;
+				app->return_status = -ETIMEDOUT;
+				if (app->complete_status_notifier)
+					app->complete_status_notifier(app,
+					app->status_msg, app->return_status);
+			}
+			delete_app_instance(app);
+		}
+		__nvadsp_app_unload(ser);
+	}
+	mutex_unlock(&priv.service_lock_list);
 }

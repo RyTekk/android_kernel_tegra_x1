@@ -2,7 +2,7 @@
  * drivers/base/power/domain.c - Common code related to device power domains.
  *
  * Copyright (C) 2011 Rafael J. Wysocki <rjw@sisk.pl>, Renesas Electronics Corp.
- * Copyright (c) 2014-2015, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION. All rights reserved.
  *
  * This file is released under the GPLv2.
  */
@@ -560,8 +560,8 @@ static int __pm_genpd_restore_device(struct pm_domain_data *pdd,
 	gpd_data->need_restore = false;
 	mutex_unlock(&genpd->lock);
 
-	genpd_start_dev(genpd, dev);
-	if (need_restore)
+	err = genpd_start_dev(genpd, dev);
+	if ((0 == err) && need_restore)
 		err = genpd_restore_dev(genpd, dev);
 
 	mutex_lock(&genpd->lock);
@@ -939,6 +939,10 @@ static inline int genpd_dev_pm_qos_notifier(struct notifier_block *nb,
 
 static inline void genpd_power_off_work_fn(struct work_struct *work) {}
 static inline void genpd_delayed_power_off_work_fn(struct work_struct *work) {}
+static inline int __pm_genpd_poweroff(struct generic_pm_domain *genpd)
+{
+	return 0;
+}
 
 #define pm_genpd_runtime_suspend	NULL
 #define pm_genpd_runtime_resume		NULL
@@ -2912,4 +2916,41 @@ int genpd_dev_pm_attach(struct device *dev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(genpd_dev_pm_attach);
+
+int genpd_dev_pm_add(const struct of_device_id *dev_id, struct device *dev)
+{
+	int ret;
+	struct device_node *node;
+	struct of_phandle_args pd_args;
+	struct generic_pm_domain *pd;
+
+	if (dev->pm_domain) {
+		pr_debug("%s is already registered to its power-domain\n",
+							dev_name(dev));
+		return 0;
+	}
+
+	node = of_find_matching_node(NULL, dev_id);
+	if (!node)
+		return -EINVAL;
+
+	ret = of_parse_phandle_with_args(node, "power-domains",
+				"#power-domain-cells", 0, &pd_args);
+	if (ret < 0)
+		return ret;
+
+	pd = of_genpd_get_from_provider(&pd_args);
+	if (IS_ERR(pd))
+		return PTR_ERR(pd);
+
+	while (1) {
+		ret = pm_genpd_add_device(pd, dev);
+		if (ret != -EAGAIN)
+			break;
+		cond_resched();
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(genpd_dev_pm_add);
 #endif

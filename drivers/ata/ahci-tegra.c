@@ -1,7 +1,7 @@
 /*
  * ahci-tegra.c - AHCI SATA support for TEGRA AHCI device
  *
- * Copyright (c) 2011-2015, NVIDIA Corporation.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA Corporation.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -40,6 +40,7 @@
 #include <linux/of_gpio.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_device.h>
 #include <linux/libata.h>
 #include <linux/regulator/machine.h>
 #include <linux/pm_runtime.h>
@@ -53,6 +54,7 @@
 #include <linux/of_device.h>
 #include "../../arch/arm/mach-tegra/iomap.h"
 #include <linux/tegra_prod.h>
+#include <linux/tegra_pm_domains.h>
 
 #include <mach/tegra_usb_pad_ctrl.h>
 #undef XUSB_PADCTL_USB3_PAD_MUX_0
@@ -126,6 +128,9 @@
 #define SATA0_CHX_PHY_CTRL1_GEN2_TX_PEAK_MASK	(0xff << 12)
 #define SATA0_CHX_PHY_CTRL1_GEN2_RX_EQ_SHIFT	24
 #define SATA0_CHX_PHY_CTRL1_GEN2_RX_EQ_MASK	(0xf << 24)
+
+#define T_SATA0_CFG_LINK_0				0x174
+#define T_SATA0_CFG_LINK_0_USE_POSEDGE_SCTL_DET		BIT(24)
 
 /* AHCI config space defines */
 #define TEGRA_PRIVATE_AHCI_CC_BKDR		0x4a4
@@ -350,6 +355,17 @@
 /* SATA Port Registers*/
 #define PXSSTS						0X28
 
+#define TEGRA_AHCI_READ_LOG_EXT_NOENTRY			0x80
+
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+static struct of_device_id tegra_sata_pd[] = {
+	{ .compatible = "nvidia, tegra210-sata-pd", },
+	{ .compatible = "nvidia, tegra132-sata-pd", },
+	{ .compatible = "nvidia, tegra124-sata-pd", },
+	{},
+};
+#endif
+
 enum {
 	AHCI_PCI_BAR = 5,
 };
@@ -393,10 +409,10 @@ enum sata_connectors {
 
 /* Sata Pad Cntrl Values */
 struct sata_pad_cntrl {
-	u8 gen1_tx_amp;
-	u8 gen1_tx_peak;
-	u8 gen2_tx_amp;
-	u8 gen2_tx_peak;
+        u8 gen1_tx_amp;
+        u8 gen1_tx_peak;
+        u8 gen2_tx_amp;
+        u8 gen2_tx_peak;
 };
 
 /*
@@ -429,8 +445,8 @@ struct tegra_ahci_host_priv {
 	struct tegra_prod_list	*prod_list;
 	void __iomem		*base_list[6];
 	struct sata_pad_cntrl	pad_val;
-	bool			dt_contains_padval;
-	u8			fifo_depth;
+	bool 			dtContainsPadval;
+	u8 fifo_depth;
 };
 
 #ifdef	CONFIG_DEBUG_FS
@@ -442,7 +458,7 @@ static int tegra_ahci_t210_controller_init(void *hpriv, int lp0);
 static int tegra_ahci_remove_one(struct platform_device *pdev);
 static void tegra_ahci_shutdown(struct platform_device *pdev);
 static void tegra_ahci_pad_config(void);
-static void tegra_ahci_put_sata_in_iddq(void);
+static void tegra_ahci_put_sata_in_iddq(struct ata_host *host);
 static void tegra_ahci_iddqlane_config(void);
 
 #ifdef CONFIG_PM
@@ -450,6 +466,7 @@ static bool tegra_ahci_power_un_gate(struct ata_host *host);
 static bool tegra_ahci_power_gate(struct ata_host *host);
 static void tegra_ahci_abort_power_gate(struct ata_host *host);
 static int tegra_ahci_controller_suspend(struct platform_device *pdev);
+#ifdef CONFIG_PM_SLEEP
 static int tegra_ahci_controller_resume(struct platform_device *pdev);
 #ifndef CONFIG_TEGRA_SATA_IDLE_POWERGATE
 static int tegra_ahci_suspend(struct platform_device *pdev, pm_message_t mesg);
@@ -457,6 +474,7 @@ static int tegra_ahci_resume(struct platform_device *pdev);
 #else
 static int tegra_ahci_suspend(struct device *dev);
 static int tegra_ahci_resume(struct device *dev);
+#endif
 #endif
 static enum port_idle_status tegra_ahci_is_port_idle(struct ata_port *ap);
 static bool tegra_ahci_are_all_ports_idle(struct ata_host *host);
@@ -478,18 +496,27 @@ static int tegra_ahci_runtime_resume(struct device *dev);
 #define tegra_ahci_resume		NULL
 #endif
 
+static int tegra_ahci_hardreset(struct ata_link *link, unsigned int *class,
+			  unsigned long deadline);
+static int tegra_ahci_softreset(struct ata_link *link, unsigned int *class,
+			  unsigned long deadline);
+static unsigned int tegra_ahci_qc_issue(struct ata_queued_cmd *qc);
+
 static struct scsi_host_template ahci_sht = {
 	AHCI_SHT("tegra-sata"),
 };
 
 static struct ata_port_operations tegra_ahci_ops = {
 	.inherits	= &ahci_ops,
+	.qc_issue	= tegra_ahci_qc_issue,
 #ifdef CONFIG_PM
 #ifdef CONFIG_TEGRA_SATA_IDLE_POWERGATE
 	.port_suspend           = tegra_ahci_port_suspend,
 	.port_resume            = tegra_ahci_port_resume,
 #endif
 #endif
+	.hardreset	= tegra_ahci_hardreset,
+	.softreset	= tegra_ahci_softreset,
 };
 
 static const struct ata_port_info ahci_port_info = {
@@ -910,6 +937,7 @@ exit:
 	return ret;
 }
 
+#ifdef CONFIG_PM_SLEEP
 static void tegra_first_level_clk_gate(void)
 {
 	if (g_tegra_hpriv->clk_state == CLK_OFF)
@@ -919,9 +947,11 @@ static void tegra_first_level_clk_gate(void)
 	clk_disable_unprepare(g_tegra_hpriv->clk_sata_oob);
 	if (g_tegra_hpriv->clk_sata_aux)
 		clk_disable_unprepare(g_tegra_hpriv->clk_sata_aux);
-	clk_disable_unprepare(g_tegra_hpriv->clk_cml1);
+	if (g_tegra_hpriv->clk_cml1)
+		clk_disable_unprepare(g_tegra_hpriv->clk_cml1);
 	g_tegra_hpriv->clk_state = CLK_OFF;
 }
+#endif
 
 #if defined(CONFIG_TEGRA_SATA_IDLE_POWERGATE) && \
 	!defined(CONFIG_TEGRA_AHCI_CONTEXT_RESTORE)
@@ -949,7 +979,9 @@ static int tegra_first_level_clk_ungate(void)
 		err_clk_name = "SATA_AUX";
 		goto clk_sata_aux_enb_error;
 	}
-	if (clk_prepare_enable(g_tegra_hpriv->clk_cml1)) {
+
+	if (g_tegra_hpriv->clk_cml1 &&
+		clk_prepare_enable(g_tegra_hpriv->clk_cml1)) {
 		err_clk_name = "cml1";
 		goto clk_cml1_enb_error;
 	}
@@ -1009,6 +1041,29 @@ static void tegra_free_pexp_gpio(struct tegra_ahci_host_priv *tegra_hpriv)
 
 }
 
+static unsigned int tegra_ahci_qc_issue(struct ata_queued_cmd *qc)
+{
+	if (qc->tf.command == ATA_CMD_READ_LOG_EXT &&
+			qc->tf.lbal == ATA_LOG_SATA_NCQ) {
+		u8 *buf =
+		(u8 *) page_address((const struct page *)qc->sg->page_link);
+
+		/*
+		 * Since our SATA Controller does not support this command
+		 * don't send this command to the drive instead complete
+		 * the function here and indicate to the upper layer
+		 * that there is no entries in the buffer.
+		 */
+		buf += qc->sg->offset;
+		buf[0] = TEGRA_AHCI_READ_LOG_EXT_NOENTRY;
+		qc->complete_fn(qc);
+
+		return 0;
+	}
+
+	return ahci_ops.qc_issue(qc);
+}
+
 static int tegra_ahci_controller_init(void *hpriv, int lp0)
 {
 	struct tegra_ahci_host_priv *tegra_hpriv = hpriv;
@@ -1017,9 +1072,10 @@ static int tegra_ahci_controller_init(void *hpriv, int lp0)
 	struct clk *clk_sata_cold = NULL;
 	struct clk *clk_pllp = NULL;
 	struct clk *clk_cml1 = NULL;
-	int err, calib_val;
+	int err = 0, calib_val;
 	u32 val;
 	u32 timeout;
+	int partition_id;
 
 	if (!lp0) {
 		err = tegra_ahci_get_rails(tegra_hpriv);
@@ -1140,14 +1196,23 @@ static int tegra_ahci_controller_init(void *hpriv, int lp0)
 	clk_writel(val, CLK_RST_SATA_PLL_CFG1_REG);
 	udelay(3);
 
+	if (!lp0) {
 #if defined(CONFIG_TEGRA_SILICON_PLATFORM)
-	err = tegra_unpowergate_partition(TEGRA_POWERGATE_SATA);
-	if (err) {
-		pr_err("%s: ** failed to turn-on SATA (0x%x) **\n",
-				__func__, err);
-		goto exit;
-	}
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+		partition_id = tegra_pd_get_powergate_id(tegra_sata_pd);
+		if (partition_id < 0)
+			return -EINVAL;
+#else
+		partition_id = TEGRA_POWERGATE_SATA;
 #endif
+		err = tegra_unpowergate_partition(partition_id);
+		if (err) {
+			pr_err("%s: ** failed to turn-on SATA (0x%x) **\n",
+					__func__, err);
+			goto exit;
+		}
+#endif
+	}
 
 	/*
 	 * place SATA Pad PLL out of reset by writing
@@ -1224,12 +1289,10 @@ static int tegra_ahci_controller_init(void *hpriv, int lp0)
 	val &= ~NVA2SATA_OOB_ON_POR_MASK;
 	misc_writel(val, SATA_AUX_MISC_CNTL_1_REG);
 
-	if (tegra_hpriv->sata_connector != MINI_SATA) {
-		/* Disable DEVSLP Feature */
-		val = misc_readl(SATA_AUX_MISC_CNTL_1_REG);
-		val &= ~SDS_SUPPORT;
-		misc_writel(val, SATA_AUX_MISC_CNTL_1_REG);
-	}
+	/* Disable DEVSLP Feature */
+	val = misc_readl(SATA_AUX_MISC_CNTL_1_REG);
+	val &= ~SDS_SUPPORT;
+	misc_writel(val, SATA_AUX_MISC_CNTL_1_REG);
 
 	val = sata_readl(SATA_CONFIGURATION_0_OFFSET);
 	val |= EN_FPCI;
@@ -1238,17 +1301,12 @@ static int tegra_ahci_controller_init(void *hpriv, int lp0)
 	val |= CLK_OVERRIDE;
 	sata_writel(val, SATA_CONFIGURATION_0_OFFSET);
 
-	if (tegra_hpriv->dt_contains_padval == 1) {
-		calib_val = fuse_readl(FUSE_SATA_CALIB_OFFSET) &
-				FUSE_SATA_CALIB_MASK;
-		sata_calib_pad_val[calib_val].gen1_tx_amp =
-				tegra_hpriv->pad_val.gen1_tx_amp;
-		sata_calib_pad_val[calib_val].gen1_tx_peak =
-				tegra_hpriv->pad_val.gen1_tx_peak;
-		sata_calib_pad_val[calib_val].gen2_tx_amp =
-				tegra_hpriv->pad_val.gen2_tx_amp;
-		sata_calib_pad_val[calib_val].gen2_tx_peak =
-				tegra_hpriv->pad_val.gen2_tx_peak;
+	if (tegra_hpriv->dtContainsPadval == 1) {
+		calib_val = fuse_readl(FUSE_SATA_CALIB_OFFSET) & FUSE_SATA_CALIB_MASK;
+		sata_calib_pad_val[calib_val].gen1_tx_amp = tegra_hpriv->pad_val.gen1_tx_amp;
+		sata_calib_pad_val[calib_val].gen1_tx_peak = tegra_hpriv->pad_val.gen1_tx_peak;
+		sata_calib_pad_val[calib_val].gen2_tx_amp = tegra_hpriv->pad_val.gen2_tx_amp;
+		sata_calib_pad_val[calib_val].gen2_tx_peak = tegra_hpriv->pad_val.gen2_tx_peak;
 	}
 
 	/* program sata pad control based on the fuse */
@@ -1325,11 +1383,10 @@ static int tegra_ahci_controller_init(void *hpriv, int lp0)
 	sata_writel(val, SATA_INTR_MASK_0_OFFSET);
 
 	/* set fifo l2p depth */
-	if (tegra_hpriv->fifo_depth != 0) {
+	if (tegra_hpriv->fifo_depth != 0){
 		val = scfg_readl(T_SATA0_FIFO);
 		val &= ~T_SATA0_FIFO_L2P_FIFO_DEPTH_MASK;
-		val |= tegra_hpriv->fifo_depth
-					<< T_SATA0_FIFO_L2P_FIFO_DEPTH_SHIFT;
+		val |= tegra_hpriv->fifo_depth << T_SATA0_FIFO_L2P_FIFO_DEPTH_SHIFT;
 		scfg_writel(val, T_SATA0_FIFO);
 	}
 
@@ -1361,9 +1418,9 @@ static int tegra_ahci_t210_controller_init(void *hpriv, int lp0)
 	struct clk *clk_sata_oob = NULL;
 	struct clk *clk_sata_cold = NULL;
 	struct clk *clk_pllp = NULL;
-	struct clk *clk_cml1 = NULL;
-	int err;
+	int err = 0;
 	u32 val;
+	int partition_id;
 
 	if (!lp0) {
 		err = tegra_ahci_get_rails(tegra_hpriv);
@@ -1383,14 +1440,7 @@ static int tegra_ahci_t210_controller_init(void *hpriv, int lp0)
 			goto exit;
 		}
 
-		clk_cml1 = clk_get_sys(NULL, "cml1");
-		if (IS_ERR_OR_NULL(clk_cml1)) {
-			pr_err("%s: unable to get cml1 clock Errone is %d\n",
-					__func__, (int) PTR_ERR(clk_cml1));
-			err = PTR_ERR(clk_cml1);
-			goto exit;
-		}
-		tegra_hpriv->clk_cml1 = clk_cml1;
+		tegra_hpriv->clk_cml1 = NULL;
 
 		/* pll_p is the parent of tegra_sata and tegra_sata_oob */
 		clk_pllp = clk_get_sys(NULL, "pll_p");
@@ -1443,13 +1493,7 @@ static int tegra_ahci_t210_controller_init(void *hpriv, int lp0)
 	tegra_periph_reset_assert(tegra_hpriv->clk_sata_cold);
 	udelay(10);
 
-	if (clk_prepare_enable(tegra_hpriv->clk_cml1)) {
-		pr_err("%s: unable to enable cml1 clock\n", __func__);
-		err = -ENODEV;
-		goto exit;
-	}
 	tegra_padctl_init_sata_pad();
-	udelay(10);
 
 	/* need to establish both clocks divisors before setting clk sources */
 	clk_set_rate(tegra_hpriv->clk_sata,
@@ -1508,14 +1552,23 @@ static int tegra_ahci_t210_controller_init(void *hpriv, int lp0)
 	val |= REFCLK_SEL_INT_CML;
 	misc_writel(val, SATA_AUX_PAD_PLL_CNTL_1_REG);
 
+	if (!lp0) {
 #if defined(CONFIG_TEGRA_SILICON_PLATFORM)
-	err = tegra_unpowergate_partition(TEGRA_POWERGATE_SATA);
-	if (err) {
-		pr_err("%s: ** failed to turn-on SATA (0x%x) **\n",
-				__func__, err);
-		goto exit;
-	}
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+		partition_id = tegra_pd_get_powergate_id(tegra_sata_pd);
+		if (partition_id < 0)
+			return -EINVAL;
+#else
+		partition_id = TEGRA_POWERGATE_SATA;
 #endif
+		err = tegra_unpowergate_partition(partition_id);
+		if (err) {
+			pr_err("%s: ** failed to turn-on SATA (0x%x) **\n",
+					__func__, err);
+			goto exit;
+		}
+#endif
+	}
 
 	/*
 	 * place SATA Pad PLL out of reset by writing
@@ -1632,6 +1685,15 @@ static int tegra_ahci_t210_controller_init(void *hpriv, int lp0)
 	val |= IP_INT_MASK;
 	sata_writel(val, SATA_INTR_MASK_0_OFFSET);
 
+	/* set fifo l2p depth */
+	if (tegra_hpriv->fifo_depth != 0) {
+		val = scfg_readl(T_SATA0_FIFO);
+		val &= ~T_SATA0_FIFO_L2P_FIFO_DEPTH_MASK;
+		val |= tegra_hpriv->fifo_depth <<
+			T_SATA0_FIFO_L2P_FIFO_DEPTH_SHIFT;
+		scfg_writel(val, T_SATA0_FIFO);
+	}
+
 exit:
 
 	if (!IS_ERR_OR_NULL(tegra_hpriv->clk_pllp))
@@ -1644,8 +1706,6 @@ exit:
 		clk_put(tegra_hpriv->clk_sata_aux);
 	if (!IS_ERR_OR_NULL(tegra_hpriv->clk_sata_cold))
 		clk_put(tegra_hpriv->clk_sata_cold);
-	if (!IS_ERR_OR_NULL(tegra_hpriv->clk_cml1))
-		clk_put(tegra_hpriv->clk_cml1);
 
 	if (err && !lp0) {
 		/* turn off all SATA power rails; ignore returned status */
@@ -1678,7 +1738,15 @@ static void tegra_ahci_controller_remove(struct platform_device *pdev)
 				   status);
 #else
 	/* power off the sata */
-	status = tegra_powergate_partition_with_clk_off(TEGRA_POWERGATE_SATA);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	int partition_id;
+	partition_id = tegra_pd_get_powergate_id(tegra_sata_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_SATA;
+#endif
+	status = tegra_powergate_partition_with_clk_off(partition_id);
 	if (status)
 		dev_err(host->dev, "remove: error turn-off SATA (0x%x)\n",
 				   status);
@@ -1724,6 +1792,7 @@ static int tegra_ahci_controller_suspend(struct platform_device *pdev)
 		tegra_hpriv->soc_data->num_sata_regulators);
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int tegra_ahci_controller_resume(struct platform_device *pdev)
 {
 	struct ata_host *host = dev_get_drvdata(&pdev->dev);
@@ -1760,6 +1829,7 @@ static int tegra_ahci_controller_resume(struct platform_device *pdev)
 
 	return 0;
 }
+#endif
 
 #ifndef CONFIG_TEGRA_SATA_IDLE_POWERGATE
 static int tegra_ahci_suspend(struct platform_device *pdev, pm_message_t mesg)
@@ -1893,6 +1963,8 @@ static int tegra_ahci_port_resume(struct ata_port *ap)
 	struct ata_host *host = ap->host;
 	struct tegra_ahci_host_priv *tegra_hpriv = host->private_data;
 	struct ata_link *link = NULL;
+	struct scsi_device *sdev = NULL;
+
 	int ret = 0;
 
 	ret = pm_runtime_get_sync(&tegra_hpriv->pdev->dev);
@@ -1903,18 +1975,31 @@ static int tegra_ahci_port_resume(struct ata_port *ap)
 		return AC_ERR_SYSTEM;
 	}
 
-	ata_for_each_link(link, ap, HOST_FIRST) {
-		link->eh_info.action &= ~ATA_EH_RESET;
+	if (ap->pm_mesg.event & PM_EVENT_RESUME) {
+		if (ap->pm_mesg.event & PM_EVENT_AUTO)
+			ata_for_each_link(link, ap, HOST_FIRST) {
+				link->eh_info.action &= ~ATA_EH_RESET;
+			}
+		else
+			shost_for_each_device(sdev, ap->scsi_host) {
+				if (sdev->request_queue->rpm_status ==
+								RPM_SUSPENDED)
+					sdev->request_queue->rpm_status =
+								RPM_ACTIVE;
+			}
 	}
 
 	ret = ahci_ops.port_resume(ap);
 
-	ata_eh_thaw_port(ap);
+	if ((ap->pm_mesg.event & PM_EVENT_AUTO) &&
+			(ap->pm_mesg.event & PM_EVENT_RESUME))
+		ata_eh_thaw_port(ap);
 
 	return ret;
 
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int tegra_ahci_suspend_common(struct platform_device *pdev,
 		pm_message_t mesg)
 {
@@ -1949,7 +2034,7 @@ static int tegra_ahci_suspend(struct device *dev)
 	dev_dbg(dev, "Suspending...\n");
 	return tegra_ahci_suspend_common(pdev, PMSG_SUSPEND);
 }
-
+#endif
 
 static int tegra_ahci_runtime_suspend(struct device *dev)
 {
@@ -1985,6 +2070,7 @@ static int tegra_ahci_runtime_suspend(struct device *dev)
 	return err;
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int tegra_ahci_resume(struct device *dev)
 {
 	struct platform_device *pdev = g_tegra_hpriv->pdev;
@@ -2031,6 +2117,7 @@ static int tegra_ahci_resume(struct device *dev)
 #endif
 	return 0;
 }
+#endif
 
 static int tegra_ahci_runtime_resume(struct device *dev)
 {
@@ -2049,6 +2136,38 @@ static int tegra_ahci_runtime_resume(struct device *dev)
 		return -EBUSY;
 }
 #endif
+
+static int tegra_ahci_hardreset(struct ata_link *link, unsigned int *class,
+			  unsigned long deadline)
+{
+	int ret;
+	u32 val;
+
+	ret = ahci_ops.hardreset(link, class, deadline);
+	if (ret < 0) {
+		val = scfg_readl(T_SATA0_CFG_LINK_0);
+		val |= T_SATA0_CFG_LINK_0_USE_POSEDGE_SCTL_DET;
+		scfg_writel(val, T_SATA0_CFG_LINK_0);
+	}
+
+	return ret;
+}
+
+static int tegra_ahci_softreset(struct ata_link *link, unsigned int *class,
+			  unsigned long deadline)
+{
+	int ret;
+	u32 val;
+
+	ret = ahci_ops.softreset(link, class, deadline);
+	if (ret < 0) {
+		val = scfg_readl(T_SATA0_CFG_LINK_0);
+		val |= T_SATA0_CFG_LINK_0_USE_POSEDGE_SCTL_DET;
+		scfg_writel(val, T_SATA0_CFG_LINK_0);
+	}
+
+	return ret;
+}
 
 #ifdef CONFIG_TEGRA_AHCI_CONTEXT_RESTORE
 static u16 pg_save_bar5_registers[] = {
@@ -2402,10 +2521,13 @@ static void tegra_ahci_iddqlane_config(void)
 
 }
 
-static void tegra_ahci_put_sata_in_iddq(void)
+static void tegra_ahci_put_sata_in_iddq(struct ata_host *host)
 {
+	struct tegra_ahci_host_priv *tegra_hpriv;
 	u32 val;
 	u32 dat;
+
+	tegra_hpriv = (struct tegra_ahci_host_priv *)host->private_data;
 
 	/*
 	 * Hw wake up is not needed:
@@ -2416,10 +2538,13 @@ static void tegra_ahci_put_sata_in_iddq(void)
 	 * SATA_PADPHY_IDDQ_OVERRIDE_VALUE=1
 	 */
 
-	val = clk_readl(CLK_RST_SATA_PLL_CFG0_REG);
-	val &= ~(PADPLL_RESET_SWCTL_MASK | PADPLL_RESET_OVERRIDE_VALUE_MASK);
-	val |= (PADPLL_RESET_SWCTL_ON | PADPLL_RESET_OVERRIDE_VALUE_ON);
-	clk_writel(val, CLK_RST_SATA_PLL_CFG0_REG);
+	if (tegra_hpriv->cid != TEGRA_CHIPID_TEGRA21) {
+		val = clk_readl(CLK_RST_SATA_PLL_CFG0_REG);
+		val &= ~(PADPLL_RESET_SWCTL_MASK |
+			PADPLL_RESET_OVERRIDE_VALUE_MASK);
+		val |= (PADPLL_RESET_SWCTL_ON | PADPLL_RESET_OVERRIDE_VALUE_ON);
+		clk_writel(val, CLK_RST_SATA_PLL_CFG0_REG);
+	}
 
 	/* Wait for time specified in SATA_LANE_IDDQ2_PADPLL_IDDQ */
 	val = clk_readl(CLK_RST_SATA_PLL_CFG1_REG);
@@ -2476,6 +2601,7 @@ static bool tegra_ahci_power_gate(struct ata_host *host)
 	u32 dat;
 	struct tegra_ahci_host_priv *tegra_hpriv;
 	int status;
+	int partition_id;
 
 	tegra_hpriv = (struct tegra_ahci_host_priv *)host->private_data;
 
@@ -2520,10 +2646,17 @@ static bool tegra_ahci_power_gate(struct ata_host *host)
 		dev_err(host->dev, "** pg: cmds; abort power gating **\n");
 		return false;
 	}
-	tegra_ahci_put_sata_in_iddq();
+	tegra_ahci_put_sata_in_iddq(host);
 
 	/* power off the sata */
-	status = tegra_powergate_partition_with_clk_off(TEGRA_POWERGATE_SATA);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_sata_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_SATA;
+#endif
+	status = tegra_powergate_partition_with_clk_off(partition_id);
 	if (status) {
 		dev_err(host->dev, "** failed to turn-off SATA (0x%x) **\n",
 				   status);
@@ -2541,13 +2674,21 @@ static bool tegra_ahci_power_un_gate(struct ata_host *host)
 	u32 timeout;
 	struct tegra_ahci_host_priv *tegra_hpriv;
 	int status;
+	int powergate_id;
 
 	tegra_hpriv = (struct tegra_ahci_host_priv *)host->private_data;
 
 	if (tegra_hpriv->cid != TEGRA_CHIPID_TEGRA21)
 		tegra_ahci_iddqlane_config();
 
-	status = tegra_unpowergate_partition_with_clk_on(TEGRA_POWERGATE_SATA);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	powergate_id = tegra_pd_get_powergate_id(tegra_sata_pd);
+	if (powergate_id < 0)
+		return -EINVAL;
+#else
+	powergate_id = TEGRA_POWERGATE_SATA;
+#endif
+	status = tegra_unpowergate_partition_with_clk_on(powergate_id);
 	if (status) {
 		dev_err(host->dev, "** failed to turn-on SATA (0x%x) **\n",
 				   status);
@@ -2687,7 +2828,7 @@ static bool tegra_ahci_pad_suspend(struct ata_host *host)
 		xusb_writel(val, XUSB_PADCTL_IOPHY_MISC_PAD_S0_CTL_1_0);
 	}
 
-	tegra_ahci_put_sata_in_iddq();
+	tegra_ahci_put_sata_in_iddq(host);
 
 	val = clk_readl(CLK_RST_SATA_PLL_CFG0_REG);
 	val |= (SATA_SEQ_PADPLL_PD_INPUT_VALUE |
@@ -2868,26 +3009,26 @@ static int tegra_ahci_init_one(struct platform_device *pdev)
 			return -ENODEV;
 
 		/*
-		*of_property_read_u8 does not overwrite the third argument,
-		*if corresponding dt node does not exist.So it is safe to
-		*call this function without checking presence of dt node.
-		*/
-		tegra_hpriv->dt_contains_padval = 1;
+		 *of_property_read_u8 does not overwrite the third argument,
+		 *if corresponding dt node does not exist.So it is safe to
+		 *call this function without checking presence of dt node.
+		 */
+		tegra_hpriv->dtContainsPadval = 1;
 		if (of_property_read_u8(np, "nvidia,gen1-amp",
 			&tegra_hpriv->pad_val.gen1_tx_amp) != 0)
-			tegra_hpriv->dt_contains_padval = 0;
+			tegra_hpriv->dtContainsPadval = 0;
 		if (of_property_read_u8(np, "nvidia,gen2-amp",
 			&tegra_hpriv->pad_val.gen2_tx_amp) != 0)
-			tegra_hpriv->dt_contains_padval = 0;
+			tegra_hpriv->dtContainsPadval = 0;
 		if (of_property_read_u8(np, "nvidia,gen1-peak",
 			&tegra_hpriv->pad_val.gen1_tx_peak) != 0)
-			tegra_hpriv->dt_contains_padval = 0;
+			tegra_hpriv->dtContainsPadval = 0;
 		if (of_property_read_u8(np, "nvidia,gen2-peak",
 			&tegra_hpriv->pad_val.gen2_tx_peak) != 0)
-			tegra_hpriv->dt_contains_padval = 0;
+			tegra_hpriv->dtContainsPadval = 0;
 		if (of_property_read_u8(np, "nvidia,l2p_fifo_depth",
-			&tegra_hpriv->fifo_depth) != 0){
-			tegra_hpriv->fifo_depth = 0x0;
+					&tegra_hpriv->fifo_depth) != 0){
+			tegra_hpriv->fifo_depth = 0x7;
 		}
 		tegra_hpriv->soc_data =
 				(struct tegra_sata_soc_data *)match->data;
@@ -2957,6 +3098,9 @@ static int tegra_ahci_init_one(struct platform_device *pdev)
 	}
 	if (hpriv->cap & HOST_CAP_PMP)
 		pi.flags |= ATA_FLAG_PMP;
+
+	/* Disable DIPM */
+	pi.flags |= ATA_FLAG_NO_DIPM;
 
 	/*
 	 * CAP.NP sometimes indicate the index of the last enabled
@@ -3154,6 +3298,7 @@ static int dbg_ahci_dump_show(struct seq_file *s, void *unused)
 	int rc;
 #endif
 #endif
+	int powergate_id;
 
 	if (g_tegra_hpriv == NULL)
 		return 0;
@@ -3189,7 +3334,14 @@ static int dbg_ahci_dump_show(struct seq_file *s, void *unused)
 		dbg_ahci_dump_regs(s, ptr, base, 20);
 	}
 
-	if (tegra_powergate_is_powered(TEGRA_POWERGATE_SATA))
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	powergate_id = tegra_pd_get_powergate_id(tegra_sata_pd);
+	if (powergate_id < 0)
+		return -EINVAL;
+#else
+	powergate_id = TEGRA_POWERGATE_SATA;
+#endif
+	if (tegra_powergate_is_powered(powergate_id))
 		seq_puts(s, "\n=== SATA controller is powered on ===\n\n");
 	else
 		seq_puts(s, "\n=== SATA controller is powered off ===\n\n");

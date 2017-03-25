@@ -40,6 +40,13 @@
 		bootargs = "tegraid=40.0.0.00.00 vmalloc=256M video=tegrafb console=ttyS0,115200n8 earlyprintk";
 	};
 
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "jetson-tk1";
+		};
+	};
+
 	host1x {
 		/* tegradc.0 */
 		dc@54200000 {
@@ -164,10 +171,12 @@
 		nvidia,lane-map = <0x10>;
 		status = "okay";
 		pci@1,0 {
+			nvidia,disable-clock-request;
 			status = "okay";
 		};
 
 		pci@2,0 {
+			nvidia,disable-clock-request;
 			status = "okay";
 		};
 	};

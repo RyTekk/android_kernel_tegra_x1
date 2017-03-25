@@ -30,12 +30,13 @@
 #include <linux/tegra-soc.h>
 #include <linux/platform_data/tegra_emc_pdata.h>
 #include <soc/tegra/tegra_bpmp.h>
+#include <soc/tegra/tegra_pasr.h>
 
 #include <asm/cputime.h>
 #include <asm/uaccess.h>
 
-#include <tegra/tegra21_emc.h>
-#include <tegra/mc-regs-t21x.h>
+#include <linux/platform/tegra/tegra21_emc.h>
+#include <linux/platform/tegra/mc-regs-t21x.h>
 
 #include <mach/nct.h>
 
@@ -552,6 +553,7 @@ static void emc_set_clock(struct tegra21_emc_table *next_timing,
 		tegra_emc_timer_training_stop();
 
 	/* EMC freq dependent MR4 polling. */
+	tegra_emc_mr4_freq_check(next_timing->rate);
 }
 
 static inline void emc_get_timing(struct tegra21_emc_table *timing)
@@ -1203,7 +1205,7 @@ static bool is_pasr_supported(void)
 		dram_type == DRAM_TYPE_LPDDR4);
 }
 
-void tegra_bpmp_pasr_mask(uint32_t phys)
+static void tegra_bpmp_pasr_mask(uint32_t phys)
 {
 	int mb[] = { phys };
 	int r = tegra_bpmp_send(MRQ_PASR_MASK, &mb, sizeof(mb));
@@ -1249,7 +1251,7 @@ static int tegra21_pasr_enable(const char *arg, const struct kernel_param *kp)
 	void *cookie;
 	int num_devices;
 	u32 regval;
-	u32 device_size;
+	u64 device_size;
 	u64 subp_addr_mode;
 	u64 dram_width;
 	u64 num_channels;
@@ -1265,18 +1267,26 @@ static int tegra21_pasr_enable(const char *arg, const struct kernel_param *kp)
 	regval = emc_readl(EMC_FBIO_CFG5);
 	dram_width = (regval & (0x1 << 4)) == 0 ? 32 : 64;
 
+	/* measure of width of row address */
 	device_size = ((mc_readl(MC_EMEM_ADR_CFG_DEV0) >>
 				MC_EMEM_DEV_SIZE_SHIFT) &
 				MC_EMEM_DEV_SIZE_MASK);
 
-	if (device_size == DEVSIZE768M)
+	/* density of DRAM device or device size per subpartition */
+	switch (device_size) {
+	case DEVSIZE768M:
 		device_size = SZ_768M;
-	else if (device_size == DEVSIZE384M)
+		break;
+	case DEVSIZE384M:
 		device_size = SZ_384M;
-	else
-		device_size = device_size << 23;
+		break;
+	default:
+		device_size = 1 << (device_size + 22);
+	}
 
+	/* device size per channel */
 	device_size = device_size * (dram_width/subp_addr_mode);
+	/* device size per DRAM device */
 	device_size = device_size * num_channels;
 
 	old_pasr_enable = pasr_enable;
@@ -1680,7 +1690,7 @@ static ssize_t emc_table_entry_array_write(struct file *filp,
 	if (ret != 2)
 		return -EINVAL;
 
-	if (offs < 0 || offs >= arr->length)
+	if (offs >= arr->length)
 		return -EINVAL;
 
 	pr_info("Setting reg_list: offs=%d, value = 0x%08x\n", offs, value);
@@ -1839,11 +1849,8 @@ static int emc_init_table_debug(struct dentry *emc_root,
 	regular = debugfs_create_dir("regular", tables_dir);
 	if (!regular)
 		return -ENODEV;
-	if (derated_tbl) {
+	if (derated_tbl)
 		derated = debugfs_create_dir("derated", tables_dir);
-		if (!regular)
-			return -ENODEV;
-	}
 
 	for (i = 0; i < tegra_emc_table_size; i++) {
 		emc_table_entry_create(regular, &regular_tbl[i]);

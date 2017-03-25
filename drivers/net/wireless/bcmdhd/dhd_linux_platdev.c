@@ -45,11 +45,18 @@
 #include <linux/wlan_plat.h>
 #endif
 #include <linux/of_gpio.h>
+#include <linux/of_net.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
+#include <linux/of_platform.h>
 #include <linux/irq.h>
 #include <mach/nct.h>
 #include <linux/gpio.h>
+#include <linux/mmc/host.h>
+#include <linux/mmc/sdhci.h>
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+#include "dhd_custom_sysfs_tegra.h"
+#endif
 
 #if !defined(CONFIG_WIFI_CONTROL_FUNC)
 struct wifi_platform_data {
@@ -180,9 +187,9 @@ int wifi_platform_set_power(wifi_adapter_info_t *adapter, bool on, unsigned long
 		err = plat_data->set_power(on);
 	else {
 		if (gpio_is_valid(adapter->wlan_pwr))
-			gpio_set_value_cansleep(adapter->wlan_pwr, on);
+			gpio_direction_output(adapter->wlan_pwr, on);
 		if (gpio_is_valid(adapter->wlan_rst))
-			gpio_set_value_cansleep(adapter->wlan_rst, on);
+			gpio_direction_output(adapter->wlan_rst, on);
 	}
 
 	if (!on)
@@ -199,6 +206,34 @@ int wifi_platform_set_power(wifi_adapter_info_t *adapter, bool on, unsigned long
 	return err;
 }
 
+int wifi_dts_set_carddetect(wifi_adapter_info_t *adapter, bool device_present)
+{
+	struct platform_device *pdev = NULL;
+	struct sdhci_host *host =  NULL;
+
+	if (adapter->sdhci_host == NULL)
+		return -EINVAL;
+
+	pdev = of_find_device_by_node(adapter->sdhci_host);
+	if (pdev == NULL)
+		return -EINVAL;
+
+	host = platform_get_drvdata(pdev);
+	if (host == NULL)
+		return -EINVAL;
+
+	DHD_INFO(("%s Calling %s card detect\n", __func__, mmc_hostname(host->mmc)));
+	if (device_present == 1) {
+		host->mmc->rescan_disable = 0;
+		mmc_detect_change(host->mmc, 0);
+	} else {
+		host->mmc->detect_change = 0;
+		host->mmc->rescan_disable = 1;
+	}
+
+	return 0;
+}
+
 int wifi_platform_bus_enumerate(wifi_adapter_info_t *adapter, bool device_present)
 {
 	int err = 0;
@@ -211,125 +246,28 @@ int wifi_platform_bus_enumerate(wifi_adapter_info_t *adapter, bool device_presen
 	DHD_ERROR(("%s device present %d\n", __FUNCTION__, device_present));
 	if (plat_data && plat_data->set_carddetect) {
 		err = plat_data->set_carddetect(device_present);
-	}
-	return err;
-
-}
-
-#define ARDBEG_WIFI_MAC_ADDR_FILE	"/mnt/factory/wifi/wifi_mac.txt"
-static int _wifi_get_mac_addr_file(unsigned char *buf)
-{
-	struct file *fp;
-	int rdlen;
-	char str[32];
-	int mac[6];
-	int ret = 0;
-
-	/* open wifi mac address file */
-	fp = filp_open(ARDBEG_WIFI_MAC_ADDR_FILE, O_RDONLY, 0);
-	if (IS_ERR(fp)) {
-		DHD_ERROR(("%s: cannot open %s\n",
-			__FUNCTION__, ARDBEG_WIFI_MAC_ADDR_FILE));
-		return -ENOENT;
-	}
-
-	/* read wifi mac address file */
-	memset(str, 0, sizeof(str));
-	rdlen = kernel_read(fp, fp->f_pos, str, 17);
-	if (rdlen > 0)
-		fp->f_pos += rdlen;
-	if (rdlen != 17) {
-		DHD_ERROR(("%s: bad mac address file"
-			" - len %d < 17",
-			__FUNCTION__, rdlen));
-		ret = -ENOENT;
-	} else if (sscanf(str, "%x:%x:%x:%x:%x:%x",
-		&mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) != 6) {
-		DHD_ERROR(("%s: bad mac address file"
-			" - must contain xx:xx:xx:xx:xx:xx\n",
-			__FUNCTION__));
-		ret = -ENOENT;
 	} else {
-		DHD_ERROR(("%s: using wifi mac %02x:%02x:%02x:%02x:%02x:%02x\n",
-			__FUNCTION__,
-			mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]));
-		buf[0] = (unsigned char) mac[0];
-		buf[1] = (unsigned char) mac[1];
-		buf[2] = (unsigned char) mac[2];
-		buf[3] = (unsigned char) mac[3];
-		buf[4] = (unsigned char) mac[4];
-		buf[5] = (unsigned char) mac[5];
+		err = wifi_dts_set_carddetect(adapter, device_present);
 	}
 
-	/* close wifi mac address file */
-	filp_close(fp, NULL);
-
-	return ret;
-}
-
-/* Get MAC address from the specified DTB path */
-static int _wifi_get_mac_address_dtb(const char *node_name,
-					const char *property_name,
-					unsigned char *mac_addr)
-{
-	struct device_node *np = of_find_node_by_path(node_name);
-	const char *mac_str = NULL;
-	int values[6] = {0};
-	unsigned char mac_temp[6] = {0};
-	int i, ret = 0;
-
-	if (!np)
-		return -EADDRNOTAVAIL;
-
-	/* If the property is present but contains an invalid value,
-	 * then something is wrong. Log the error in that case.
-	 */
-	if (of_property_read_string(np, property_name, &mac_str)) {
-		ret = -EADDRNOTAVAIL;
-		goto err_out;
-	}
-
-	/* The DTB property is a string of the form xx:xx:xx:xx:xx:xx
-	 * Convert to an array of bytes.
-	 */
-	if (sscanf(mac_str, "%x:%x:%x:%x:%x:%x",
-		&values[0], &values[1], &values[2],
-		&values[3], &values[4], &values[5]) != 6) {
-		ret = -EINVAL;
-		goto err_out;
-	}
-
-	for (i = 0; i < 6; ++i)
-		mac_temp[i] = (unsigned char)values[i];
-
-	if (!is_valid_ether_addr(mac_temp)) {
-		ret = -EINVAL;
-		goto err_out;
-	}
-
-	memcpy(mac_addr, mac_temp, 6);
-
-	of_node_put(np);
-
-	return ret;
-
-err_out:
-	DHD_ERROR(("%s: bad mac address at %s/%s: %s.\n",
-		__func__, node_name, property_name,
-		(mac_str) ? mac_str : "null"));
-
-	of_node_put(np);
-
-	return ret;
+	return err;
 }
 
 static int wifi_get_mac_addr(unsigned char *buf)
 {
-	/* try to get mac address stored in dtb chosen first and if that
-	 * fails try filesystem.
-	 */
-	if (_wifi_get_mac_address_dtb("/chosen", "nvidia,wifi-mac", buf))
-		return _wifi_get_mac_addr_file(buf);
+	struct device_node *dt_node;
+	const void *mac_addr;
+
+	dt_node = of_find_compatible_node(NULL, NULL, "android,bcmdhd_wlan");
+	if (!dt_node)
+		return -ENOENT;
+	mac_addr = of_get_mac_address(dt_node);
+	of_node_put(dt_node);
+	if (!mac_addr)
+		return -ENOENT;
+	memcpy(buf, mac_addr, 6);
+	pr_info("%s: %02x:%02x:%02x:%02x:%02x:%02x\n",
+		__func__, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
 
 	return 0;
 }
@@ -344,8 +282,7 @@ int wifi_platform_get_mac_addr(wifi_adapter_info_t *adapter, unsigned char *buf)
 
 	/* The MAC address search order is:
 	 * Userspace command (e.g. ifconfig)
-	 * DTB (from NCT/EEPROM)
-	 * File (FCT/rootfs)
+	 * of_get_mac_address()
 	 * OTP
 	 */
 	if (wifi_get_mac_addr(buf) == 0)
@@ -454,6 +391,14 @@ static void wifi_platform_free_country_code_map(wifi_adapter_info_t *adapter)
 }
 #endif
 
+static inline bool is_antenna_tuned(void)
+{
+	struct device_node *np;
+
+	np = of_find_node_by_name(NULL, "wifi-antenna-tuning");
+	return of_device_is_available(np);
+}
+
 static int wifi_plat_dev_drv_probe(struct platform_device *pdev)
 {
 	struct resource *resource;
@@ -475,6 +420,20 @@ static int wifi_plat_dev_drv_probe(struct platform_device *pdev)
 
 		adapter->wlan_pwr = of_get_named_gpio(node, "wlan-pwr-gpio", 0);
 		adapter->wlan_rst = of_get_named_gpio(node, "wlan-rst-gpio", 0);
+		adapter->fw_path = of_get_property(node, "fw_path", NULL);
+		adapter->nv_path = of_get_property(node, "nv_path", NULL);
+		adapter->sdhci_host = of_parse_phandle(node, "sdhci-host", 0);
+		of_property_read_u32(node, "pwr-retry-cnt", &adapter->pwr_retry_cnt);
+
+		if (is_antenna_tuned())
+			adapter->nv_path = of_get_property(node,
+						"tuned_nv_path", NULL);
+
+		if (gpio_is_valid(adapter->wlan_pwr))
+			gpio_request(adapter->wlan_pwr, "wlan_pwr");
+
+		if (gpio_is_valid(adapter->wlan_rst))
+			gpio_request(adapter->wlan_rst, "wlan_rst");
 
 		/* This is to get the irq for the OOB */
 		adapter->irq_num = platform_get_irq(pdev, 0);
@@ -568,6 +527,7 @@ static void wifi_plat_dev_drv_shutdown(struct platform_device *pdev)
 	ASSERT(dhd_wifi_platdata->num_adapters == 1);
 	adapter = &dhd_wifi_platdata->adapters[0];
 
+	adapter->skip_hang_evt = TRUE;
 	wifi_platform_set_power(adapter, FALSE, 0);
 }
 
@@ -808,6 +768,9 @@ static int dhd_wifi_platform_load_pcie(void)
 						DHD_ERROR(("failed to power up %s,"
 							" %d retry left\n",
 							adapter->name, retry));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+						TEGRA_SYSFS_HISTOGRAM_STAT_INC(wifi_on_retry);
+#endif
 						/* WL_REG_ON state unknown, Power off forcely */
 						wifi_platform_set_power(adapter,
 							FALSE, WIFI_TURNOFF_DELAY);
@@ -818,6 +781,9 @@ static int dhd_wifi_platform_load_pcie(void)
 							DHD_ERROR(("failed to enumerate bus %s, "
 								"%d retry left\n",
 								adapter->name, retry));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+							TEGRA_SYSFS_HISTOGRAM_STAT_INC(wifi_on_retry);
+#endif
 							wifi_platform_set_power(adapter, FALSE,
 								WIFI_TURNOFF_DELAY);
 						} else {
@@ -829,9 +795,15 @@ static int dhd_wifi_platform_load_pcie(void)
 				if (!retry) {
 					DHD_ERROR(("failed to power up %s, max retry reached**\n",
 						adapter->name));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+					TEGRA_SYSFS_HISTOGRAM_STAT_INC(wifi_on_fail);
+#endif
 					return -ENODEV;
 				}
 			}
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+			TEGRA_SYSFS_HISTOGRAM_STAT_INC(wifi_on_success);
+#endif
 		}
 
 		err = dhd_bus_register();
@@ -899,7 +871,7 @@ static int dhd_wifi_platform_load_sdio(void)
 #if defined(BCMLXSDMMC)
 	sema_init(&dhd_registration_sem, 0);
 #endif
-#if defined(BCMLXSDMMC) && !defined(CONFIG_TEGRA_PREPOWER_WIFI)
+#if defined(BCMLXSDMMC)
 	if (dhd_wifi_platdata == NULL) {
 		DHD_ERROR(("DHD wifi platform data is required for Android build\n"));
 		return -EINVAL;
@@ -908,11 +880,12 @@ static int dhd_wifi_platform_load_sdio(void)
 	/* power up all adapters */
 	for (i = 0; i < dhd_wifi_platdata->num_adapters; i++) {
 		bool chip_up = FALSE;
-		int retry = POWERUP_MAX_RETRY;
+		int retry;
 		struct semaphore dhd_chipup_sem;
 
 		adapter = &dhd_wifi_platdata->adapters[i];
 
+		retry = adapter->pwr_retry_cnt;
 		DHD_ERROR(("Power-up adapter '%s'\n", adapter->name));
 		DHD_INFO((" - irq %d [flags %d], firmware: %s, nvram: %s\n",
 			adapter->irq_num, adapter->intr_flags, adapter->fw_path, adapter->nv_path));
@@ -944,6 +917,9 @@ static int dhd_wifi_platform_load_sdio(void)
 			}
 
 			DHD_ERROR(("failed to power up %s, %d retry left\n", adapter->name, retry));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+			TEGRA_SYSFS_HISTOGRAM_STAT_INC(wifi_on_retry);
+#endif
 			dhd_bus_unreg_sdio_notify();
 			wifi_platform_set_power(adapter, FALSE, WIFI_TURNOFF_DELAY);
 			wifi_platform_bus_enumerate(adapter, FALSE);
@@ -951,8 +927,14 @@ static int dhd_wifi_platform_load_sdio(void)
 
 		if (!chip_up) {
 			DHD_ERROR(("failed to power up %s, max retry reached**\n", adapter->name));
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+			TEGRA_SYSFS_HISTOGRAM_STAT_INC(wifi_on_fail);
+#endif
 			return -ENODEV;
 		}
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+		TEGRA_SYSFS_HISTOGRAM_STAT_INC(wifi_on_success);
+#endif
 
 	}
 

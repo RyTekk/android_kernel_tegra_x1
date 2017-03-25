@@ -170,6 +170,10 @@ static inline u32 gr_exception_memfmt_m(void)
 {
 	return 0x1 << 1;
 }
+static inline u32 gr_exception_ds_m(void)
+{
+	return 0x1 << 4;
+}
 static inline u32 gr_exception1_r(void)
 {
 	return 0x00400118;
@@ -3490,6 +3494,11 @@ static inline u32 gr_gpcs_pri_mmu_ctrl_use_pdb_big_page_size_m(void)
 {
 	return 0x1 << 11;
 }
+static inline u32 gr_gpcs_pri_mmu_ctrl_use_full_comp_tag_line_m(void)
+{
+	return 0x1 << 12;
+}
+
 static inline u32 gr_gpcs_pri_mmu_ctrl_vol_fault_m(void)
 {
 	return 0x1 << 1;

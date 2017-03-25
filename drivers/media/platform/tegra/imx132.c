@@ -1,7 +1,7 @@
 /*
  * imx132.c - imx132 sensor driver
  *
- * Copyright (c) 2012-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2012-2016, NVIDIA CORPORATION.  All rights reserved.
 
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -35,6 +35,7 @@
 #include <media/nvc.h>
 #include <media/imx132.h>
 #include <media/camera_common.h>
+#include <mach/io_dpd.h>
 #include "nvc_utilities.h"
 
 
@@ -61,10 +62,15 @@ struct imx132_info {
 static struct regulator *imx132_ext_reg1;
 static struct regulator *imx132_ext_reg2;
 
-static const struct reg_8 mode_1976x1144_one_lane[] = {
+static struct tegra_io_dpd csia_io = {
+	.name			= "CSIA",
+	.io_dpd_reg_index	= 0,
+	.io_dpd_bit		= 0,
+};
+
+static const struct reg_8 mode_1920x1080_one_lane[] = {
 	/* Stand by */
 	{0x0100, 0x00},
-	{IMX132_TABLE_WAIT_MS, IMX132_WAIT_MS},
 	{0x0101, 0x00},
 	{IMX132_TABLE_WAIT_MS, IMX132_WAIT_MS},
 
@@ -83,28 +89,28 @@ static const struct reg_8 mode_1976x1144_one_lane[] = {
 	{0x312D, 0x13},
 
 	/* PLL Setting */
-	{0x0305, 0x02},
-	{0x0307, 0x42},
+	{0x0305, 0x01},
+	{0x0307, 0x21},
 	{0x30A4, 0x02},
 	{0x303C, 0x4B},
 
 	/* Mode Setting */
 	{0x0340, 0x04},
-	{0x0341, 0x92},
+	{0x0341, 0x96},
 	{0x0342, 0x08},
 	{0x0343, 0xC8},
 	{0x0344, 0x00},
-	{0x0345, 0x00},
+	{0x0345, 0x1C},
 	{0x0346, 0x00},
-	{0x0347, 0x1C},
+	{0x0347, 0x3C},
 	{0x0348, 0x07},
-	{0x0349, 0xB7},
+	{0x0349, 0x9B},
 	{0x034A, 0x04},
-	{0x034B, 0x93},
+	{0x034B, 0x73},
 	{0x034C, 0x07},
-	{0x034D, 0xB8},
+	{0x034D, 0x80},
 	{0x034E, 0x04},
-	{0x034F, 0x78},
+	{0x034F, 0x38},
 	{0x0381, 0x01},
 	{0x0383, 0x01},
 	{0x0385, 0x01},
@@ -169,10 +175,9 @@ static const struct reg_8 mode_1976x1144_one_lane[] = {
 	{IMX132_TABLE_END, 0x00}
 };
 
-static const struct reg_8 mode_1976x1144_two_lane[] = {
+static const struct reg_8 mode_1920x1080_two_lane[] = {
 	/* Stand by */
 	{0x0100, 0x00},
-	{IMX132_TABLE_WAIT_MS, IMX132_WAIT_MS},
 	{0x0101, 0x00},
 	{IMX132_TABLE_WAIT_MS, IMX132_WAIT_MS},
 
@@ -191,28 +196,28 @@ static const struct reg_8 mode_1976x1144_two_lane[] = {
 	{0x312D, 0x13},
 
 	/* PLL Setting */
-	{0x0305, 0x02},
+	{0x0305, 0x01},
 	{0x0307, 0x21},
 	{0x30A4, 0x02},
 	{0x303C, 0x4B},
 
 	/* Mode Setting */
-	{0x0340, 0x04},
-	{0x0341, 0x92},
+	{0x0340, 0x09},
+	{0x0341, 0x2C},
 	{0x0342, 0x08},
 	{0x0343, 0xC8},
 	{0x0344, 0x00},
-	{0x0345, 0x00},
+	{0x0345, 0x1C},
 	{0x0346, 0x00},
-	{0x0347, 0x1C},
+	{0x0347, 0x3C},
 	{0x0348, 0x07},
-	{0x0349, 0xB7},
+	{0x0349, 0x9B},
 	{0x034A, 0x04},
-	{0x034B, 0x93},
+	{0x034B, 0x73},
 	{0x034C, 0x07},
-	{0x034D, 0xB8},
+	{0x034D, 0x80},
 	{0x034E, 0x04},
-	{0x034F, 0x78},
+	{0x034F, 0x38},
 	{0x0381, 0x01},
 	{0x0383, 0x01},
 	{0x0385, 0x01},
@@ -266,7 +271,7 @@ static const struct reg_8 mode_1976x1144_two_lane[] = {
 	{0x330C, 0x0B},
 	{0x330D, 0x07},
 	{0x330E, 0x03},
-	{0x3318, 0x67},
+	{0x3318, 0x61},
 	{0x3322, 0x09},
 	{0x3342, 0x00},
 	{0x3348, 0xE0},
@@ -278,13 +283,13 @@ static const struct reg_8 mode_1976x1144_two_lane[] = {
 };
 
 enum {
-	IMX132_MODE_1976X1144_ONE_LANE,
-	IMX132_MODE_1976X1144_TWO_LANE,
+	IMX132_MODE_1920X1080_ONE_LANE,
+	IMX132_MODE_1920X1080_TWO_LANE,
 };
 
 static const struct reg_8 *mode_table[] = {
-	[IMX132_MODE_1976X1144_ONE_LANE] = mode_1976x1144_one_lane,
-	[IMX132_MODE_1976X1144_TWO_LANE] = mode_1976x1144_two_lane,
+	[IMX132_MODE_1920X1080_ONE_LANE] = mode_1920x1080_one_lane,
+	[IMX132_MODE_1920X1080_TWO_LANE] = mode_1920x1080_two_lane,
 };
 
 static inline void
@@ -324,10 +329,10 @@ imx132_set_mode(struct imx132_info *info, struct imx132_mode *mode)
 		__func__, mode->xres, mode->yres, info->pdata->cap->data_lanes,
 		mode->frame_length, mode->coarse_time, mode->gain);
 
-	if ((mode->xres == 1976) && (mode->yres == 1144) && (info->pdata->cap->data_lanes == 1)) {
-		sensor_mode = IMX132_MODE_1976X1144_ONE_LANE;
-	} else if ((mode->xres == 1976) && (mode->yres == 1144) && (info->pdata->cap->data_lanes == 2)) {
-		sensor_mode = IMX132_MODE_1976X1144_TWO_LANE;
+	if ((mode->xres == 1920) && (mode->yres == 1080) && (info->pdata->cap->data_lanes == 1)) {
+		sensor_mode = IMX132_MODE_1920X1080_ONE_LANE;
+	} else if ((mode->xres == 1920) && (mode->yres == 1080) && (info->pdata->cap->data_lanes == 2)) {
+		sensor_mode = IMX132_MODE_1920X1080_TWO_LANE;
 	} else {
 		dev_err(dev, "%s: invalid resolution to set mode %d %d\n",
 			__func__, mode->xres, mode->yres);
@@ -673,6 +678,8 @@ static int imx132_power_on(struct imx132_info *info)
 	if (unlikely(WARN_ON(!pw || !pw->avdd || !pw->iovdd || !pw->dvdd)))
 		return -EFAULT;
 
+	tegra_io_dpd_disable(&csia_io);
+
 	/* Indicate higher sysedp power state prior to turning on the sensor */
 	sysedp_set_state(info->sysedpc, 1);
 
@@ -730,6 +737,8 @@ imx132_poweron_fail:
 	/* Power up failure. Reduce sysedp powerstate */
 	sysedp_set_state(info->sysedpc, 0);
 
+	tegra_io_dpd_enable(&csia_io);
+
 	pr_err("%s failed.\n", __func__);
 	return -ENODEV;
 }
@@ -748,6 +757,8 @@ static int imx132_power_off(struct imx132_info *info)
 
 	if (unlikely(WARN_ON(!pw || !pw->avdd || !pw->iovdd || !pw->dvdd)))
 		return -EFAULT;
+
+	tegra_io_dpd_enable(&csia_io);
 
 	gpio_set_value(cam2_gpio, 0);
 	gpio_set_value(reset_gpio, 0);
@@ -911,9 +922,6 @@ static struct imx132_platform_data *imx132_parse_dt(struct i2c_client *client)
 {
 	struct device_node *np = client->dev.of_node;
 	struct imx132_platform_data *board_info_pdata;
-	const char *sname;
-	int ret;
-	int num;
 
 	board_info_pdata = devm_kzalloc(&client->dev, sizeof(*board_info_pdata)
 			+ sizeof(*board_info_pdata->cap) + sizeof(*board_info_pdata->static_info),
@@ -929,31 +937,15 @@ static struct imx132_platform_data *imx132_parse_dt(struct i2c_client *client)
 	board_info_pdata->cam2_gpio = of_get_named_gpio(np, "cam2-gpios", 0);
 	board_info_pdata->reset_gpio = of_get_named_gpio(np, "reset-gpios", 0);
 	board_info_pdata->ext_reg = of_property_read_bool(np, "nvidia,ext_reg");
-	of_property_read_string(np, "clocks", &board_info_pdata->mclk_name);
 
-	num = 0;
-	do {
-		ret = of_property_read_string_index(
-			np, "regulators", num, &sname);
-		if (ret < 0)
-			break;
-		switch (num) {
-		case 0:
-			board_info_pdata->regulators.avdd = sname;
-			board_info_pdata->regulators.dvdd = NULL;
-			board_info_pdata->regulators.iovdd = NULL;
-			break;
-		case 1:
-			board_info_pdata->regulators.dvdd = sname;
-			break;
-		case 2:
-			board_info_pdata->regulators.iovdd = sname;
-			break;
-		default:
-			break;
-		}
-		num++;
-	} while (num < 3);
+	of_property_read_string(np, "mclk",
+		&board_info_pdata->mclk_name);
+	of_property_read_string(np, "avdd",
+		&board_info_pdata->regulators.avdd);
+	of_property_read_string(np, "dvdd",
+		&board_info_pdata->regulators.dvdd);
+	of_property_read_string(np, "iovdd",
+		&board_info_pdata->regulators.iovdd);
 
 	nvc_imager_parse_caps(np, board_info_pdata->cap, board_info_pdata->static_info);
 

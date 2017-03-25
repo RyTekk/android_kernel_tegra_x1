@@ -20,6 +20,10 @@
 
 	i2c@7000d000 {
 		max77620@3c {
+			low-battery-monitor {
+				maxim,low-battery-shutdown-enable;
+			};
+
 			pinmux@0 {
 				pin_gpio1 {
 					maxim,fps-source = <FPS_SRC_NONE>;
@@ -90,6 +94,7 @@
 
 				ldo0 {
 					maxim,fps-source = <FPS_SRC_NONE>;
+					maxim,suspend-fps-source = <FPS_SRC_1>;
 					maxim,fps-power-up-period = <0>;
 					maxim,fps-power-down-period = <7>;
 					regulator-enable-ramp-delay = <84>;
@@ -100,6 +105,7 @@
 
 				ldo1 {
 					maxim,fps-source = <FPS_SRC_0>;
+					maxim,suspend-fps-source = <FPS_SRC_1>;
 					maxim,fps-power-up-period = <0>;
 					maxim,fps-power-down-period = <3>;
 					regulator-enable-ramp-delay = <34>;
@@ -195,9 +201,7 @@
 		};
 
 		en_vdd_cam: regulator@5 {
-			gpio = <&tca9539_77 9 0>;
-			vin-supply = <&max77620_sd3>;
-			enable-active-high;
+			gpio = <&tca9539_77 9 1>;
 		};
 
 		vdd_hdmi: regulator@7 {
@@ -270,6 +274,11 @@
 			regulator-max-microvol = <2800000>;
 			gpio = <&tca9539_74 13 1>;
 			enable-active-high;
+			consumers {
+				c0 {
+					regulator-consumer-supply = "vana";
+				};
+			};
 		};
 
 		en_vdd_eth_5v0: regulator@207 {
@@ -298,6 +307,27 @@
 			regulator-name = "en-vdd-cam-1v2";
 			regulator-min-microvol = <1200000>;
 			regulator-max-microvol = <1200000>;
+			vin-supply = <&vdd_3v3>;
+			gpio = <&tca9539_77 3 1>;
+			enable-active-high;
+		};
+
+		en_vdd_vcm_2v8: regulator@210 {
+			compatible = "regulator-fixed-sync";
+			reg = <210>;
+			regulator-name = "en-vdd-vcm-2v8";
+			regulator-min-microvol = <2800000>;
+			regulator-max-microvol = <2800000>;
+			vin-supply = <&vdd_3v3>;
+			enable-active-high;
+		};
+
+		en_vdd_cam_1v2_alt: regulator@211 {
+			compatible = "regulator-fixed-sync";
+			reg = <211>;
+			regulator-name = "en-vdd-cam-1v2-alt";
+			regulator-min-microvol = <1200000>;
+			regulator-max-microvol = <1200000>;
 			gpio = <&tca9539_77 10 1>;
 			enable-active-high;
 		};
@@ -316,6 +346,10 @@
 			avdd_io_edp-supply = <&max77620_gpio7>;
 		};
 
+		i2c@546c0000 {
+			bus-pullup-supply = <&max77620_sd3>;
+			avdd_dsi_csi-supply = <&max77620_sd3>;
+		};
 		vi {
 			avdd_dsi_csi-supply = <&max77620_ldo0>;
 		};
@@ -376,37 +410,6 @@
 			sdmmc3 {
 				nvidia,io-pad-init-voltage = <IO_PAD_VOLTAGE_1_8V>;
 			};
-		};
-	};
-
-	i2c@546c0000 {
-		tca6408_21: tca6408@21 {
-			vcc-supply = <&en_vdd_cam>;
-		};
-	};
-
-	i2c@7000c000 {
-		icm20628@68 {
-			vdd-supply = <&vdd_3v3>;
-			vlogic-supply = <&vdd_3v3>;
-		};
-
-		ak8963@0d {
-			vdd-supply = <&vdd_3v3>;
-			vid-supply = <&vdd_3v3>;
-		};
-
-		bmp280@77 {
-			vddio-supply = <&vdd_3v3>;
-			vdd-supply = <&vdd_3v3>;
-		};
-
-		cm32180@48 {
-			vdd-supply = <&vdd_3v3>;
-		};
-
-		iqs263@44 {
-			vddhi-supply = <&vdd_3v3>;
 		};
 	};
 };

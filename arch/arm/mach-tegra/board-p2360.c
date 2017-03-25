@@ -93,6 +93,12 @@ static void p2360_panel_init(void)
 	bus_register_notifier(&platform_bus_type, &platform_nb);
 }
 
+static struct platform_device *p2360_devices[] __initdata = {
+#if defined(CONFIG_TEGRA_WATCHDOG)
+	&tegra_wdt0_device,
+#endif
+};
+
 static __initdata struct tegra_clk_init_table p2360_fixed_rate_clk_table[] = {
 	{ "gk20a.gbus",	NULL,	600000000,	false},
 	{ NULL,		NULL,	0,		0},
@@ -111,8 +117,8 @@ static void __init tegra_p2360_early_init(void)
 	tegra_init_max_rate(c, 600000000);
 
 	c = tegra_get_clock_by_name("cpu_g");
-	tegra_init_min_rate(c, 1530000000);
-	tegra_init_max_rate(c, 1530000000);
+	tegra_init_min_rate(c, 1524000000);
+	tegra_init_max_rate(c, 1524000000);
 
 	tegra_vcm30_t124_set_fixed_rate(p2360_fixed_rate_clk_table);
 
@@ -120,13 +126,6 @@ static void __init tegra_p2360_early_init(void)
 
 	tegra_soc_device_init("p2360");
 }
-
-/* ina220 is @0x40 on i2c-1 */
-struct i2c_board_info __initdata p2360_ina220_info = {
-	.type = "ina220",
-	.addr = 0x40,
-	.platform_data = NULL,
-};
 
 static void __init tegra_p2360_late_init(void)
 {
@@ -138,11 +137,12 @@ static void __init tegra_p2360_late_init(void)
 	tegra_vcm30_t124_soctherm_init();
 	tegra_vcm30_t124_usb_init();
 
+	platform_add_devices(p2360_devices, ARRAY_SIZE(p2360_devices));
+
 	tegra_vcm30_t124_suspend_init();
 
 	isomgr_init();
 	p2360_panel_init();
-	i2c_register_board_info(1, &p2360_ina220_info, 1);
 }
 
 static void __init tegra_p2360_dt_init(void)
